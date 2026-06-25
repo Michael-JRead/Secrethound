@@ -19,5 +19,7 @@ findings.json
 *.findings.json
 crack*.txt
 hashes.txt
+users.txt
 loot/
 htb/
+engagement/

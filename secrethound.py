@@ -12,8 +12,10 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.report import Report
 from core.ui import UI
+from core import correlate
 from analyzers import (keyword, entropy, patterns, credpairs, encoded, files,
-                       inspect, sqlite_triage, playbook, filters)
+                       inspect, sqlite_triage, playbook, filters, notes, inventory)
+from analyzers.ingest import run as ingest_run, Store, potfile
 
 VERSION = "2.0"
 TEXT_EXT = {".ini", ".conf", ".cnf", ".cfg", ".env", ".yml", ".yaml", ".json", ".xml",
@@ -43,13 +45,23 @@ OPTIONS
   --entropy-low     lower entropy threshold to 3.5 (noisier, catches more)
   --all             show every finding incl. LOW-confidence entropy (no collapse)
   --group dir       group the per-directory dashboard by machine (default on for trees)
-  --json FILE       also write findings to FILE as JSON (for your report)
+  --json FILE       also write findings + attack chains to FILE as JSON
   --hashes FILE     write crack-ready hashes to FILE + print hashcat commands
   --cap N           max findings shown per section (default 40)
   --src             also scan source code (noisy)
   --ascii           ASCII-only output (no box-drawing / unicode)
   --no-color        plain output (for piping / `script` logging)
   -q, --quiet       suppress banner + progress (stderr)
+
+CORRELATION (on by default - all read-only / OSCP-exam-legal)
+  --no-ingest       don't parse other tools' output (nmap/BloodHound/nxc.db/
+                    ldapdomaindump/enum4linux/gobuster/secretsdump dumps)
+  --no-correlate    don't chain findings into the ranked ATTACK PATH
+  --no-notes        don't mine your notes for creds + resume points
+  --no-inventory    don't read /etc/hosts + ~/.ssh for name<->IP resolution
+  --pot FILE        extra hashcat/john potfile (repeatable); ~/.hashcat + ~/.john auto
+  --no-pot          disable cracked-hash cross-reference
+  --users-out FILE  write aggregated usernames for spraying (default users.txt)
 
 SEVERITY
   [!!] CRITICAL  decoded credential, user+pass pair, default-pw hash -> act now
@@ -59,16 +71,21 @@ SEVERITY
   [+]  INFO      interesting file located -> read it
 
 WORKFLOW
-  1. secrethound ./loot --deep --json findings.json --hashes crack.txt
-  2. Act on START HERE, then CRED PAIRS + ENCODED. Decode any base64 hint.
-  3. Confirm a cred:  netexec smb <dc> -u <user> -p <pass> -k
+  1. Point it at your whole engagement dir (loot + scans + notes):
+       secrethound ./engagement --deep --json findings.json --hashes crack.txt
+  2. Read the ATTACK PATH panel - the ranked BEST NEXT ACTION is your move.
+  3. Then START HERE / CRED PAIRS / ENCODED. Decode any base64 hint.
   4. Crack hashes:    hashcat -m <mode> crack.txt rockyou.txt
   5. secrethound --inspect <file>   to read one file in depth.
 
 OSCP NOTE
-  Pure local file analysis. No scanning/exploitation/target traffic = compliant.
-  Suggested commands are manual, exam-legal techniques. Lines marked
-  [LAB-ONLY] (Responder/relay) rely on spoofing and are NOT exam-legal.
+  Pure local file analysis. It reads loot, other tools' OUTPUT files, your notes,
+  your ~/.hashcat|~/.john potfiles, /etc/hosts and ~/.ssh on YOUR Kali box. It
+  never touches a target - no scanning, no connections, no exploitation - so it
+  is OSCP/OSCP+ exam-compliant. Every suggested command is a manual, exam-legal
+  technique, vetted against analyzers/compliance.py. Lines marked [LAB-ONLY]
+  (Responder/relay) rely on spoofing and are NOT exam-legal - the tool never
+  puts them in the ranked ATTACK PATH.
 """
 
 
@@ -123,6 +140,14 @@ def main():
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("-q", "--quiet", action="store_true")
     ap.add_argument("--src", action="store_true", help="also scan source code (noisy)")
+    # v3: ingestion + correlation (all read-only / exam-legal)
+    ap.add_argument("--no-ingest", action="store_true", help="don't parse other tools' output")
+    ap.add_argument("--no-correlate", action="store_true", help="don't run the attack-chain engine")
+    ap.add_argument("--no-notes", action="store_true", help="don't mine notes for creds/resume points")
+    ap.add_argument("--no-inventory", action="store_true", help="don't read /etc/hosts + ~/.ssh for name<->IP")
+    ap.add_argument("--pot", action="append", metavar="FILE", help="extra hashcat/john potfile (repeatable)")
+    ap.add_argument("--no-pot", action="store_true", help="disable potfile cracked-hash cross-ref")
+    ap.add_argument("--users-out", metavar="FILE", default="users.txt", help="write aggregated usernames here")
     args = ap.parse_args()
 
     use_color = not args.no_color
@@ -160,19 +185,26 @@ def main():
     # ── enumerate, skipping self-output + noise ──
     json_abs = os.path.abspath(args.json) if args.json else None
     raw = [root] if os.path.isfile(root) else list(iter_files(root))
-    targets, skipped = [], 0
+    do_ingest = not args.no_ingest
+    targets, ingest_targets, skipped = [], [], 0
     for path in raw:
         ext = os.path.splitext(path)[1].lower()
+        if json_abs and os.path.abspath(path) == json_abs:
+            skipped += 1
+            continue
+        if filters.is_secrethound_output(path):
+            skipped += 1
+            continue
+        # ingest sees ALL files (tool output arrives with arbitrary names/exts)
+        if do_ingest:
+            ingest_targets.append(path)
         if ext in DB_EXT:
             targets.append(path)
             continue
         if not is_text_target(path, scan_src=args.src):
             skipped += 1
             continue
-        if json_abs and os.path.abspath(path) == json_abs:
-            skipped += 1
-            continue
-        if filters.is_noise_file(path) or filters.is_secrethound_output(path):
+        if filters.is_noise_file(path):
             skipped += 1
             continue
         targets.append(path)
@@ -201,7 +233,43 @@ def main():
     if not args.quiet:
         ui.progress_done()
 
-    files.analyze_tree(root if os.path.isdir(root) else (os.path.dirname(root) or "."), report)
+    scan_root = root if os.path.isdir(root) else (os.path.dirname(root) or ".")
+
+    # ── v3: ingest other tools' output, notes, inventory, potfile, correlate ──
+    store = Store()
+    claimed = set()
+    if not args.no_inventory:
+        inventory.load(report, store)          # name<->IP resolver first
+    if do_ingest:
+        if not args.quiet:
+            sys.stderr.write(ui.c("gray", "  correlating loot + tool output …\n"))
+            sys.stderr.flush()
+        claimed = ingest_run(ingest_targets, report, store, args)
+    if not args.no_notes:
+        for p in targets:
+            base = os.path.basename(p).lower()
+            ext = os.path.splitext(p)[1].lower()
+            looks_notes = ext in (".md", ".markdown") or any(
+                k in base for k in ("note", "cred", "loot", "password", "todo", "readme"))
+            if looks_notes and os.path.abspath(p) not in claimed:
+                notes.analyze(p, report, store)
+    if not args.no_pot:
+        potfile.correlate(report, store, args)
+
+    files.analyze_tree(scan_root, report, skip_paths=claimed)
+
+    chains = []
+    if not args.no_correlate:
+        chains = correlate.run(report, store, ui)
+
+    # aggregated users.txt for spray commands
+    users = store.users_txt()
+    if users and args.users_out:
+        try:
+            with open(args.users_out, "w") as fh:
+                fh.write("\n".join(users) + "\n")
+        except OSError:
+            pass
 
     report.set_stats(scanned=total, skipped=skipped,
                      mb=total_bytes / (1024 * 1024), elapsed=time.monotonic() - t0)
@@ -214,24 +282,36 @@ def main():
     if hero:
         print()
         print(hero)
+    ap_panel = report.attack_path(chains)
+    if ap_panel:
+        print()
+        print(ap_panel)
     print(report.render())
 
-    playbook.emit(report, _collect_signals(report), ui)
+    # NEXT STEPS playbook only when the correlator produced nothing (fallback)
+    if not chains:
+        playbook.emit(report, _collect_signals(report), ui)
 
-    # ── crack-ready hashes (blanks already excluded upstream) ──
+    # ── crack-ready hashes (blanks + already-cracked excluded) ──
     if args.hashes and patterns.HASHES:
-        seen = {}
+        cracked = store.cracked
+        seen, n_cracked = {}, 0
         for mode, name, val, fp, ln in patterns.HASHES:
+            if potfile.normalize(val) in cracked:
+                n_cracked += 1
+                continue
             seen.setdefault((mode, name), set()).add(val)
         allh = sorted({v for vs in seen.values() for v in vs})
-        with open(args.hashes, "w") as fh:
-            fh.write("\n".join(allh) + "\n")
-        print(ui.c("bgreen", f"\n[+] crack-ready hashes -> {args.hashes}"))
-        for (mode, name), vs in sorted(seen.items()):
-            if not mode or mode == "0":
-                print(ui.c("yellow", f"    {name} (x{len(vs)}):  hashid one first, then hashcat -m <mode>"))
-            else:
-                print(ui.c("yellow", f"    {name} (x{len(vs)}):  hashcat -m {mode} {args.hashes} rockyou.txt"))
+        if allh:
+            with open(args.hashes, "w") as fh:
+                fh.write("\n".join(allh) + "\n")
+            print(ui.c("bgreen", f"\n[+] crack-ready hashes -> {args.hashes}" +
+                       (f"  ({n_cracked} already cracked, omitted)" if n_cracked else "")))
+            for (mode, name), vs in sorted(seen.items()):
+                if not mode or mode == "0":
+                    print(ui.c("yellow", f"    {name} (x{len(vs)}):  hashid one first, then hashcat -m <mode>"))
+                else:
+                    print(ui.c("yellow", f"    {name} (x{len(vs)}):  hashcat -m {mode} {args.hashes} rockyou.txt"))
 
     a = ui.arrow2
     print()
@@ -239,8 +319,8 @@ def main():
     print(ui.rule("empty != clean: also read configs by hand for unlabeled secrets", color="cyan"))
 
     if args.json:
-        report.to_json(args.json)
-        print(ui.c("dim", f"\n[+] findings (with stats) written to {args.json}\n"))
+        report.to_json(args.json, chains=chains)
+        print(ui.c("dim", f"\n[+] findings + chains + stats written to {args.json}\n"))
     return 0
 
 

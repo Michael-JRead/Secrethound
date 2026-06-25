@@ -5,7 +5,9 @@ USER_COL = re.compile(r'(?i)(user|login|name|email|account|uid)')
 
 def analyze_db(path, report, max_rows=3):
     try:
-        con = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True)
+        # immutable=1 so we NEVER create -wal/-shm sidecars on the operator's
+        # live DB (e.g. ~/.nxc/.../smb.db) - read-only must mean read-only.
+        con = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro&immutable=1", uri=True)
         con.text_factory = lambda b: b.decode("utf-8", "replace")
         cur = con.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table';")

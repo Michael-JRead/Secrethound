@@ -15,12 +15,12 @@ SEV_COLOR = {"CRITICAL": "bred", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan
 SEV_TAG = {"CRITICAL": "[!!]", "HIGH": "[!]", "MEDIUM": "[~]", "LOW": "[-]", "INFO": "[+]"}
 
 # category display order (max-severity categories first)
-CAT_ORDER = ["CRED PAIRS", "ENCODED/DECODED", "SQLITE", "GPP cpassword",
-             "ASSIGNED SECRETS", "PATTERNS", "PASSWORD HASHES", "PRIVATE KEYS",
-             "INTERESTING FILES", "HIGH ENTROPY"]
+CAT_ORDER = ["ATTACK CHAINS", "CRED PAIRS", "ENCODED/DECODED", "SQLITE",
+             "GPP cpassword", "ASSIGNED SECRETS", "PATTERNS", "PASSWORD HASHES",
+             "PRIVATE KEYS", "RECON", "INTERESTING FILES", "HIGH ENTROPY"]
 # categories scanned for the START HERE hero (highest-value first)
-HERO_CATS = ["CRED PAIRS", "ENCODED/DECODED", "SQLITE", "GPP cpassword",
-             "ASSIGNED SECRETS", "PASSWORD HASHES", "PRIVATE KEYS"]
+HERO_CATS = ["ATTACK CHAINS", "CRED PAIRS", "ENCODED/DECODED", "SQLITE",
+             "GPP cpassword", "ASSIGNED SECRETS", "PASSWORD HASHES", "PRIVATE KEYS"]
 _ENTROPY_PREVIEW = 12     # LOW entropy rows shown before collapsing
 
 
@@ -166,6 +166,31 @@ class Report:
         title = "START HERE" + (f"  {sep}  {len(crits)} critical" if crits else f"  {sep}  top leads")
         return self.ui.box(rows, title=title, color="bred")
 
+    # ── ATTACK PATH panel (ranked next actions from the correlator) ──
+    def attack_path(self, chains, top=6):
+        if not chains:
+            return ""
+        rows = []
+        best = chains[0]
+        rows.append(self._c("bred", "BEST NEXT ACTION") +
+                    self._c("white", f"   score {best.score}  ({best.label})"))
+        for cmd in best.commands:
+            rows.append("  " + self._c("bcyan", self.ui.arrow2 + " " +
+                        self.ui.truncate_end(cmd, self.ui.cols - 8)))
+        for ch in chains[1:top]:
+            tag = self._c("yellow", "[LAB-ONLY] ") if ch.lab_only else ""
+            rows.append("")
+            rows.append(tag + self._c("white", f"then  score {ch.score}  ") +
+                        self._c("gray", ch.summary[:self.ui.cols - 24]))
+            rows.append("  " + self._c("cyan", self.ui.truncate_end(ch.commands[0], self.ui.cols - 8)))
+        if len(chains) > top:
+            rows.append("")
+            rows.append(self._c("dim", f"  {self.ui.ell} +{len(chains) - top} more chains (see ATTACK CHAINS section / --json)"))
+        rows.append("")
+        rows.append(self._c("dim", "  these are SUGGESTED manual commands - you run them; the tool never does"))
+        sep = "·" if not self.ui.ascii else "-"
+        return self.ui.box(rows, title=f"ATTACK PATH  {sep}  {len(chains)} chains ranked", color="bred")
+
     # ── findings by category ──
     def render(self):
         findings = self._dedup()
@@ -201,6 +226,14 @@ class Report:
         return "\n".join(out)
 
     # ── JSON export ──
-    def to_json(self, path):
+    def to_json(self, path, chains=None):
+        out = {"stats": self.stats, "findings": self._dedup()}
+        if chains:
+            out["chains"] = [{
+                "rule": c.rule, "label": c.label, "summary": c.summary,
+                "score": c.score, "criticality": c.crit, "confidence": c.conf,
+                "proximity": c.prox, "readiness": c.ready, "lab_only": c.lab_only,
+                "commands": c.commands, "source": c.src, "line": c.line,
+            } for c in chains]
         with open(path, "w") as fh:
-            json.dump({"stats": self.stats, "findings": self._dedup()}, fh, indent=2)
+            json.dump(out, fh, indent=2)
