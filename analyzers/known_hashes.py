@@ -61,6 +61,35 @@ KNOWN = {
     "074606e7aa0a9ae3efbc915742d74231": 'wapt',
     "c17bc52eae474b468a62d43a799ec88db182e047": 'wapt',
     "33ad36482fe0dde7efdc60aba8426eaceaacf92766affe334b9003b4e4e54eb1": 'wapt',
+
+    # ---- NTLM (MD4 of UTF-16LE password) - the AD default-cred set ---------
+    # All verified by computing md4(pw.encode('utf-16le')); a captured NT hash
+    # matching one of these means "log in directly, no cracking".
+    "8846f7eaee8fb117ad06bdd830b7586c": 'password',
+    "64f12cddaa88057e06a81b54e73b949b": 'Password1',
+    "58a478135a93ac3bf058a5ea0e8fdb71": 'Password123',
+    "e19ccf75ee54e06b06a5907af13cef42": 'P@ssw0rd',
+    "217e50203a5aba59cefa863c724bf61b": 'P@ssw0rd!',
+    "cf3a5525ee9414229e66279623ed5c58": 'Welcome1',
+    "316c5ae8a7b5dfce4a5604d17d9e976e": 'Welcome123',
+    "209c6174da490caeb422f3fa5a7ae634": 'admin',
+    "a4141712f19e9dd5adf16919bb38a95c": 'administrator',
+    "329153f560eb329c0e1deea55e88a1e9": 'root',
+    "afc44ee7351d61d00698796da06b1ebf": 'toor',
+    "32ed87bdb5fdc5e9cba88547376818d4": '123456',
+    "c22b315c040ae6e0efee3518d830362b": '123456789',
+    "259745cb123a52aa2e693aaacca2db52": '12345678',
+    "2d20d252a479f485cdf5e171d93985bf": 'qwerty',
+    "becedb42ec3c5c7f965255338be4453c": 'letmein',
+    "6597d9fe8469e21d840e2cbff8d43c8b": 'changeme',
+    "878d8014606cda29677a44efa1353fc7": 'secret',
+    "4ea072db1483a7df8643772b6b25cb43": 'Summer2023!',
+    "72f0eefcc213ea8f350773b831cf2c9c": 'Summer2024!',
+    "d431b7e9ca9b61d8b2b5725afb8258c5": 'Spring2024!',
+    "7209d1e2b55d242551d2e7aba8604e47": 'Winter2024!',
+    "a87f3a337d73085c45f9416be5787d86": 'Passw0rd',
+    "b9f917853e3dbf6e6831ecce60725930": 'passw0rd',
+    "8b3b54b7bf863b799531fa3628585116": 'Company123',
 }
 
 

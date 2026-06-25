@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# editor / backup
+*.bak
+*.bak[0-9]
+*.old
+*.orig
+*.swp
+*~
+
+# secrethound runtime output (never commit loot or findings)
+findings.json
+*.findings.json
+crack*.txt
+hashes.txt
+loot/
+htb/

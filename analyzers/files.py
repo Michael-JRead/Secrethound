@@ -1,47 +1,107 @@
-"""files.py - interesting files BY NAME (Linux + Windows) with next-step hints."""
-import os, re
+"""files.py - interesting files BY NAME (Linux + Windows + AD) with next-step
+hints. Coverage is modelled on linPEAS sensitive_files.yaml. Noise files
+(unzipped office docs, nmap XML, tool .bak output) are skipped via filters.
+"""
+import os
+import re
+from analyzers import filters
+
 INTERESTING = [
+    # ── SSH / keys ─────────────────────────────────────────────────────────
     (re.compile(r'(?i)^id_(rsa|dsa|ecdsa|ed25519)$'), "SSH private key → chmod 600; ssh -i <f> user@ip", "HIGH"),
-    (re.compile(r'(?i)^authorized_keys$'), "SSH authorized_keys → who can log in", "MEDIUM"),
+    (re.compile(r'(?i)^authorized_keys$'), "SSH authorized_keys → who can log in (check from=/command=)", "MEDIUM"),
+    (re.compile(r'(?i)^known_hosts$'), "SSH known_hosts → lateral-movement target list", "INFO"),
     (re.compile(r'(?i)\.ppk$'), "PuTTY key → puttygen <f> -O private-openssh -o key", "HIGH"),
-    (re.compile(r'(?i)\.(pem|key|pfx|p12)$'), "key/cert → openssl rsa -in <f> -noout", "HIGH"),
+    (re.compile(r'(?i)\.(pem|key|pfx|p12)$'), "key/cert → openssl rsa -in <f> -noout  (.pfx: certipy auth -pfx <f>)", "HIGH"),
+    (re.compile(r'(?i)\.(jks|keystore)$|^cacerts$'), "Java keystore → keytool -list; keystore2john → hashcat 15500", "MEDIUM"),
+    (re.compile(r'(?i)\.(gpg|asc|pgp)$|^secring\.gpg$|^pubring\.kbx$'), "GPG keyring → gpg --import; gpg2john secret.asc", "HIGH"),
+    # ── password stores ────────────────────────────────────────────────────
     (re.compile(r'(?i)\.(kdbx|kdb)$'), "KeePass DB → keepass2john | hashcat -m 13400", "HIGH"),
-    (re.compile(r'(?i)\.(keytab)$'), "Kerberos keytab → klist -k <f>", "HIGH"),
-    (re.compile(r'(?i)^shadow$'), "Linux /etc/shadow → unshadow + hashcat -m 1800", "HIGH"),
+    (re.compile(r'(?i)^keepass\.config.*\.xml$'), "KeePass config → keyfile/trigger path", "MEDIUM"),
+    (re.compile(r'(?i)\.psafe3$'), "Password Safe DB → pwsafe2john | hashcat -m 5200", "HIGH"),
+    # ── Active Directory / Kerberos (OSCP+ core) ───────────────────────────
+    (re.compile(r'(?i)\.keytab$'), "Kerberos keytab → klist -k <f>; getTGT.py -keytab", "HIGH"),
+    (re.compile(r'(?i)\.kirbi$'), "Kerberos ticket → ticketConverter.py <f> t.ccache; export KRB5CCNAME", "HIGH"),
+    (re.compile(r'(?i)\.ccache$|^krb5cc_'), "Kerberos ccache → export KRB5CCNAME=<f>; nxc smb <dc> --use-kcache", "HIGH"),
+    (re.compile(r'(?i)^secrets\.(ldb|tdb)$'), "Samba/SSSD secrets → tdbdump (machine acct creds)", "HIGH"),
+    (re.compile(r'(?i)^krb5\.keytab$'), "service keytab → klist -k; extract keys", "HIGH"),
+    (re.compile(r'(?i)bloodhound.*\.(json|zip)$'), "BloodHound data → import; review owned/paths", "INFO"),
+    # ── Linux system creds ────────────────────────────────────────────────
+    (re.compile(r'(?i)^shadow$|^shadow-$|^shadow~$|^gshadow$'), "Linux shadow → unshadow + hashcat -m 1800/500/3200", "HIGH"),
+    (re.compile(r'(?i)^passwd$|^master\.passwd$'), "Linux passwd → check field 2 for inline hashes; writable = privesc", "MEDIUM"),
     (re.compile(r'(?i)^sudoers$'), "sudoers → check NOPASSWD / GTFOBins", "HIGH"),
-    (re.compile(r'(?i)^\.bash_history$|_history$'), "shell history → typed passwords", "MEDIUM"),
+    (re.compile(r'(?i)^opasswd$'), "PAM opasswd → old password hashes", "MEDIUM"),
+    (re.compile(r'(?i)_history$|^\.(bash|zsh|sh|mysql|psql|rediscli|python|sqlite)_history$'), "shell/db history → typed passwords (grep -p, IDENTIFIED BY)", "MEDIUM"),
+    (re.compile(r'(?i)^\.viminfo$|^\.lesshst$'), "editor history → recently edited secrets", "INFO"),
     (re.compile(r'(?i)^\.(netrc|pgpass)$'), "Linux cred file → plaintext host:user:pass", "HIGH"),
-    (re.compile(r'(?i)^\.git-credentials$'), "git creds → proto://user:pass@host", "HIGH"),
-    (re.compile(r'(?i)^wp-config\.php$'), "WordPress config → DB creds + keys", "HIGH"),
-    (re.compile(r'(?i)^(config|configuration|settings|database)\.(php|inc|yml|yaml)$'), "app config → DB/service creds", "HIGH"),
-    (re.compile(r'(?i)^\.env$|^\.env\.'), "dotenv → APP_KEY/DB/API keys", "HIGH"),
-    (re.compile(r'(?i)^tomcat-users\.xml$'), "Tomcat users → manager creds (WAR deploy)", "HIGH"),
-    (re.compile(r'(?i)\.ovpn$'), "OpenVPN → embedded keys/creds", "MEDIUM"),
+    (re.compile(r'(?i)^\.(npmrc|pypirc|s3cfg|boto|git-credentials)$'), "tool cred file → _authToken / user:pass / keys", "HIGH"),
+    (re.compile(r'(?i)^\.(msmtprc|fetchmailrc|netrc)$'), "mail/transfer creds → plaintext user:pass", "HIGH"),
+    (re.compile(r'(?i)^pg_hba\.conf$|^postgresql\.conf$|^\.mylogin\.cnf$|^debian\.cnf$|^my\.cnf$'), "DB auth config → bind creds / debian-sys-maint pw", "HIGH"),
+    (re.compile(r'(?i)^ipsec\.secrets$|^psk\.txt$'), "IPSec PSK → plaintext pre-shared key", "HIGH"),
+    (re.compile(r'(?i)^sssd\.conf$|^ldap\.conf$|^\.ldaprc$|^smb\.conf$|^smbpasswd$|^nsswitch\.conf$'), "LDAP/Samba config → bindpw / ldap_default_authtok", "HIGH"),
+    (re.compile(r'(?i)^wpa_supplicant.*\.conf$|\.nmconnection$'), "WiFi config → psk= pre-shared key", "MEDIUM"),
+    (re.compile(r'(?i)^\.google_authenticator$'), "TOTP seed → 2FA secret", "MEDIUM"),
+    # ── cloud / devops ─────────────────────────────────────────────────────
     (re.compile(r'(?i)^credentials$'), "cloud creds → aws sts get-caller-identity", "HIGH"),
-    (re.compile(r'(?i)^(crontab)$|^cron\.'), "cron → writable root jobs = privesc", "MEDIUM"),
-    (re.compile(r'(?i)^web\.config$|^app\.config$|^applicationhost\.config$'), "Windows config → connectionStrings", "HIGH"),
+    (re.compile(r'(?i)^kubeconfig$|^admin\.conf$|^kubelet\.conf$'), "kubeconfig → kubectl --kubeconfig <f> get secrets", "HIGH"),
+    (re.compile(r'(?i)\.tfstate(\.backup)?$|^terraform\.tfvars$'), "Terraform state/vars → plaintext secrets", "HIGH"),
+    (re.compile(r'(?i)^credentials\.xml$|^hudson\.util\.secret$|^master\.key$'), "Jenkins creds → decrypt with master.key + hudson.util.Secret", "HIGH"),
+    (re.compile(r'(?i)^vault.*\.ya?ml$|^group_vars$|^host_vars$'), "Ansible Vault → ansible-vault view; ansible2john → hashcat 16900", "HIGH"),
+    (re.compile(r'(?i)^azureProfile\.json$|^accessTokens\.json$|^\.roadtools_auth$|^msal_token_cache\.json$'), "Azure tokens → roadrecon / az account", "HIGH"),
+    (re.compile(r'(?i)^legacy_credentials.*|^adc\.json$|^application_default_credentials\.json$'), "GCP creds → gcloud auth", "HIGH"),
+    (re.compile(r'(?i)^\.env$|^\.env\.|^\.envrc$|^\.flaskenv$'), "dotenv → APP_KEY/DB/API keys", "HIGH"),
+    # ── browser saved creds ────────────────────────────────────────────────
+    (re.compile(r'(?i)^logins\.json$|^key4\.db$|^cookies\.sqlite$'), "Firefox creds → firefox_decrypt.py", "HIGH"),
+    (re.compile(r'(?i)^login data$|^cookies$'), "Chrome creds → DPAPI decrypt", "HIGH"),
+    # ── web app configs ────────────────────────────────────────────────────
+    (re.compile(r'(?i)^wp-config\.php$'), "WordPress config → DB creds + keys", "HIGH"),
+    (re.compile(r'(?i)^\.htpasswd$'), "Apache basic-auth → hashcat -m 1600 (apr1)", "HIGH"),
+    (re.compile(r'(?i)^(config|configuration|settings|database|db|storage)\.(php|inc|yml|yaml)$'), "app config → DB/service creds", "HIGH"),
+    (re.compile(r'(?i)^tomcat-users\.xml$'), "Tomcat users → manager creds (WAR deploy)", "HIGH"),
+    (re.compile(r'(?i)\.ovpn$'), "OpenVPN → auth-user-pass / embedded keys", "MEDIUM"),
+    (re.compile(r'(?i)^(crontab)$|^cron\.|^crontab\.db$'), "cron → writable root jobs / passwords on cmdline", "MEDIUM"),
+    # ── Windows ────────────────────────────────────────────────────────────
+    (re.compile(r'(?i)^web\.config$|^app\.config$|^applicationhost\.config$|^machine\.config$'), "Windows config → connectionStrings / machineKey", "HIGH"),
     (re.compile(r'(?i)unattend.*\.(xml|txt)$|sysprep.*\.xml$|autounattend'), "unattend → base64 local-admin pw", "HIGH"),
+    (re.compile(r'(?i)^cloudbase-init.*\.conf$'), "cloudbase-init → Windows admin pw", "HIGH"),
     (re.compile(r'(?i)^groups\.xml$|^scheduledtasks\.xml$|^services\.xml$|^datasources\.xml$|^printers\.xml$|^drives\.xml$'), "GPP file → cpassword; gpp-decrypt", "HIGH"),
+    (re.compile(r'(?i)^sitelist\.xml$'), "McAfee SiteList → encrypted domain creds (fixed 3DES key)", "HIGH"),
     (re.compile(r'(?i)^(sam|system|security)$|^ntds\.dit$'), "Windows hive → impacket-secretsdump", "HIGH"),
     (re.compile(r'(?i)consolehost_history\.txt$'), "PowerShell history → typed creds", "HIGH"),
-    (re.compile(r'(?i)\.(rdp|rdg)$|^rdcman\.settings$'), "RDP/RDCMan → saved passwords", "MEDIUM"),
+    (re.compile(r'(?i)\.(rdp|rdg)$|^rdcman\.settings$'), "RDP/RDCMan → saved passwords (DPAPI)", "MEDIUM"),
     (re.compile(r'(?i)^winscp\.ini$'), "WinSCP → weakly encrypted sessions", "HIGH"),
     (re.compile(r'(?i)^(recentservers|sitemanager)\.xml$'), "FileZilla → base64 stored passwords", "HIGH"),
+    (re.compile(r'(?i)^ultravnc\.ini$|^vnc.*\.(ini|txt|reg)$'), "VNC → reversible DES password (vncpwd)", "HIGH"),
     (re.compile(r'(?i)\.(mdb|accdb)$'), "Access DB → mdb-tools", "MEDIUM"),
-    (re.compile(r'(?i)\.(reg)$'), "registry export → grep AutoAdminLogon/password", "MEDIUM"),
+    (re.compile(r'(?i)\.(reg)$'), "registry export → grep AutoAdminLogon/DefaultPassword", "MEDIUM"),
+    # ── generic / catch-all (lowest priority) ──────────────────────────────
     (re.compile(r'(?i)\.(ini|conf|cnf|cfg|properties|toml)$'), "config file → read for creds", "INFO"),
     (re.compile(r'(?i)\.(yml|yaml|json|xml)$'), "structured config → read for creds", "INFO"),
     (re.compile(r'(?i)\.(bak|old|orig|save|swp|~)$'), "backup → creds the live file lost", "MEDIUM"),
-    (re.compile(r'(?i)\.(sql|dump)$'), "DB dump → grep INSERT INTO users", "MEDIUM"),
+    (re.compile(r'(?i)\.(sql|dump)$'), "DB dump → grep INSERT INTO users / IDENTIFIED BY", "MEDIUM"),
 ]
-EXCLUDE_DIR = re.compile(r'/(site-packages|node_modules|vendor|dist-info|__pycache__|templates|languages|locale)/')
-def analyze_tree(root, report):
+
+# tool-generated backups/output that look interesting but never are
+_TOOL_NOISE = re.compile(r'(?i)(dacledit|certipy|bloodhound|ldapdomaindump)[-_]?.*\.(bak|json|zip)$'
+                         r'|.*-\d{8}-\d{6}\.bak$')
+
+
+def analyze_tree(root, report, skip_paths=None):
+    skip_paths = skip_paths or set()
     for dirpath, dirnames, filenames in os.walk(root):
-        if EXCLUDE_DIR.search(dirpath + "/"): continue
-        if ".git" in dirnames:
-            report.add("MEDIUM", "INTERESTING FILES", os.path.join(dirpath, ".git"), None, "git repo → git log -p | grep -i pass")
+        # prune noise / payload / wordlist directories in place
+        dirnames[:] = [d for d in dirnames if not filters.should_skip_dir(d, os.path.join(dirpath, d))]
+        # flag git repos (but don't descend - .git is pruned above)
+        if os.path.isdir(os.path.join(dirpath, ".git")):
+            report.add("INFO", "INTERESTING FILES", os.path.join(dirpath, ".git"), None,
+                       "git repo → git log -p | grep -iE 'pass|secret|key'")
         for name in filenames:
             full = os.path.join(dirpath, name)
+            if full in skip_paths or filters.is_noise_file(full, name) or _TOOL_NOISE.search(name):
+                continue
+            if name.lower().endswith(".json") and filters.is_secrethound_output(full):
+                continue
             for rx, label, sev in INTERESTING:
                 if rx.search(name):
-                    report.add(sev, "INTERESTING FILES", full, None, label); break
+                    report.add(sev, "INTERESTING FILES", full, None, label)
+                    break
