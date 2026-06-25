@@ -9,6 +9,10 @@ from analyzers.ingest.evidence import Evidence
 
 _GOBUSTER = re.compile(r'^(/\S+)\s+\(Status:\s*(\d{3})\)')
 _DIRB = re.compile(r'\+?\s*(https?://\S+)\s+\(CODE:(\d{3})')
+# feroxbuster default TEXT: [METHOD] STATUS  Nl  Nw  Nc  URL
+_FEROX_TXT = re.compile(r'^(?:[A-Z]+\s+)?(\d{3})\s+\d+l\s+\d+w\s+\d+c\s+(\S+)')
+# ffuf default TEXT:  FUZZVALUE    [Status: 200, Size: 4934, Words: 637, Lines: 120]
+_FFUF_TXT = re.compile(r'^(\S+)\s+\[Status:\s*(\d{3}),\s*Size:')
 _HOT = re.compile(r'(?i)(/\.git|/\.env|/\.svn|/admin|/login|/wp-admin|/phpmyadmin|'
                   r'/manager|/backup|/config|\.bak$|\.sql$|\.old$|\.zip$|/server-status|/actuator)')
 
@@ -25,6 +29,10 @@ def detect(path, head):
         return True            # feroxbuster jsonl
     if '"results":' in h and '"input":' in h:
         return True            # ffuf json
+    if re.search(r'^(?:[A-Z]+\s+)?\d{3}\s+\d+l\s+\d+w\s+\d+c\s', h, re.M):
+        return True            # feroxbuster text
+    if "[Status:" in h and "Size:" in h and "Words:" in h:
+        return True            # ffuf text
     return False
 
 
@@ -74,5 +82,19 @@ def parse(path, store, report):
         m = _GOBUSTER.match(line) or _DIRB.search(line)
         if m:
             _flag(store, report, m.group(1), m.group(2), path)
+            n += 1
+            continue
+        # feroxbuster / ffuf default text formats
+        mf = _FEROX_TXT.match(line)
+        if mf:
+            _flag(store, report, mf.group(2), mf.group(1), path)
+            n += 1
+            continue
+        mu = _FFUF_TXT.match(line)
+        if mu and mu.group(1).lower() not in ("status", ":::"):
+            val = mu.group(1)
+            if not val.startswith(("http", "/")):
+                val = "/" + val        # bare fuzz word -> path, so _HOT can match
+            _flag(store, report, val, mu.group(2), path)
             n += 1
     return n
