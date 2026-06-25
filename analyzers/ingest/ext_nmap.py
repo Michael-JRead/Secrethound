@@ -74,11 +74,12 @@ def _emit(store, report, ip, names, ports, path=""):
                            source=path, meta={"product": product}))
         hint = SERVICE_MAP.get(port, (svc, ""))[1].replace("<ip>", host or "<ip>")
         sev = "MEDIUM" if port in (445, 5985, 1433, 88, 22, 3306, 5432) else "INFO"
-        report.add(sev, "RECON", host or "?", None,
-                   f"open {port}/{svc}" + (f" {product}" if product else ""),
+        report.add(sev, "RECON", path or host or "?", None,
+                   f"{host} open {port}/{svc}" + (f" {product}" if product else ""),
                    hint)
     if is_dc:
-        report.add("INFO", "RECON", host or "?", None, f"likely Domain Controller ({host})")
+        report.add("INFO", "RECON", path or host or "?", None,
+                   f"likely Domain Controller ({host})")
 
 
 def _parse_xml(path, store, report):

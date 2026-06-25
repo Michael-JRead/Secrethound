@@ -33,6 +33,8 @@ def analyze(path, report):
                     s = _printable(dec)
                     if s and 3 <= len(s) <= 80:
                         sev = "CRITICAL" if SECRET_HINT.search(s) else "MEDIUM"
-                        report.add(sev, "ENCODED/DECODED", path, lineno, f"base64 '{tok[:30]}...' → '{s}'")
+                        arr = getattr(report.ui, "arrow2", "->")
+                        report.add(sev, "ENCODED/DECODED", path, lineno,
+                                   f"base64 '{tok[:30]}...' {arr} '{s}'")
     except Exception:
         pass

@@ -60,12 +60,18 @@ class UI:
             self.ell = "..."
             self.arrow = "->"
             self.arrow2 = ">"
+            self.pip = ("#", ".")          # scoreboard stage ribbon (full, empty)
+            self.g_dc = "*"                # domain-controller marker
+            self.g_own = ("*", "o", ".")   # owned / partial / none
         else:
             self.box_chars = dict(tl="╔", tr="╗", bl="╚", br="╝", h="═", v="║", hh="═")
             self.bar = ("█", "░")
             self.ell = "…"
             self.arrow = "↳"
             self.arrow2 = "→"
+            self.pip = ("▰", "▱")          # U+25B0/25B1 - fixed-width, widely supported
+            self.g_dc = "★"                # U+2605
+            self.g_own = ("◆", "◇", "·")   # U+25C6 / U+25C7 / U+00B7
 
     # ── colour ──
     def c(self, name, text):
@@ -115,6 +121,43 @@ class UI:
             return s
         el = self.ell
         return s[: max(1, maxlen - len(el))] + el
+
+    # decorative glyphs the tool injects into detail/hint text; transliterated
+    # to ASCII when --ascii (or a non-UTF8 locale) is in effect.
+    _ASCII_MAP = {"→": "->", "↳": ">", "⇒": "=>", "↔": "<->", "•": "*", "·": ".",
+                  "…": "...", "★": "*", "◆": "*", "◇": "o", "▰": "#", "▱": ".",
+                  "×": "x", "“": '"', "”": '"', "’": "'", "—": "-", "–": "-"}
+
+    def ascii_safe(self, s):
+        if not self.ascii or not s:
+            return s
+        for k, v in self._ASCII_MAP.items():
+            if k in s:
+                s = s.replace(k, v)
+        return s
+
+    def cell(self, text, width, color=None, align="<"):
+        """fixed-width column cell: truncate/pad to the VISIBLE width FIRST, then
+        colour - so colour escape codes never corrupt column alignment."""
+        t = str(text)
+        if self.visible_len(t) > width:
+            t = self.truncate_end(t, width)
+        pad = " " * max(0, width - self.visible_len(t))
+        body = (t + pad) if align == "<" else (pad + t)
+        return self.c(color, body) if color else body
+
+    def ribbon(self, idx, total, color="green", at_color=None):
+        """stage progress pips: filled up to and including idx, empty after."""
+        full, empty = self.pip
+        out = []
+        for i in range(total):
+            if i < idx:
+                out.append(self.c(color, full))
+            elif i == idx:
+                out.append(self.c(at_color or color, full))
+            else:
+                out.append(self.c("gray", empty))
+        return "".join(out)
 
     # ── rules / headers ──
     def rule(self, label="", color="blue", ch=None):

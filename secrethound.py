@@ -242,7 +242,7 @@ def main():
         inventory.load(report, store)          # name<->IP resolver first
     if do_ingest:
         if not args.quiet:
-            sys.stderr.write(ui.c("gray", "  correlating loot + tool output …\n"))
+            sys.stderr.write(ui.c("gray", f"  correlating loot + tool output {ui.ell}\n"))
             sys.stderr.flush()
         claimed = ingest_run(ingest_targets, report, store, args)
     if not args.no_notes:
@@ -276,6 +276,10 @@ def main():
 
     # ── output ──
     print(report.dashboard())
+    board = report.scoreboard(chains, store)
+    if board:
+        print()
+        print(board)
     print()
     print(ui.legend())
     hero = report.hero()
