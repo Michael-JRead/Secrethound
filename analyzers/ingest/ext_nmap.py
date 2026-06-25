@@ -57,7 +57,7 @@ def detect(path, head):
             or head.startswith("# Nmap") or "#masscan" in head[:80])
 
 
-def _emit(store, report, ip, names, ports):
+def _emit(store, report, ip, names, ports, path=""):
     if not ip and names:
         ip = ""
     if ip or names:
@@ -67,11 +67,11 @@ def _emit(store, report, ip, names, ports):
     is_dc = len(openports & _DC_PORTS) >= 2 and 445 in openports
     if host:
         store.add(Evidence(kind="host", host=host, fact="dc" if is_dc else "",
-                           meta={"names": names}))
+                           source=path, meta={"names": names}))
     for port, name, product in ports:
         svc = _svc(port, name)
         store.add(Evidence(kind="service", host=host, port=port, service=svc,
-                           meta={"product": product}))
+                           source=path, meta={"product": product}))
         hint = SERVICE_MAP.get(port, (svc, ""))[1].replace("<ip>", host or "<ip>")
         sev = "MEDIUM" if port in (445, 5985, 1433, 88, 22, 3306, 5432) else "INFO"
         report.add(sev, "RECON", host or "?", None,
@@ -110,7 +110,7 @@ def _parse_xml(path, store, report):
                 svc.get("version") if svc is not None else ""])).strip()
             ports.append((int(p.get("portid")), name, product))
         if ports:
-            _emit(store, report, ip, names, ports)
+            _emit(store, report, ip, names, ports, path)
             n += len(ports)
     return n
 
@@ -134,7 +134,7 @@ def _parse_gnmap(path, store, report):
                     if len(f) >= 5 and f[1] == "open":
                         ports.append((int(f[0]), f[4], (f[6] if len(f) > 6 else "").strip()))
                 if ports:
-                    _emit(store, report, ip, names, ports)
+                    _emit(store, report, ip, names, ports, path)
                     n += len(ports)
     except OSError:
         return 0

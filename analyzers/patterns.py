@@ -8,6 +8,7 @@ flood the report. Blank/empty AD hashes are recognised and never sent to crack.
 import re
 from analyzers import known_hashes
 from analyzers import filters
+from analyzers import credline
 
 # ── crack-ready hash collection (mode, name, value, file, line) ─────────────
 HASHES = []
@@ -94,6 +95,23 @@ def analyze(path, report):
     try:
         with open(path, "r", errors="ignore") as f:
             for lineno, line in enumerate(f, 1):
+                # pwdump row -> bind username to NT hash (and skip generic match
+                # so the same hash isn't ALSO reported unbound). Detail string is
+                # identical to ext_secretsdump so _dedup() collapses the overlap.
+                pw = credline.is_pwdump_row(line)
+                if pw:
+                    user, nt, _dom = pw
+                    known = known_hashes.lookup(nt)
+                    if known is not None:
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"{user} NT=DEFAULT '{known}' ({nt[:12]}...)",
+                                   f"log in directly: netexec smb <DC-IP> -u '{user}' -p '{known}'")
+                    else:
+                        report.add("HIGH", "PASSWORD HASHES", path, lineno,
+                                   f"NTLM (NT) {user}: {nt}",
+                                   f"PtH: netexec smb <DC-IP> -u '{user}' -H {nt}  |  crack: hashcat -m 1000 <nt> rockyou.txt")
+                        HASHES.append(("1000", "NTLM", nt, path, lineno))
+                    continue
                 spans = []   # (start, end) of every match already taken on this line
                 for name, sev, rx, mode, gi in PATTERNS:
                     m = rx.search(line)

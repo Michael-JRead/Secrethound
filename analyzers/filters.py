@@ -348,6 +348,25 @@ def is_noise_file(path, name=""):
     return False
 
 
+_TEXTCHARS_B = bytes(range(32, 127)) + b"\t\n\r\f\b"
+
+
+def is_binary_ish(path, chunk=8192):
+    """skip control-char-heavy files: binaries, and 'strings dumps' / prior tool
+    output (the htb run re-ingested its own test.txt full of \\x0e\\x0f garbage)."""
+    try:
+        with open(path, "rb") as fh:
+            block = fh.read(chunk)
+    except OSError:
+        return True
+    if not block:
+        return False
+    if b"\x00" in block:
+        return True
+    nontext = block.translate(None, _TEXTCHARS_B)
+    return len(nontext) / len(block) > 0.10
+
+
 def is_secrethound_output(path):
     """Detect our own JSON export so a re-scan doesn't ingest its own findings.
     Cheap structural sniff of the first ~2KB."""

@@ -71,9 +71,11 @@ class Report:
         loc = self._rel(f["file"]) + (f":{f['line']}" if f["line"] else "")
         return self.ui.truncate_mid(loc, width)
 
-    def _counts(self):
+    def _counts(self, exclude_cats=()):
         counts = {}
         for f in self._dedup():
+            if f["category"] in exclude_cats:
+                continue
             counts[f["severity"]] = counts.get(f["severity"], 0) + 1
         return counts
 
@@ -88,7 +90,8 @@ class Report:
 
     # ── results dashboard panel ──
     def dashboard(self):
-        counts = self._counts()
+        counts = self._counts(exclude_cats=("ATTACK CHAINS",))
+        n_chains = sum(1 for f in self._dedup() if f["category"] == "ATTACK CHAINS")
         total = sum(counts.values())
         rows = []
         peak = max([counts.get(s, 0) for s in SEV_RANK] + [1])
@@ -124,6 +127,8 @@ class Report:
                 rows.append(f"  {self.ui.c('cyan', disp)}{pad}{seg}")
         sep = "·" if not self.ui.ascii else "-"
         title = f"RESULTS  {sep}  {total} findings"
+        if n_chains:
+            title += f"  {sep}  {n_chains} attack chains"
         return self.ui.box(rows, title=title, color="bgreen")
 
     def _machine_counts(self):

@@ -204,12 +204,13 @@ def main():
         if not is_text_target(path, scan_src=args.src):
             skipped += 1
             continue
-        if filters.is_noise_file(path):
+        if filters.is_noise_file(path) or filters.is_binary_ish(path):
             skipped += 1
             continue
         targets.append(path)
 
     # ── scan with progress ──
+    store = Store()      # shared evidence spine; analyzers feed it for correlation
     t0 = time.monotonic()
     total = len(targets)
     total_bytes = 0
@@ -226,7 +227,7 @@ def main():
             continue
         credpairs.analyze(path, report)
         encoded.analyze(path, report)
-        keyword.analyze(path, report)
+        keyword.analyze(path, report, store)
         patterns.analyze(path, report)
         if run_entropy and ext in ENTROPY_EXT:
             entropy.analyze(path, report, threshold=thr)
@@ -236,7 +237,6 @@ def main():
     scan_root = root if os.path.isdir(root) else (os.path.dirname(root) or ".")
 
     # ── v3: ingest other tools' output, notes, inventory, potfile, correlate ──
-    store = Store()
     claimed = set()
     if not args.no_inventory:
         inventory.load(report, store)          # name<->IP resolver first
