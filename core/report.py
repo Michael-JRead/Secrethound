@@ -209,14 +209,14 @@ class Report:
                        key=lambda kv: (-kv[1]["stage"],
                                        -(kv[1]["best"].score if kv[1]["best"] else 0),
                                        -kv[1]["creds"] - kv[1]["hashes"]))
+        n_admin = sum(1 for _, d in order if d["stage"] >= 3)
         rows = [ui.c("dim", "  " + ui.cell("HOST", 16) + ui.cell("STAGE", 8) +
                      ui.cell("", 6) + ui.cell("CRD", 4, align=">") +
                      ui.cell("HSH", 5, align=">") + "  " + "BEST NEXT MOVE")]
-        n_admin = 0
-        for name, d in order:
+        SHOW = 16                       # cap rows for large engagements
+        shown = order[:SHOW]
+        for name, d in shown:
             si = d["stage"]
-            if si >= 3:
-                n_admin += 1
             stage_word = self.STAGES[si]
             scol = "bred" if si >= 3 else "bgreen" if si == 2 else "yellow" if si == 1 else "gray"
             ribbon = ui.ribbon(si, len(self.STAGES),
@@ -238,6 +238,12 @@ class Report:
                 ui.cell(d["creds"] or dot, 4, "white" if d["creds"] else "dim", ">") +
                 ui.cell(d["hashes"] or dot, 5, "white" if d["hashes"] else "dim", ">") +
                 "  " + ui.c("gray", ui.truncate_end(nxt, nxt_w)))
+        if len(order) > SHOW:
+            hidden = order[SHOW:]
+            quiet = sum(1 for _, d in hidden if d["stage"] == 0)
+            extra = f" ({quiet} recon-only)" if quiet else ""
+            rows.append(ui.c("dim", f"  {ui.ell} +{len(hidden)} more hosts{extra} "
+                             f"- full list via --json"))
         sep = "·" if not ui.ascii else "-"
         owned = f"  {sep}  {n_admin} to admin" if n_admin else ""
         title = f"ENGAGEMENT SCOREBOARD  {sep}  {len(st)} hosts{owned}"
