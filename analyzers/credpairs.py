@@ -19,7 +19,15 @@ _B64ISH = re.compile(r'^[A-Za-z0-9+/]{12,}={0,2}$')
 
 
 def _clean(value):
-    return re.split(r'\s+[#;]\s', value)[0].strip().strip("'\"")
+    v = re.split(r'\s+[#;]\s', value)[0].strip()
+    # if the value starts with a quote, take exactly up to the matching close quote
+    # (so `'pass';` -> `pass`, not `pass';`)
+    if v[:1] in ("'", '"'):
+        q = v[0]
+        end = v.find(q, 1)
+        if end > 0:
+            return v[1:end]
+    return v.strip("'\"").rstrip(";,)} \t")
 
 
 def _good(raw, line):

