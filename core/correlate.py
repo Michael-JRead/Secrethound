@@ -206,10 +206,15 @@ def run(report, store, ui=None):
     ul = _userlist(e)
 
     # ── plaintext creds: spray + (only same-machine) service shells ──
-    # iter-14: e.creds is now dict-of-list; iterate first occurrence as the
-    # chain anchor and accumulate count from len(list).
+    # iter-14: e.creds is now dict-of-list. iter-15: pick the BEST occurrence
+    # (real user display + deterministic src path) so attribution stays stable
+    # across runs and points at the most informative source.
     for (ulc, pw), occurrences in e.creds.items():
-        disp, src, ln = occurrences[0]
+        def _cred_quality(o):
+            d, s, l = o
+            return (d == "<user>", s or "", l or 0)
+        best = sorted(occurrences, key=_cred_quality)[0]
+        disp, src, ln = best
         cred_count = len(occurrences)
         mach = _machine(src, root)
         smb = svc_on(mach, "smb") or dc_for(mach)
@@ -252,15 +257,30 @@ def run(report, store, ui=None):
                     "lsadump::sam", "local secretsdump"))
 
     by_target = {}
-    # iter-14: e.nt is now dict-of-list. Use the FIRST occurrence as the
-    # primary src/line anchor; len(list) tells us how many distinct sources
-    # of the same hash we observed (used for chain count / inflation guard).
+    # iter-15: pick the BEST occurrence as the anchor (not just the first).
+    # Quality rank: (a) prefer an occurrence with a real username; (b) prefer
+    # the one whose machine resolves to a DC target; (c) tiebreak by sorting
+    # source path for determinism across runs / filesystems.
+    def _hash_quality(occ):
+        user, src, line = occ
+        mach = _machine(src, root)
+        has_user = bool(user)
+        tgt_svc = svc_on(mach, "smb")
+        is_dc = bool(tgt_svc) and (_prox(store, tgt_svc) >= 1.0)
+        # lower is better (used as sort key)
+        return (not has_user, not is_dc, src or "", line or 0)
+
     for h, occurrences in e.nt.items():
-        huser, src, ln = occurrences[0]
+        # pick best occurrence for src/line anchor
+        best = sorted(occurrences, key=_hash_quality)[0]
+        huser, src, ln = best
         mach = _machine(src, root)
         tgt = svc_on(mach, "smb") or dc_for(mach)
         by_target.setdefault(tgt, []).append((h, huser, src, ln))
     for tgt, items in by_target.items():
+        # iter-15: also rank items inside a target group so the printed h0/u0
+        # picks the quality occurrence, not the dict-iteration first.
+        items.sort(key=lambda x: (not x[1], x[2] or "", x[3] or 0))
         h0, u0, src0, ln0 = items[0]
         u = u0 or "<user>"
         n = len(items)
@@ -360,11 +380,14 @@ def run(report, store, ui=None):
     # dict-of-list; dedup by label so 'admin/admin' seen in 3 files emits
     # ONE R24 chain (with count=3) instead of three separate ones.
     for label, occurrences in e.defaults.items():
-        src0, _ln0 = occurrences[0]
+        # iter-15: sort by (src, line) to pick the deterministic anchor and
+        # PRESERVE the line (was dropped). Operator can now navigate to it.
+        best = sorted(occurrences, key=lambda x: (x[0] or "", x[1] or 0))[0]
+        src0, ln0 = best
         chains.append(Chain("R24", "default cred", f"default password '{label}' in use",
             crit=6, conf=0.7, ready=1.3, prox=0.8,        # score 4.37
             commands=[f"netexec smb {dc()} -u '<user>' -p '{label}'"],
-            src=src0, count=len(occurrences)))
+            src=src0, line=ln0, count=len(occurrences)))
 
     # kerberoast. iter-13: prox honors DC presence so a known DC lifts the score
     for u in e.kerberoastable:
@@ -470,7 +493,12 @@ def run(report, store, ui=None):
             clean.append(c)
     chains = clean
 
-    chains.sort(key=lambda c: (-c.score, -c.ready, c.prox is None, len(c.commands)))
+    # iter-15: stable tiebreakers so identical-score chains never reorder
+    # across runs. Order: score desc, ready desc, prox-known first, more
+    # commands first, then rule_id + src + line + summary alphabetic.
+    chains.sort(key=lambda c: (
+        -c.score, -c.ready, c.prox is None, -len(c.commands),
+        c.rule or "", c.src or "", c.line or 0, c.summary or ""))
 
     for c in chains:
         sev = "CRITICAL" if c.score >= 6 else "HIGH" if c.score >= 2 else "MEDIUM"

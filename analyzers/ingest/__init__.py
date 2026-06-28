@@ -10,11 +10,14 @@ import os
 
 from analyzers.ingest.evidence import Evidence, Store
 from analyzers.ingest import (ext_secretsdump, ext_nmap, netexec_db, bloodhound,
-                              ldapdomaindump, enum4linux, webdirs)
+                              ldapdomaindump, enum4linux, webdirs, potfile)
 
 # order matters: most specific sniffers first
+# iter-15: register potfile so in-tree john.pot / hashcat.potfile / *.potfile
+# files are loaded into _POT_INDEX during the ingest pass (previously the
+# detect()/parse() pair was dead code - never reached the dispatcher).
 ADAPTERS = [ext_secretsdump, ext_nmap, netexec_db, bloodhound,
-            ldapdomaindump, enum4linux, webdirs]
+            ldapdomaindump, enum4linux, webdirs, potfile]
 
 
 def _head(path, n=4096):

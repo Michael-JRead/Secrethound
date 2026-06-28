@@ -223,7 +223,8 @@ class Report:
             elif f["severity"] == "MEDIUM":
                 mm += 1
             agg[top] = (cc, hh, mm)
-        return sorted(agg.items(), key=lambda kv: (-kv[1][0], -kv[1][1], -kv[1][2]))
+        # iter-15: name tiebreaker for stable rendering
+        return sorted(agg.items(), key=lambda kv: (-kv[1][0], -kv[1][1], -kv[1][2], kv[0]))
 
     def _top(self, path):
         rel = self._rel(path)
@@ -310,10 +311,13 @@ class Report:
             return ""
         ui = self.ui
         dot = "·" if not ui.ascii else "."
+        # iter-15: add host-name alphabetic tiebreaker so identical-stage
+        # hosts always render in the same order across runs.
         order = sorted(st.items(),
                        key=lambda kv: (-kv[1]["stage"],
                                        -(kv[1]["best"].score if kv[1]["best"] else 0),
-                                       -kv[1]["creds"] - kv[1]["hashes"]))
+                                       -kv[1]["creds"] - kv[1]["hashes"],
+                                       kv[0]))
         n_admin = sum(1 for _, d in order if d["stage"] >= 3)
         rows = [ui.c("dim", "  " + ui.cell("HOST", 16) + ui.cell("STAGE", 8) +
                      ui.cell("", 6) + ui.cell("CRD", 4, align=">") +
@@ -366,7 +370,12 @@ class Report:
         if not pool:
             return ""
         order = {c: i for i, c in enumerate(HERO_CATS)}
-        pool.sort(key=lambda f: order.get(f["category"], 99))
+        # iter-15: composite tiebreaker - category order, then file path,
+        # line, detail. Stable across runs / filesystems.
+        pool.sort(key=lambda f: (order.get(f["category"], 99),
+                                  self._rel(f["file"]) or "",
+                                  f["line"] or 0,
+                                  f["detail"] or ""))
         rows = []
         shown = pool[:6]
         wloc = max(20, self.ui.cols - 10)
@@ -454,7 +463,9 @@ class Report:
         rows = [self.ui.c("dim", "  " + self.ui.cell("", 5) + " " + self.ui.cell("TYPE", 17) +
                           self.ui.cell("SOURCE", 18) + "CRACK / USE")]
         mult = "×" if not self.ui.ascii else "x"
-        for (src, t), n in sorted(agg.items(), key=lambda kv: -kv[1]):
+        # iter-15: stable tiebreaker on (src, hash-type) so same-count rows
+        # don't reorder between runs.
+        for (src, t), n in sorted(agg.items(), key=lambda kv: (-kv[1], kv[0])):
             plan = self._HASH_PLAN.get(t, ("", "hashid first, then hashcat -m <mode>"))[1]
             cnt = self.ui.cell(f"{n}{mult}", 4, "yellow" if n > 5 else "white", ">")
             rows.append("  " + cnt + " " + self.ui.cell(t, 17, "white") +
@@ -468,7 +479,10 @@ class Report:
         if not self.show_low:
             # keep LOW only for the HIGH ENTROPY collapse; drop other LOW noise
             pass
-        findings.sort(key=lambda f: (SEV_RANK.get(f["severity"], 9), f["category"], self._rel(f["file"])))
+        # iter-15: add line + detail tiebreakers so per-file ties are stable
+        findings.sort(key=lambda f: (SEV_RANK.get(f["severity"], 9),
+                                      f["category"], self._rel(f["file"]) or "",
+                                      f["line"] or 0, f["detail"] or ""))
         by_cat = {}
         for f in findings:
             by_cat.setdefault(f["category"], []).append(f)

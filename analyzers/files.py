@@ -147,13 +147,15 @@ _TOOL_NOISE = re.compile(r'(?i)(dacledit|certipy|bloodhound|ldapdomaindump)[-_]?
 def analyze_tree(root, report, skip_paths=None):
     skip_paths = skip_paths or set()
     for dirpath, dirnames, filenames in os.walk(root):
-        # prune noise / payload / wordlist directories in place
-        dirnames[:] = [d for d in dirnames if not filters.should_skip_dir(d, os.path.join(dirpath, d))]
+        # iter-15: sort dirnames and filenames so file walk is deterministic
+        # across OS / filesystem. Same fix as secrethound.py iter_files().
+        dirnames[:] = sorted(d for d in dirnames
+                             if not filters.should_skip_dir(d, os.path.join(dirpath, d)))
         # flag git repos (but don't descend - .git is pruned above)
         if os.path.isdir(os.path.join(dirpath, ".git")):
             report.add("INFO", "INTERESTING FILES", os.path.join(dirpath, ".git"), None,
                        "git repo → git log -p | grep -iE 'pass|secret|key'")
-        for name in filenames:
+        for name in sorted(filenames):
             full = os.path.join(dirpath, name)
             if full in skip_paths or filters.is_noise_file(full, name) or _TOOL_NOISE.search(name):
                 continue

@@ -105,10 +105,17 @@ OSCP NOTE
 
 
 def iter_files(root):
+    # iter-15: sort dirnames and filenames so the entire pipeline is
+    # deterministic. os.walk() backs onto os.scandir() / readdir(), which
+    # POSIX leaves unordered (ext4/xfs = hash-bucket, tmpfs = insertion,
+    # NTFS = sorted). Two runs against an identical loot tree on different
+    # filesystems otherwise produce different src/line attribution in the
+    # ATTACK PATH / JSON / HTML exports.
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames
-                       if not filters.should_skip_dir(d, os.path.join(dirpath, d))]
-        for name in filenames:
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if not filters.should_skip_dir(d, os.path.join(dirpath, d)))
+        for name in sorted(filenames):
             yield os.path.join(dirpath, name)
 
 

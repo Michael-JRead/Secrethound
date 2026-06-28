@@ -115,14 +115,31 @@ def parse(path, store, report):
 
 # ── the cross-reference pass (run after scanning) ──
 def correlate(report, store, args=None):
-    # load default + user-specified potfiles
+    # iter-15: invert load order so --pot args win over defaults. The
+    # collision-handling in _load_pot keeps the FIRST plaintext seen for
+    # each hash, so loading CLI-args first means the operator's explicit
+    # potfile takes precedence over ~/.hashcat / ~/.john.
     if not (args and getattr(args, "no_pot", False)):
-        for p in DEFAULT_POTS:
-            load_pot(p)
         for p in (getattr(args, "pot", None) or []):
+            load_pot(p)
+        for p in DEFAULT_POTS:
             load_pot(p)
     if not _POT_INDEX:
         return store.cracked
+
+    # iter-15: surface cross-potfile collisions so the operator knows when
+    # two potfiles disagree about the plaintext for the same hash.
+    for h, alts in _POT_COLLISIONS.items():
+        if not alts:
+            continue
+        winning = _POT_INDEX.get(h)
+        if not winning:
+            continue
+        wp, wsrc = winning
+        others = ", ".join(f"{p!r} (from {os.path.basename(s)})" for p, s in alts)
+        report.add("INFO", "RECON", wsrc, None,
+                   f"potfile collision for hash {h[:16]}...: kept {wp!r}; alt={others}",
+                   hint="two potfiles disagree on this hash's plaintext; verify by hand")
 
     # cross-ref every collected hash (patterns.HASHES shape: mode,name,val,fp,ln)
     for mode, name, val, fp, ln in list(patterns.HASHES):
