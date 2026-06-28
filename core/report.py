@@ -10,6 +10,31 @@ import os
 import json
 from core.ui import UI, SEV
 
+
+# iter-12: secrethound's exports carry plaintext credentials, hashes, and
+# private keys. Writing them world-readable on shared Kali boxes (multi-user
+# Proxmox / OSCP jumphosts) is a CVE waiting to happen. Use os.open with
+# 0o600 so we don't race chmod after the fact. Replaces the existing file if
+# it's owned by us; otherwise raises - the operator must rm it first.
+def _write_secure(path, content):
+    # Remove any pre-existing file (replaces atomically with the new perms).
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+    finally:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
 SEV_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 SEV_COLOR = {"CRITICAL": "bred", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan", "INFO": "green"}
 SEV_TAG = {"CRITICAL": "[!!]", "HIGH": "[!]", "MEDIUM": "[~]", "LOW": "[-]", "INFO": "[+]"}
@@ -48,12 +73,34 @@ class Report:
         return self.ui.c(color, text)
 
     def _dedup(self):
-        seen, out = set(), []
+        # iter-12: secondary canonical key to collapse same-secret rows that
+        # disagree on cosmetic detail-text. We hash the LAST token after ':'
+        # (the actual secret) along with (file, line, category). Keeps the
+        # most-severe row when both fire.
+        seen, sec_seen, out = set(), {}, []
         for f in self.findings:
             key = (f["severity"], f["file"], f["detail"])
             if key in seen:
                 continue
             seen.add(key)
+            # canonical: extract the last colon-separated token (the secret
+            # value) - this collapses rows like "user: PW" / "user:PW" /
+            # "DOMAIN\user:PW" emitted by multiple rules.
+            det = f["detail"] or ""
+            secret_value = det.rsplit(":", 1)[-1].strip() if ":" in det else det.strip()
+            sec_key = (f["file"], f["line"], f["category"], secret_value[:80])
+            existing = sec_seen.get(sec_key)
+            if existing is not None:
+                # keep the highest-severity row
+                if SEV_RANK.get(f["severity"], 9) < SEV_RANK.get(existing["severity"], 9):
+                    # replace the lower-severity row in out
+                    for i, e in enumerate(out):
+                        if e is existing:
+                            out[i] = f
+                            sec_seen[sec_key] = f
+                            break
+                continue
+            sec_seen[sec_key] = f
             out.append(f)
         return out
 
@@ -175,8 +222,26 @@ class Report:
             elif cat == "INTERESTING FILES" and any(
                     x in (f["file"] or "").lower() for x in (".pfx", ".p12", ".kirbi", ".ccache")):
                 d["stage"] = max(d["stage"], 1)
-            if "administrator" in blob and cat in ("PASSWORD HASHES", "CRED PAIRS"):
-                d["stage"] = max(d["stage"], 3)
+            # iter-12 FP audit: substring 'administrator' fires on the HINT
+            # text of MOST PASSWORD HASHES findings ('crack: hashcat ... admin
+            # of the box'; 'PtH as administrator'; netexec template hints).
+            # Tighten to a word-boundary match in the DETAIL string only, and
+            # require the username token (the part before the colon/space) to
+            # actually be 'administrator' (case-insensitive).
+            det_lc = (f["detail"] or "").lower()
+            if cat in ("PASSWORD HASHES", "CRED PAIRS"):
+                # detail typically begins with 'user:value' or 'NTLM (NT) DOM\user: hash'
+                # — extract the principal token and check it strictly.
+                principal = ""
+                head = det_lc.split(":", 1)[0]
+                # strip "ntlm (nt) DOM\" prefix patterns
+                if "\\" in head:
+                    principal = head.split("\\")[-1].strip()
+                else:
+                    principal = head.strip().split()[-1] if head.strip() else ""
+                if principal in ("administrator", "domain administrator",
+                                 "enterprise admin", "domain admin"):
+                    d["stage"] = max(d["stage"], 3)
             if any(k in blob for k in self._ADMIN_MARK):
                 d["stage"] = max(d["stage"], 3)
 
@@ -407,14 +472,30 @@ class Report:
         return "\n".join(out)
 
     # ── JSON export ──
+    # iter-12: stable schema with explicit version so downstream consumers
+    # don't have to detect format drift. Bump on backwards-incompat changes.
+    SCHEMA_VERSION = 2
+
     def to_json(self, path, chains=None):
-        out = {"stats": self.stats, "findings": self._dedup()}
+        out = {
+            "schema_version": self.SCHEMA_VERSION,
+            "tool": "secrethound",
+            "stats": self.stats,
+            "root": self.root,
+            "findings": self._dedup(),
+        }
         if chains:
             out["chains"] = [{
                 "rule": c.rule, "label": c.label, "summary": c.summary,
                 "score": c.score, "criticality": c.crit, "confidence": c.conf,
                 "proximity": c.prox, "readiness": c.ready, "lab_only": c.lab_only,
                 "commands": c.commands, "source": c.src, "line": c.line,
+                "count": getattr(c, "count", 1),
             } for c in chains]
-        with open(path, "w") as fh:
-            json.dump(out, fh, indent=2)
+        # iter-12: 0600 perms - this file carries plaintext credentials,
+        # private keys, and pass-the-hash NT hashes. World-readable was a
+        # CVE waiting to happen on shared Kali boxes (multi-user proxmox /
+        # OSCP exam jumphost). Create with restrictive perms FROM the start
+        # (os.open + O_CREAT|O_EXCL|O_WRONLY) to avoid the race where another
+        # user reads between open() and chmod().
+        _write_secure(path, json.dumps(out, indent=2))

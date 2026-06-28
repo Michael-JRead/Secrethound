@@ -668,13 +668,14 @@ _PE_JSON_VULN = re.compile(
 
 
 def _multiline_passes(path, report, store):
-    """File-level passes that need multi-line context. Bounded text-head read
-    keeps regex perf safe; all patterns use bounded `.{0,N}?` lazy spans."""
-    try:
-        with open(path, "r", errors="ignore") as fh:
-            text = fh.read(200000)
-    except OSError:
-        return
+    """File-level passes that need multi-line context. iter-12: head read
+    raised from 200 KB to 4 MB so secretsdump/SCCM logs/mimikatz dumps aren't
+    silently truncated. Patterns use bounded `.{0,N}?` lazy spans so 4 MB is
+    safe (no catastrophic backtracking on adversarial input - verified)."""
+    # iter-12: read via filters.read_text() so UTF-16LE / UTF-8 BOM /
+    # gz/bz2/xz are all handled by ONE code path. Also de-NULs by leaving
+    # them in (downstream multi-line regexes don't anchor on NUL).
+    text = filters.read_text(path, max_bytes=4 * 1024 * 1024)
     if not text:
         return
     from analyzers.ingest.evidence import Evidence
@@ -683,8 +684,26 @@ def _multiline_passes(path, report, store):
     def _ln(m):
         return text[: m.start()].count("\n") + 1
 
+    # iter-12 scope-bleed guard: reject a multi-line match where a *second*
+    # occurrence of the record-anchor key sits between the captures, meaning
+    # the lazy `.{0,N}?` walked across a sibling record.
+    def _no_bleed(m, first_grp, last_grp, anchor_rx):
+        span = text[m.start(first_grp):m.start(last_grp)]
+        return not anchor_rx.search(span)
+
+    # iter-12 scope-bleed anchor regexes (look for repeated record headers
+    # inside a multi-line match - signals lazy span walked across siblings).
+    _NAA_BLEED = re.compile(r'(?i)NetworkAccess(?:Account|Username)')
+    _MK_USER_BLEED = re.compile(r'(?i)\*\s*Username\s*:')
+    _MK_RID_BLEED = re.compile(r'(?i)\bRID\s*:\s*[0-9a-f]+\s*\(\d+\)')
+    _MK_CRED_BLEED = re.compile(r'(?i)\*\*\*\s*CREDENTIAL\s*\*\*\*')
+    _SAM_BLEED = re.compile(r'(?i)\bSamAccountName\s*:')
+    _LAZAGNE_BLEED = re.compile(r'(?im)^\s*(?:URL|Login|Username)\s*:')
+
     # SCCM NAA
     for m in _SCCM_NAA_MULTI.finditer(text):
+        if not _no_bleed(m, 1, 2, _NAA_BLEED):
+            continue
         u, p = m.group(1).strip(), m.group(2).strip()
         if filters.is_placeholder(p):
             continue
@@ -696,6 +715,8 @@ def _multiline_passes(path, report, store):
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
+        if not _no_bleed(m, 1, 3, _MK_USER_BLEED):
+            continue
         u, dom, nt = m.group(1), m.group(2), m.group(3)
         if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
             continue
@@ -706,6 +727,8 @@ def _multiline_passes(path, report, store):
 
     # Mimikatz wdigest cleartext
     for m in _MK_WDIGEST.finditer(text):
+        if not _no_bleed(m, 1, 3, _MK_USER_BLEED):
+            continue
         u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
         if filters.is_placeholder(pw) or pw.lower() in ("(null)", "n/a"):
             continue
@@ -717,6 +740,8 @@ def _multiline_passes(path, report, store):
 
     # Mimikatz lsadump::sam
     for m in _MK_SAM.finditer(text):
+        if not _no_bleed(m, 1, 2, _MK_RID_BLEED):
+            continue
         u, nt = m.group(1), m.group(2)
         if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
             continue
@@ -727,6 +752,8 @@ def _multiline_passes(path, report, store):
 
     # Mimikatz dpapi::cred typed
     for m in _MK_DPAPI_CRED.finditer(text):
+        if not _no_bleed(m, 1, 3, _MK_CRED_BLEED):
+            continue
         target, u, blob = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
         report.add("HIGH", "CRED PAIRS", path, _ln(m),
                    f"DPAPI cred for {target} ({u}): {blob[:50]}",
@@ -734,6 +761,8 @@ def _multiline_passes(path, report, store):
 
     # Rubeus kerberoast: user-bound hash binding
     for m in _RUBEUS_KERB.finditer(text):
+        if not _no_bleed(m, 1, 2, _SAM_BLEED):
+            continue
         u, h = m.group(1), m.group(2)
         report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
                    f"Kerberoast TGS ({u}): {h[:60]}...",
@@ -756,6 +785,8 @@ def _multiline_passes(path, report, store):
 
     # Lazagne extracted creds
     for m in _LAZAGNE.finditer(text):
+        if not _no_bleed(m, 1, 2, _LAZAGNE_BLEED):
+            continue
         u, p = m.group(1), m.group(2).strip()
         if (filters.is_placeholder(p) or filters.is_placeholder(u)
                 or p.lower() in ("(null)", "[empty]", "(empty)")):
@@ -822,10 +853,32 @@ def _multiline_passes(path, report, store):
             store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                source=path, line=_ln(m)))
 
-    # AWS IMDS capture: surface short-lived IAM role STS creds
+    # AWS IMDS capture: surface short-lived IAM role STS creds.
+    # iter-12 FP audit: Terraform .tfstate and CDK output also embed
+    # "AccessKeyId" / "SecretAccessKey" fields - they are LITERAL state, not
+    # IMDS captures. Require an IMDS-shaped marker (`"Code":"Success"`,
+    # `"Type":"AWS-HMAC"`, `latest/meta-data/iam`, `LastUpdated`) in the
+    # surrounding text. Filename gate also skips tfstate-shaped paths.
+    _IMDS_CONTEXT = re.compile(
+        r'(?i)"Code"\s*:\s*"Success"|"Type"\s*:\s*"AWS-HMAC"|'
+        r'latest/meta-data/iam|"LastUpdated"\s*:|169\.254\.169\.254')
+    plow = path.lower()
+    if (plow.endswith((".tfstate", ".tfstate.backup", ".tfplan", ".tfvars"))
+            or "/cdk.out/" in plow):
+        skip_imds = True
+    else:
+        skip_imds = False
     for m in _IMDS_BLOCK.finditer(text):
+        if skip_imds:
+            continue
         akid, sak, tok = m.group(1), m.group(2), m.group(3)
         if filters.is_placeholder(akid) or filters.is_canonical_sample(akid):
+            continue
+        # iter-12: require IMDS-shaped context within +/- 2KB so plain
+        # terraform-style JSON without the IMDS-distinctive fields doesn't fire.
+        ctx_start = max(0, m.start() - 2048)
+        ctx_end = min(len(text), m.end() + 2048)
+        if not _IMDS_CONTEXT.search(text[ctx_start:ctx_end]):
             continue
         report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
                    f"AWS STS creds (IMDS): AccessKeyId={akid}",

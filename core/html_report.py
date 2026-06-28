@@ -221,8 +221,9 @@ click any column header to sort · click any category header to collapse
 </div>
 </div><script>{_JS}</script></body></html>"""
 
-    with open(out_path, "w", encoding="utf-8") as fh:
-        fh.write(body)
+    # iter-12: 0600 perms on the HTML report (carries CRITICAL CRED PAIRS)
+    from core.report import _write_secure
+    _write_secure(out_path, body)
     return out_path
 
 
@@ -230,20 +231,23 @@ def write_csv_creds(report, store, out_path):
     """Operator-friendly CSV: every CRED PAIR + PASSWORD HASH + ASSIGNED SECRET
     finding with (severity, category, file, line, user/key, secret, hint).
     Designed for easy paste into a report appendix or for awk/grep chaining."""
-    import csv
+    import csv, io
+    from core.report import _write_secure
     findings = report._dedup()
     keep = ("CRED PAIRS", "PASSWORD HASHES", "ASSIGNED SECRETS",
             "GPP cpassword", "ENCODED/DECODED", "PRIVATE KEYS")
     rows = [f for f in findings if f["category"] in keep]
-    with open(out_path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(["severity", "category", "file", "line", "detail", "hint"])
-        for f in rows:
-            w.writerow([
-                f["severity"], f["category"],
-                report._rel(f["file"]),
-                f["line"] or "",
-                (f["detail"] or "").replace("\n", " "),
-                (f["hint"] or "").replace("\n", " "),
-            ])
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["severity", "category", "file", "line", "detail", "hint"])
+    for f in rows:
+        w.writerow([
+            f["severity"], f["category"],
+            report._rel(f["file"]),
+            f["line"] or "",
+            (f["detail"] or "").replace("\n", " "),
+            (f["hint"] or "").replace("\n", " "),
+        ])
+    # iter-12: 0600 perms on the CSV (carries plaintext creds + hashes)
+    _write_secure(out_path, buf.getvalue())
     return out_path

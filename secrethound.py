@@ -25,10 +25,20 @@ TEXT_EXT = {".ini", ".conf", ".cnf", ".cfg", ".env", ".yml", ".yaml", ".json", "
             ".ps1", ".psd1", ".reg", ".ovpn", ".kdbx", ".php", ".inc", ".tfstate",
             ".tfvars", ".sh", ".bat", ".cmd", ".hash", ".hashes", ".pot", ".potfile",
             ".lst", ".csv", ".tsv", ".ldif", ".ldap", ".pcap", ".eml", ".html", ".htm",
-            ".rtf", ""}
+            ".rtf",
+            # iter-12: compressed rotated logs - filters.read_text() handles
+            # transparent decompression so they look like text to analyzers.
+            ".gz", ".bz2", ".xz", ".tgz",
+            # iter-12: NDJSON / JSONL credential dumps (Bloodhound, secretsdump
+            # JSON, kubectl get -o json | jq -c)
+            ".ndjson", ".jsonl",
+            ""}
 SRC_EXT = {".js", ".pl", ".ps1", ".py", ".php", ".rb", ".java", ".go", ".cs", ".sh"}
 DB_EXT = {".sqlite", ".sqlite3", ".db", ".db3"}
-MAX_BYTES = 5 * 1024 * 1024
+# iter-12: was 5 MB. Raised to 64 MB so secretsdump / BloodHound users.json /
+# rotated nginx logs aren't silently skipped. Anything larger is reported as
+# INFO so the operator knows to re-run or inspect by hand.
+MAX_BYTES = 64 * 1024 * 1024
 ENTROPY_EXT = {".ini", ".conf", ".cnf", ".cfg", ".env", ".yml", ".yaml", ".json",
                ".xml", ".toml", ".properties", ".txt", ".config", ".tmpl", ".template",
                ".log", ""}
@@ -102,13 +112,18 @@ def iter_files(root):
             yield os.path.join(dirpath, name)
 
 
-def is_text_target(path, scan_src=False):
+def is_text_target(path, scan_src=False, oversized=None):
+    """iter-12: oversized=set() collects paths that exceeded MAX_BYTES so the
+    main loop can emit an INFO finding (silent skip = silent miss)."""
     ext = os.path.splitext(path)[1].lower()
     allowed = TEXT_EXT | SRC_EXT if scan_src else TEXT_EXT
     if ext not in allowed:
         return False
     try:
-        if os.path.getsize(path) > MAX_BYTES:
+        sz = os.path.getsize(path)
+        if sz > MAX_BYTES:
+            if oversized is not None:
+                oversized.add((path, sz))
             return False
     except OSError:
         return False
@@ -195,6 +210,7 @@ def main():
     json_abs = os.path.abspath(args.json) if args.json else None
     raw = [root] if os.path.isfile(root) else list(iter_files(root))
     do_ingest = not args.no_ingest
+    oversized = set()  # iter-12: surface skipped-due-to-size
     targets, ingest_targets, magic_targets, skipped = [], [], [], 0
     for path in raw:
         ext = os.path.splitext(path)[1].lower()
@@ -213,19 +229,60 @@ def main():
         if ext in DB_EXT:
             targets.append(path)
             continue
-        if not is_text_target(path, scan_src=args.src):
+        if not is_text_target(path, scan_src=args.src, oversized=oversized):
             skipped += 1
             continue
-        if filters.is_noise_file(path) or filters.is_binary_ish(path):
+        # iter-12: compressed loot bypasses is_binary_ish (gzip bytes look
+        # random by definition); the decompression pre-pass below routes
+        # them through the same per-line analyzers.
+        is_compressed = ext in (".gz", ".bz2", ".xz", ".tgz")
+        if filters.is_noise_file(path) or (not is_compressed and filters.is_binary_ish(path)):
             skipped += 1
             continue
         targets.append(path)
+    # iter-12: tell the operator about oversized skips so they can re-run by hand
+    for path, sz in oversized:
+        report.add("INFO", "INTERESTING FILES", path, None,
+                   f"file too large for scan ({sz // (1024 * 1024)} MB > {MAX_BYTES // (1024 * 1024)} MB cap)",
+                   hint=f"inspect by hand: head -c 5M '{path}' | secrethound /dev/stdin   "
+                        "(or split + scan; raise MAX_BYTES if you trust the source)")
 
     # ── scan with progress ──
     store = Store()      # shared evidence spine; analyzers feed it for correlation
     t0 = time.monotonic()
     total = len(targets)
     total_bytes = 0
+    # iter-12: transparent decompression. For .gz/.bz2/.xz files, expand
+    # ONCE into a session tempdir + pass the decompressed path to analyzers.
+    # Cleaner than threading a `read_text()` helper through every analyzer.
+    import tempfile, atexit, shutil
+    compressed_tmpdir = None
+    decompress_map = {}        # compressed-path -> decompressed-tmp-path
+    for path in targets:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".gz", ".bz2", ".xz", ".tgz"):
+            text = filters.read_text(path, max_bytes=MAX_BYTES)
+            if text:
+                if compressed_tmpdir is None:
+                    compressed_tmpdir = tempfile.mkdtemp(prefix="secrethound-decompressed-")
+                    atexit.register(lambda: shutil.rmtree(compressed_tmpdir, ignore_errors=True))
+                # mirror filename without the compression extension
+                base = os.path.basename(path)
+                for sfx in (".gz", ".bz2", ".xz", ".tgz"):
+                    if base.lower().endswith(sfx):
+                        base = base[:-len(sfx)]
+                        break
+                # ensure unique name
+                tmp = os.path.join(compressed_tmpdir, f"{len(decompress_map)}_{base}")
+                try:
+                    with open(tmp, "w", encoding="utf-8", errors="replace") as fh:
+                        fh.write(text)
+                    decompress_map[path] = tmp
+                except OSError:
+                    pass
+
+    # reverse map: decompressed-tmp-path -> original compressed-path
+    tmp_to_orig = {tmp: orig for orig, tmp in decompress_map.items()}
     for i, path in enumerate(targets, 1):
         if not args.quiet:
             ui.progress(i, total, current=os.path.relpath(path, root) if os.path.isdir(root) else path)
@@ -237,13 +294,30 @@ def main():
         if ext in DB_EXT:
             sqlite_triage.analyze_db(path, report)
             continue
-        credpairs.analyze(path, report)
-        encoded.analyze(path, report)
-        keyword.analyze(path, report, store)
-        patterns.analyze(path, report)
-        configs.analyze(path, report, store)
+        # iter-12: route compressed loot through the decompressed mirror so
+        # per-line analyzers see plain text. We rewrite finding paths AFTER
+        # the scan to point back at the original .gz so the operator can find
+        # the source.
+        scan_path = decompress_map.get(path, path)
+        credpairs.analyze(scan_path, report)
+        encoded.analyze(scan_path, report)
+        keyword.analyze(scan_path, report, store)
+        patterns.analyze(scan_path, report)
+        configs.analyze(scan_path, report, store)
         if run_entropy and ext in ENTROPY_EXT:
-            entropy.analyze(path, report, threshold=thr)
+            entropy.analyze(scan_path, report, threshold=thr)
+    # iter-12: rewrite tmp paths in findings + store Evidence back to the
+    # compressed original so the operator can find the source.
+    if tmp_to_orig:
+        for f in report.findings:
+            orig = tmp_to_orig.get(f["file"])
+            if orig:
+                f["file"] = orig
+        # also rewrite Evidence sources in the shared store
+        for ev in store.items:
+            orig = tmp_to_orig.get(ev.source)
+            if orig:
+                ev.source = orig
     if not args.quiet:
         ui.progress_done()
 
@@ -286,6 +360,9 @@ def main():
     # aggregated users.txt for spray commands
     users = store.users_txt()
     if users and args.users_out:
+        # iter-12: users.txt is for spraying - not a secret per se, but on a
+        # multi-user box it's still a sensitive list. Use 0644 (the operator
+        # may pipe this to other tools); but ensure it's owned by the user.
         try:
             with open(args.users_out, "w") as fh:
                 fh.write("\n".join(users) + "\n")
@@ -328,8 +405,10 @@ def main():
             seen.setdefault((mode, name), set()).add(val)
         allh = sorted({v for vs in seen.values() for v in vs})
         if allh:
-            with open(args.hashes, "w") as fh:
-                fh.write("\n".join(allh) + "\n")
+            # iter-12: 0600 perms on the hashes file (it's a cracking target,
+            # often contains user-bound hashes that leak the principal too).
+            from core.report import _write_secure
+            _write_secure(args.hashes, "\n".join(allh) + "\n")
             print(ui.c("bgreen", f"\n[+] crack-ready hashes -> {args.hashes}" +
                        (f"  ({n_cracked} already cracked, omitted)" if n_cracked else "")))
             for (mode, name), vs in sorted(seen.items()):

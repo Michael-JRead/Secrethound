@@ -566,7 +566,11 @@ def is_binary_ish(path, chunk=8192):
     output (the htb run re-ingested its own test.txt full of \\x0e\\x0f garbage).
     iter-8: treats valid UTF-8 (with no NUL / no excessive control bytes) as
     text - so winPEAS/linPEAS output with heavy ╔══╝ box-drawing chars and
-    other operator-tool unicode output is correctly scanned."""
+    other operator-tool unicode output is correctly scanned.
+    iter-12: detect UTF-16LE/BE first (PowerShell transcripts, .reg exports,
+    Windows event log strings often carry FF FE / FE FF BOM + NULs); a sparse
+    NUL pattern alone is no longer treated as binary. Strict 'a single NUL =
+    binary' was killing every UTF-16 loot file silently."""
     try:
         with open(path, "rb") as fh:
             block = fh.read(chunk)
@@ -574,21 +578,109 @@ def is_binary_ish(path, chunk=8192):
         return True
     if not block:
         return False
-    if b"\x00" in block:
-        return True
+    # iter-12: UTF-16 BOM detection. UTF-16LE = FF FE, UTF-16BE = FE FF.
+    # If we see the BOM, treat as text (downstream readers must handle).
+    if block.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return False
+    # UTF-16LE without BOM heuristic: file looks like alternating-NUL ASCII
+    # (every other byte is 0x00 over a ≥32-byte run). Common for PSReadLine /
+    # transcript outputs saved as raw UTF-16.
+    if len(block) >= 64:
+        even_nuls = sum(1 for i in range(1, min(256, len(block)), 2) if block[i] == 0)
+        odd_nuls  = sum(1 for i in range(0, min(256, len(block)), 2) if block[i] == 0)
+        # UTF-16LE: high bytes (odd indices) are 0 for ASCII
+        if even_nuls > 50 and odd_nuls < 5:
+            return False
+        # UTF-16BE: high bytes (even indices) are 0 for ASCII
+        if odd_nuls > 50 and even_nuls < 5:
+            return False
     # try UTF-8 first - if valid AND no excessive control bytes, it's text
     try:
-        decoded = block.decode("utf-8")
+        decoded = block.decode("utf-8-sig")  # iter-12: also strips UTF-8 BOM
         # count control chars (< 0x20 except \n \r \t \f \b)
-        ctrl = sum(1 for c in decoded if ord(c) < 32 and c not in "\t\n\r\f\b")
-        if ctrl / max(1, len(decoded)) < 0.05:
+        ctrl = sum(1 for c in decoded if ord(c) < 32 and c not in "\t\n\r\f\b\x00")
+        nuls = decoded.count("\x00")
+        # iter-12: a SMALL number of NULs is OK (lsass strings dumps, mixed
+        # operator artifacts) as long as the overall text is mostly printable.
+        if (ctrl / max(1, len(decoded)) < 0.05
+                and nuls / max(1, len(decoded)) < 0.02):
             return False
     except UnicodeDecodeError:
         pass
+    # too many NULs -> binary container, not text. Threshold tuned so lsass
+    # strings dumps + UTF-16 stay text but raw .bin / .dll get rejected.
+    nul_count = block.count(b"\x00")
+    if nul_count / max(1, len(block)) > 0.30:
+        return True
     # fallback: original ASCII-based byte classifier
-    nontext = block.translate(None, _TEXTCHARS_B)
+    nontext = block.translate(None, _TEXTCHARS_B + b"\x00")
     return len(nontext) / len(block) > 0.30      # raised from 0.10 - the
         # old threshold caught too many legitimate non-ASCII text files
+
+
+def read_text(path, max_bytes=None):
+    """iter-12 unified text reader. Strips UTF-8 BOM, auto-detects UTF-16LE/BE,
+    transparently decompresses .gz / .bz2 / .xz. Returns the full text or None
+    if the file can't be read. max_bytes caps the returned text size."""
+    try:
+        # transparent decompression for rotated logs / history backups.
+        plow = path.lower()
+        if plow.endswith(".gz"):
+            import gzip
+            opener = lambda: gzip.open(path, "rb")
+        elif plow.endswith(".bz2"):
+            import bz2
+            opener = lambda: bz2.open(path, "rb")
+        elif plow.endswith(".xz"):
+            import lzma
+            opener = lambda: lzma.open(path, "rb")
+        else:
+            opener = lambda: open(path, "rb")
+        with opener() as fh:
+            raw = fh.read(max_bytes if max_bytes else -1)
+    except OSError:
+        return None
+    except Exception:
+        return None
+    if not raw:
+        return ""
+    # BOM-based detection (most reliable when present)
+    if raw.startswith(b"\xff\xfe\x00\x00"):
+        enc = "utf-32-le"
+        raw = raw[4:]
+    elif raw.startswith(b"\x00\x00\xfe\xff"):
+        enc = "utf-32-be"
+        raw = raw[4:]
+    elif raw.startswith(b"\xff\xfe"):
+        enc = "utf-16-le"
+        raw = raw[2:]
+    elif raw.startswith(b"\xfe\xff"):
+        enc = "utf-16-be"
+        raw = raw[2:]
+    elif raw.startswith(b"\xef\xbb\xbf"):
+        enc = "utf-8"
+        raw = raw[3:]
+    else:
+        # heuristic: BOM-less UTF-16LE detection (lots of even-position NULs)
+        if len(raw) >= 64:
+            sample = raw[:512]
+            even_nuls = sum(1 for i in range(1, len(sample), 2) if sample[i] == 0)
+            odd_nuls = sum(1 for i in range(0, len(sample), 2) if sample[i] == 0)
+            if even_nuls > 50 and odd_nuls < 5:
+                enc = "utf-16-le"
+            elif odd_nuls > 50 and even_nuls < 5:
+                enc = "utf-16-be"
+            else:
+                enc = "utf-8"
+        else:
+            enc = "utf-8"
+    try:
+        return raw.decode(enc, errors="ignore")
+    except Exception:
+        try:
+            return raw.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
 
 
 def is_secrethound_output(path):
