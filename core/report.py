@@ -222,26 +222,23 @@ class Report:
             elif cat == "INTERESTING FILES" and any(
                     x in (f["file"] or "").lower() for x in (".pfx", ".p12", ".kirbi", ".ccache")):
                 d["stage"] = max(d["stage"], 1)
-            # iter-12 FP audit: substring 'administrator' fires on the HINT
-            # text of MOST PASSWORD HASHES findings ('crack: hashcat ... admin
-            # of the box'; 'PtH as administrator'; netexec template hints).
-            # Tighten to a word-boundary match in the DETAIL string only, and
-            # require the username token (the part before the colon/space) to
-            # actually be 'administrator' (case-insensitive).
+            # iter-13: don't auto-promote stage to 'admin' just because the
+            # credential PRINCIPAL is named 'administrator'. Having admin's
+            # hash != having admin access (the hash might need cracking, the
+            # host might be unreachable, the cred might be stale). Track it
+            # as a separate signal but require an _ADMIN_MARK (NTDS dump,
+            # DCSync, Pwn3d) for the actual stage=3 promotion.
             det_lc = (f["detail"] or "").lower()
             if cat in ("PASSWORD HASHES", "CRED PAIRS"):
-                # detail typically begins with 'user:value' or 'NTLM (NT) DOM\user: hash'
-                # — extract the principal token and check it strictly.
                 principal = ""
                 head = det_lc.split(":", 1)[0]
-                # strip "ntlm (nt) DOM\" prefix patterns
                 if "\\" in head:
                     principal = head.split("\\")[-1].strip()
                 else:
                     principal = head.strip().split()[-1] if head.strip() else ""
                 if principal in ("administrator", "domain administrator",
                                  "enterprise admin", "domain admin"):
-                    d["stage"] = max(d["stage"], 3)
+                    d["admin_cred"] = True  # informational flag, not stage
             if any(k in blob for k in self._ADMIN_MARK):
                 d["stage"] = max(d["stage"], 3)
 

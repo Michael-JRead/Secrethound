@@ -758,6 +758,10 @@ def _multiline_passes(path, report, store):
         report.add("HIGH", "CRED PAIRS", path, _ln(m),
                    f"DPAPI cred for {target} ({u}): {blob[:50]}",
                    hint="if blob looks like plaintext, reuse; else SharpDPAPI / dpapi.py to decrypt")
+        # iter-13: feed the Evidence store so downstream chain logic sees it.
+        if store is not None:
+            store.add(Evidence(kind="cred", user=u, plaintext=blob,
+                               source=path, line=_ln(m)))
 
     # Rubeus kerberoast: user-bound hash binding
     for m in _RUBEUS_KERB.finditer(text):
@@ -768,6 +772,10 @@ def _multiline_passes(path, report, store):
                    f"Kerberoast TGS ({u}): {h[:60]}...",
                    hint=f"hashcat -m 13100 tgs.txt rockyou.txt - cracked plaintext = {u}'s svc-account password")
         HASHES.append(("13100", "Kerberoast TGS", h, path, _ln(m)))
+        # iter-13: store the kerberoastable principal for chain enrichment
+        if store is not None:
+            store.add(Evidence(kind="kerberoastable", user=u,
+                               source=path, line=_ln(m)))
 
     # PowerView Get-DomainUser kerberoastable
     for m in _PV_KERB.finditer(text):
@@ -775,6 +783,9 @@ def _multiline_passes(path, report, store):
         report.add("HIGH", "RECON", path, _ln(m),
                    f"Kerberoastable: {u}  spn={spn[:50]}",
                    hint="impacket-GetUserSPNs <dom>/<user>:<pw> -dc-ip <dc> -request -outputfile tgs.txt; hashcat -m 13100")
+        if store is not None:
+            store.add(Evidence(kind="kerberoastable", user=u,
+                               source=path, line=_ln(m)))
 
     # cmdkey /list saved
     for m in _CMDKEY_LIST.finditer(text):
@@ -782,6 +793,9 @@ def _multiline_passes(path, report, store):
         report.add("HIGH", "INTERESTING FILES", path, _ln(m),
                    f"cmdkey saved cred for {target} (user: {u})",
                    hint=f"runas /savecred /user:\"{u}\" \"cmd.exe\"  - opens a shell as that user")
+        if store is not None:
+            store.add(Evidence(kind="user", user=u, host=target,
+                               source=path, line=_ln(m)))
 
     # Lazagne extracted creds
     for m in _LAZAGNE.finditer(text):
@@ -1054,7 +1068,15 @@ def analyze(path, report, store=None):
                                            source=path, line=lineno))
                     continue
                 if c and c.kind == "pwdump":
-                    continue          # handled (user-bound) by patterns.py
+                    # iter-13: feed the user<->NT binding into the Evidence
+                    # store so the R7 chain engine sees it.
+                    if store is not None and c.nt_hash:
+                        from analyzers.ingest.evidence import Evidence
+                        store.add(Evidence(kind="hash", user=c.user,
+                                           hash=c.nt_hash, hash_mode="1000",
+                                           domain=c.domain,
+                                           source=path, line=lineno))
+                    continue
 
                 # ---- pass 2: inline-cred shapes ----
                 hit = False
@@ -1300,10 +1322,13 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     if name == "docker env secret":
+                        # iter-13 severity normalization: matches the HIGH
+                        # baseline for the rest of the assigned-secret family
+                        # (Helm/tfvars/PHP define/generic 1-group fall-through).
                         var, val = am.group(1), am.group(2).strip()
                         if filters.is_placeholder(val) or filters.is_known_example(val):
                             continue
-                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
                                    f"{var}: {val}",
                                    hint="container/orchestration secret - reuse directly against the service")
                         if store is not None:
@@ -1635,8 +1660,11 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     if name == "Snaffler red":
+                        # iter-13 severity normalization: this is a PATH, not
+                        # the secret content. Demote from CRITICAL to HIGH so
+                        # severity matches what the operator actually got.
                         target = am.group(1)
-                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    f"Snaffler red-flagged file: {target}",
                                    hint=f"read: type \"{target}\" / cat {target}  - Snaffler matched a secret-or-cred rule")
                         hit = True
@@ -1668,41 +1696,56 @@ def analyze(path, report, store=None):
                     # cmdkey saved -> _multiline_passes()
                     if name == "PEAS sudo version":
                         ver = am.group(1)
-                        parts = [int(x) for x in ver.split('.')]
-                        sev = "CRITICAL" if parts < [1, 9, 5] else "MEDIUM"
-                        cve = ("CVE-2021-3156 (Baron Samedit) - sudoedit -s '\\' heap overflow"
-                               if parts < [1, 9, 5] else "current - check for sudo -l NOPASSWD")
+                        try:
+                            parts = [int(x) for x in ver.split('.')]
+                        except ValueError:
+                            continue
+                        # iter-13: vulnerable-version match is HIGH (PoC still
+                        # requires heap-luck + sudoedit binary present); current
+                        # is INFO (just a version string for context).
+                        if parts < [1, 9, 5]:
+                            sev = "HIGH"
+                            cve = "CVE-2021-3156 (Baron Samedit) - sudoedit -s '\\' heap overflow; verify sudoedit present + PoC compiles"
+                        else:
+                            sev = "INFO"
+                            cve = "current - check sudo -l NOPASSWD entries"
                         report.add(sev, "RECON", path, lineno,
                                    f"sudo {ver} - {cve}",
-                                   hint="if vulnerable: blasty-vs-pwnkit clone; else check sudo -l and GTFOBins")
+                                   hint="if vulnerable: searchsploit CVE-2021-3156; always run sudo -l for NOPASSWD/GTFOBins")
                         hit = True
                         break
                     if name == "SUID GTFOBins":
+                        # iter-13: intel-only privesc primitive (HIGH, not
+                        # CRITICAL - operator still has to validate by hand)
                         binary = am.group(1)
-                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    f"SUID-root GTFOBins-able binary: {binary}",
                                    hint=f"gtfobins.github.io/gtfobins/{os.path.basename(binary)} - SUID section -> root")
                         hit = True
                         break
                     if name == "Linux capability":
                         binary, cap = am.group(1), am.group(2)
-                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                        # iter-13: intel-only - HIGH
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    f"capability {cap} on {binary}",
                                    hint="cap_setuid+ep on python/perl/ruby = direct root: <bin> -c 'import os; os.setuid(0); os.system(\"/bin/bash\")'")
                         hit = True
                         break
                     if name == "NFS no_root_squash":
                         ex = am.group(1)
-                        report.add("CRITICAL", "RECON", path, lineno,
+                        # iter-13: intel-only privesc primitive - HIGH
+                        report.add("HIGH", "RECON", path, lineno,
                                    f"NFS export no_root_squash: {ex}",
                                    hint=f"as root locally: mount -t nfs <target>:{ex} /mnt; copy SUID-shell binary in; gain root on target")
                         hit = True
                         break
                     if name == "CobaltStrike beacon":
+                        # iter-13: IOC-only intel (no cred to use). Demote to
+                        # MEDIUM/RECON to match peer IOC signals.
                         c2 = am.group(1) or am.group(2) or am.group(3) or ""
-                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                        report.add("MEDIUM", "RECON", path, lineno,
                                    f"Cobalt Strike beacon config: {c2[:60]}",
-                                   hint="parse with SentinelOne CobaltStrikeParser or 1768.py - C2 URL/staging path/keys")
+                                   hint="parse with CobaltStrikeParser / 1768.py - C2 URL/staging path/HMAC keys")
                         hit = True
                         break
                     # Lazagne cred -> _multiline_passes()
@@ -1950,7 +1993,9 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     if name == "AAD FOCI marker":
-                        report.add("HIGH", "RECON", path, lineno,
+                        # iter-13: intel-only marker (no credential value).
+                        # Demote to LOW - context for the paired refresh_token.
+                        report.add("LOW", "RECON", path, lineno,
                                    "AAD FOCI=1 (refresh token works for any 1P Microsoft app)",
                                    hint="pair with the AAD refresh_token above; foci tokens grant Graph/AzureCLI/Teams scopes interchangeably")
                         hit = True

