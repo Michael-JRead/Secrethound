@@ -133,6 +133,41 @@ _AD = [
     # (Mantis Orchard web.config). Captures the whole value; branch parses it.
     ("ADO connectionString", re.compile(
         r'(?i)connectionString\s*=\s*["\']([^"\'\r\n]{8,400})["\']')),
+    # ---- iter-7 round-2 completeness adds (from workflow's missing-class list) ----
+    # SQL INSERT cred row: INSERT INTO users (..., username, ..., password, ...)
+    # VALUES (..., 'X', ..., '$2y$10$...', ...); also pg/MySQL COPY/dump format.
+    # Captures bcrypt/MD5/plain into PASSWORD HASHES.
+    ("SQL INSERT cred row", re.compile(
+        r"(?i)INSERT\s+INTO\s+\W?(?:users?|members?|accounts?|admins?|"
+        r"login|customers?|employees?)[^()]*\([^)]*\bpassword\b[^)]*\)\s*VALUES\s*\(([^)]+)\)")),
+    # SNMP community strings: rocommunity/rwcommunity + value (+ optional ACL).
+    # Direct enum vector - rwcommunity = direct foothold on the OSCP exam.
+    ("SNMP community", re.compile(
+        r'(?i)^\s*(rocommunity|rwcommunity|rocommunity6|rwcommunity6)\s+'
+        r'([^\s#]{3,60})(?:\s+([^\s#]+))?')),
+    # docker-compose / k8s / .env environment variables that look credential-y.
+    # MYSQL_ROOT_PASSWORD, POSTGRES_PASSWORD, REDIS_PASSWORD etc.
+    ("docker env secret", re.compile(
+        r'(?i)\b(MYSQL_(?:ROOT_)?PASSWORD|POSTGRES_(?:DB_)?PASSWORD|MARIADB_(?:ROOT_)?PASSWORD|'
+        r'MONGO(?:DB)?_(?:INITDB_)?(?:ROOT_)?PASSWORD|REDIS_PASSWORD|RABBITMQ_(?:DEFAULT_)?PASS|'
+        r'ELASTIC_PASSWORD|MINIO_(?:ROOT_)?(?:USER|PASSWORD)|GF_SECURITY_ADMIN_PASSWORD|'
+        r'KEYCLOAK_ADMIN_PASSWORD|HASURA_GRAPHQL_ADMIN_SECRET|'
+        r'SMTP_(?:PASSWORD|PASS|AUTH_PASSWORD))\s*[:=]\s*["\']?([^"\'\r\n]{3,80})["\']?')),
+    # PowerShell PSReadLine history: cmdkey /add:host /user:DOM\u /pass:X
+    # (one of the highest-value OSCP+ history-file lines).
+    # `\w` doesn't include '\' so we use `[^\s/]+` for the inter-flag tokens.
+    ("cmdkey history", re.compile(
+        r'(?i)\bcmdkey(?:\.exe)?\s+(?:/[^\s/]+\s+)*/pass(?:word)?\s*[:=]\s*([^\s/]{3,80})')),
+    # ASP.NET machineKey - both halves are crackable hex for ViewState forgery.
+    ("ASP.NET machineKey", re.compile(
+        r'(?i)<machineKey\b[^>]*?\bvalidationKey\s*=\s*["\']([A-F0-9]{16,})["\'][^>]*?'
+        r'\bdecryptionKey\s*=\s*["\']([A-F0-9]{16,})["\']')),
+    # SCCM Network Access Account (NAA) is two-line - handled by
+    # _multiline_passes() below, not the line-by-line _AD loop.
+    # LSA-secrets section in secretsdump (machine account + LSA SCM service creds)
+    ("LSA secret", re.compile(
+        r'(?i)\$MACHINE\.ACC\s*:\s*([a-f0-9]{32}:[a-f0-9]{32})|'
+        r'^SCM\s*:\s*\{[^}]*\}\s*:\s*(\S+):(\S+)', re.MULTILINE)),
 ]
 
 
@@ -176,6 +211,33 @@ def _learn_nxc_service(line, path, store, seen):
         store.add(Evidence(kind="host", host=ip, fact="dc", source=path))
 
 
+_SCCM_NAA_MULTI = re.compile(
+    r'(?i)NetworkAccess(?:Account|Username)\s*[:=]\s*(\S+)[\s\S]{0,400}?'
+    r'NetworkAccessPassword\s*[:=]\s*([^\r\n]{3,80})'
+)
+
+
+def _multiline_passes(path, report, store):
+    """File-level passes that need multi-line context (SCCM NAA blocks span
+    two lines; can't be matched line-by-line)."""
+    try:
+        with open(path, "r", errors="ignore") as fh:
+            text = fh.read(50000)
+    except OSError:
+        return
+    for m in _SCCM_NAA_MULTI.finditer(text):
+        u, p = m.group(1).strip(), m.group(2).strip()
+        if filters.is_placeholder(p):
+            continue
+        lineno = text[: m.start()].count("\n") + 1
+        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                   f"SCCM NAA: {u}:{p}",
+                   hint="Network Access Account - typically a domain account; reuse for SMB/WinRM")
+        if store is not None:
+            from analyzers.ingest.evidence import Evidence
+            store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=lineno))
+
+
 def analyze(path, report, store=None):
     ext = os.path.splitext(path)[1].lower()
     require_quote = ext in _CODE_EXT
@@ -213,9 +275,19 @@ def analyze(path, report, store=None):
 
                 # ---- pass 2: inline-cred shapes ----
                 hit = False
+                # iter-7 (round 2): doc files (hardening guides, cheatsheets)
+                # teach AutoLogon REG_SZ syntax and show 'Strong Passwords'
+                # examples - skip all the inline-cred patterns here.
+                _is_doc = filters.is_doc_file(path)
                 for name, rx in _AD:
                     am = rx.search(line)
                     if not am:
+                        continue
+                    # autologon password in doc files is teaching content, not loot.
+                    if _is_doc and name in ("autologon password",
+                                            "SQL IDENTIFIED BY",
+                                            "sshpass -p",
+                                            "mysql -p inline"):
                         continue
                     # tomcat-users: user+pass+roles -> RCE-aware severity
                     if name == "tomcat-users":
@@ -375,6 +447,97 @@ def analyze(path, report, store=None):
                                    hint="impacket-dpapi masterkey -file <mk> -sid <SID> -password <pw>  (or -rpc on a box you own)")
                         hit = True
                         break
+                    # ---- iter-7 round-2 completeness handlers ----
+                    if name == "SQL INSERT cred row":
+                        # capture group is the VALUES (...) tuple; extract every
+                        # quoted value and look for a bcrypt/MD5/plain hash.
+                        vals = re.findall(r"['\"]([^'\"]{2,80})['\"]", am.group(1))
+                        # try to find a hash-shaped value; otherwise emit as cred
+                        hashy = next((v for v in vals
+                                      if re.match(r'^\$2[aby]\$|^\$1\$|^\$6\$|^\$5\$|'
+                                                  r'^[a-f0-9]{32}$|^[a-f0-9]{40}$|'
+                                                  r'^[a-f0-9]{60}$|^\$apr1\$', v)), None)
+                        usery = next((v for v in vals if re.match(r'^[A-Za-z][\w@.-]{1,40}$', v) and len(v) <= 40), None)
+                        if hashy:
+                            report.add("HIGH", "PASSWORD HASHES", path, lineno,
+                                       f"SQL dump user: {usery or '<unknown>'}  hash: {hashy[:60]}",
+                                       hint="check hashid then hashcat -m <mode>; common: bcrypt -m 3200, md5 -m 0")
+                            from analyzers.patterns import HASHES
+                            if hashy.startswith("$2"): HASHES.append(("3200", "bcrypt", hashy, path, lineno))
+                            elif hashy.startswith("$1$"): HASHES.append(("500", "md5crypt", hashy, path, lineno))
+                            elif hashy.startswith("$6$"): HASHES.append(("1800", "sha512crypt", hashy, path, lineno))
+                            elif hashy.startswith("$apr1$"): HASHES.append(("1600", "apr1", hashy, path, lineno))
+                            elif len(hashy) == 32: HASHES.append(("0", "MD5", hashy, path, lineno))
+                        hit = True
+                        break
+                    if name == "SNMP community":
+                        kind, comm, source = am.group(1), am.group(2), (am.group(3) or "")
+                        if filters.is_placeholder(comm):
+                            continue
+                        rw = kind.lower().startswith("rwcommunity")
+                        sev = "CRITICAL" if rw else "HIGH"
+                        report.add(sev, "ASSIGNED SECRETS", path, lineno,
+                                   f"SNMP {kind}: {comm}" + (f"  ({source})" if source else ""),
+                                   hint=("snmpwalk -v2c -c '" + comm + "' <host>  " +
+                                         ("(read-WRITE - snmpset for direct config tampering)" if rw
+                                          else "(read-only enum: walk full tree)")))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=comm, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "docker env secret":
+                        var, val = am.group(1), am.group(2).strip()
+                        if filters.is_placeholder(val) or filters.is_known_example(val):
+                            continue
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"{var}: {val}",
+                                   hint="container/orchestration secret - reuse directly against the service")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "cmdkey history":
+                        pw = am.group(1).strip()
+                        if filters.is_placeholder(pw):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"cmdkey history password: {pw}",
+                                   hint="typed in PowerShell - reuse against the host in the same cmdkey line / via SMB")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=pw, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "ASP.NET machineKey":
+                        vk, dk = am.group(1), am.group(2)
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"ASP.NET machineKey  validationKey={vk[:32]}{'...' if len(vk)>32 else ''} "
+                                   f"decryptionKey={dk[:32]}{'...' if len(dk)>32 else ''}",
+                                   hint="ViewState forgery: ysoserial.net + these keys -> RCE (CVE-2017-9248-class)")
+                        hit = True
+                        break
+                    # SCCM NAA handled by _multiline_passes() (two-line block)
+                    if name == "LSA secret":
+                        if am.group(1):  # $MACHINE.ACC : LM:NT
+                            pair = am.group(1)
+                            nt = pair.split(":")[1]
+                            report.add("HIGH", "PASSWORD HASHES", path, lineno,
+                                       f"NTLM (NT) $MACHINE.ACC: {nt}",
+                                       hint=f"machine account hash - silver/golden-ticket primitive: nxc smb <dc> -u 'HOSTNAME$' -H {nt}")
+                            from analyzers.patterns import HASHES
+                            HASHES.append(("1000", "NTLM", nt, path, lineno))
+                        elif am.group(2) and am.group(3):
+                            u, p = am.group(2), am.group(3)
+                            report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                       f"LSA SCM service cred: {u}:{p}",
+                                       hint="service account password recovered from LSA secrets - reuse against the host")
+                            if store is not None:
+                                from analyzers.ingest.evidence import Evidence
+                                store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=lineno))
+                        hit = True
+                        break
                     # ADO.NET connectionString: parse User ID / Password out cleanly
                     if name == "ADO connectionString":
                         cs = am.group(1)
@@ -452,3 +615,5 @@ def analyze(path, report, store=None):
                 report.add("HIGH", "ASSIGNED SECRETS", path, lineno, snippet)
     except Exception:
         pass
+    # File-level multi-line passes (after the line-by-line scan completes).
+    _multiline_passes(path, report, store)

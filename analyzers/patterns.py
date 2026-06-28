@@ -121,6 +121,15 @@ _HASH_NEG_CONTEXT = re.compile(
     r'\bmanifest\b|\bgpo[\s_-]?backup\b|\bbackup[\s_-]?id\b|\basset[\s_-]?hash\b|'
     r'\bvite\s*:|\bchunk\b)'
 )
+# package-manifest / lock-file paths that ship content-addressed hashes for
+# every dep. We apply this on PATH not LINE (lock files are huge tables).
+_LOCK_FILE = re.compile(
+    r'(?i)(?:^|/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.ya?ml|composer\.lock|'
+    r'Cargo\.lock|go\.sum|Pipfile\.lock|poetry\.lock|Gemfile\.lock|pubspec\.lock|'
+    r'gradle.*\.lock|requirements.*\.lock|conda-lock\.ya?ml|stack\.ya?ml\.lock|'
+    r'mix\.lock|elm-stuff/.*|flake\.lock|deno\.lock|registry-auth\.lock|.*-lock\..*)'
+    r'|\.lock(?:\.\w+)?$'
+)
 # raw hex in a source-code comment is documentation/example, never live loot
 # (real hashdump/secretsdump rows are never comment-prefixed).
 _CODE_COMMENT = re.compile(r'^\s*(#|//|\*|/\*|--\s|;)')
@@ -143,6 +152,11 @@ def _disp(val):
 
 
 def analyze(path, report):
+    # iter-7: lock files are content-addressed dep manifests - thousands of
+    # 32/40/64-hex integrity hashes per file. Skip the hash-shaped detectors
+    # entirely. Real cred leaks in lock files are extraordinarily rare; the
+    # FP-audit found 100% noise there.
+    _skip_hashes = bool(_LOCK_FILE.search(path or ""))
     try:
         with open(path, "r", errors="ignore") as f:
             for lineno, line in enumerate(f, 1):
@@ -193,7 +207,33 @@ def analyze(path, report):
                     # 'NTLM'/'NTDS'/'SAM'/'secretsdump' keyword, or the blank-LM
                     # marker hash). Require one of those to fire - iter-7 FP
                     # audit killed 17 FPs here.
-                    if name == "NTLM pair (LM:NT)" and not _NTLM_PAIR_CONTEXT.search(line):
+                    # Also reject negative context (gpo_backup_manifest.csv,
+                    # nmap ssl-cert thumbprints, vite chunk hashes) and the
+                    # lock-file gate above.
+                    if name == "NTLM pair (LM:NT)":
+                        if (not _NTLM_PAIR_CONTEXT.search(line)
+                                or _HASH_NEG_CONTEXT.search(line)
+                                or _skip_hashes):
+                            continue
+                    # Lock-file gate: all hash-shaped detectors off.
+                    if _skip_hashes and name in (
+                            "raw MD5/NTLM", "raw SHA1", "raw SHA256", "raw SHA512",
+                            "bcrypt", "sha512crypt", "sha256crypt", "md5crypt",
+                            "yescrypt", "apr1 (htpasswd)", "argon2", "phpass (WP/phpBB)",
+                            "Drupal7", "Kerberoast TGS (RC4)", "Kerberoast TGS (AES128)",
+                            "Kerberoast TGS (AES256)", "AS-REP roast (RC4)",
+                            "AS-REP roast (AES)", "Kerberos pre-auth",
+                            "Timeroast (SNTP-MS)", "DCC2 (mscash2)", "NetNTLMv2",
+                            "NetNTLMv1", "NTLM pair (LM:NT)", "KeePass",
+                            "MySQL4.1+", "MSSQL 2012+", "MSSQL 2005",
+                            "Cisco type8", "Cisco type9", "GPP cpassword",
+                            "Mailgun key", "Twilio SID", "Stripe key",
+                            "SendGrid key", "Google API key", "Google OAuth",
+                            "Slack token", "JWT", "Azure storage key",
+                            "GitHub token", "GitHub PAT (fine)", "GitLab PAT",
+                            "npm token", "DockerHub PAT", "AWS access key",
+                            "AWS secret", "Password Safe v3", "KeePass2 hash",
+                            "VNC reg password", "Ansible Vault"):
                         continue
 
                     # canonical documentation/example tokens (AKIA...EXAMPLE etc.).
@@ -268,6 +308,11 @@ def analyze(path, report):
                     # ---- NTLM pair: split, recognise blanks, crack the NT ----
                     if name == "NTLM pair (LM:NT)":
                         lm, nt = m.group(1), m.group(2)
+                        # iter-7: doc files (hardening guides) show the blank-LM/NT
+                        # pair as an *educational example* of an empty password -
+                        # not loot. Suppress.
+                        if filters.is_doc_file(path):
+                            continue
                         note_nt = filters.blank_hash_note(nt)
                         if filters.is_blank_hash(nt):
                             report.add("MEDIUM", "PASSWORD HASHES", path, lineno,

@@ -193,11 +193,16 @@ def is_known_example(value):
 # (0123456789abcdef repeated), all-repeated-block (aaaa1111bbbb2222), or made
 # entirely from very low-entropy patterns.
 _SEQ_HEX = re.compile(
-    r'^(?:0123456789abcdef|abcdef0123456789|deadbeef|cafebabe|cafef00d|c0ffee|'
-    r'beefcafe|feedface|baadf00d|aabbccdd|1234567890ab)+[0-9a-f]{0,12}$'
+    r'^(?:0123456789abcdef|abcdef0123456789|fedcba9876543210|fedcba0987654321|'
+    r'deadbeef|cafebabe|cafef00d|c0ffee|deadc0de|beefcafe|feedface|baadf00d|'
+    r'aabbccdd|aabb1111|aaaa1111|bbbb2222|ccccdddd|11112222|0a0b0c0d|'
+    r'1122334455667788|0102030405060708|0a1b2c3d4e5f6071|'
+    r'1234567890ab|01020304050607|6f6f6f6f|aaaaaaaa)+[0-9a-f]{0,16}$'
 )
-# repeat-of-short-block (e.g. ababab..., 11221122..., 0000ffff0000ffff)
-_REPEAT_HEX = re.compile(r'^([0-9a-f]{2,8})\1{3,}$')
+# repeat-of-short-block (e.g. ababab..., 11221122..., 0000ffff0000ffff).
+# Tightened from 4 to 2 reps so SK<fedcba0987654321><fedcba0987654321> kind
+# of canonical Twilio/Mailgun stand-ins are caught.
+_REPEAT_HEX = re.compile(r'^([0-9a-f]{4,16})\1{1,}$')
 
 
 def is_canonical_sample(value):

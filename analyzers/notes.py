@@ -8,7 +8,7 @@ TODO/STUCK 'resume point' markers (so when you're deep in the weeds the tool
 hands back your own unresolved leads).
 """
 import re
-from analyzers import credline
+from analyzers import credline, filters
 from analyzers.ingest.evidence import Evidence
 
 # credential table row:  | user | pass | host |
@@ -39,7 +39,12 @@ def analyze(path, report, store=None):
                 # notes) via the shared credline classifier - we don't re-emit them
                 # here or we'd double-report. notes owns only TABLES + resume markers.
 
-                # credential TABLE row (credline doesn't own these)
+                # credential TABLE row (credline doesn't own these). Doc files
+                # (lab-walkthrough.md, .markdown writeups) ship illustrative
+                # markdown tables that aren't loot - skip the table rule there
+                # but keep TODO/resume markers above.
+                if filters.is_doc_file(path):
+                    continue
                 mt = _TABLE.match(line)
                 if (mt and _CREDWORD.search(line) and credline._ok_pw(mt.group(2))
                         and mt.group(1).lower() not in ("user", "username", "host", "ip", "name")):

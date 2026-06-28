@@ -30,6 +30,15 @@ def _clean(value):
     return v.strip("'\"").rstrip(";,)} \t")
 
 
+_SOURCE_CALL = re.compile(
+    r'(?i)(?:->|::|\.)(?:input|get|post|request|env|getenv|config|param|'
+    r'header|headers|params|form|query|cookie|cookies|session|attr|fetch)\s*\('
+    r'|\$_(?:POST|GET|REQUEST|ENV|SERVER|COOKIE|SESSION)\b'
+    r'|process\.env\.|os\.environ\b|System\.getenv\b'
+    r'|(?:request|req)\.(?:body|params|query|cookies|headers)\b'
+)
+
+
 def _good(raw, line):
     v = _clean(raw)
     if not v or " " in v or not (2 < len(v) < 80):
@@ -37,6 +46,13 @@ def _good(raw, line):
     if filters.is_placeholder(raw) or filters.is_known_example(raw):
         return None
     if filters.is_code_not_literal(raw, line):
+        return None
+    # iter-7: source-code rejects - lines like
+    # `'username' => $request->input('username')` parse as `user=$request->input('username')`
+    # which has all the shape of a real cred-pair. Skip lines that contain a
+    # source-code call/property access reading from an HTTP request, env, or
+    # config; those are LITERAL CODE not credentials.
+    if _SOURCE_CALL.search(line) or _SOURCE_CALL.search(raw):
         return None
     return v
 
