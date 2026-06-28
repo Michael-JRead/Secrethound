@@ -132,7 +132,13 @@ class Store:
                        if e.kind == "service" and e.service in names and e.host})
 
     def users_txt(self):
-        return sorted({e.user for e in self.items if e.user})
+        # iter-16: filter machine accounts (HOSTNAME$ format from NTDS dumps).
+        # These represent computer objects, not user accounts; spraying their
+        # NT hash against another machine is meaningless and floods spray
+        # output with false negatives. Operator wants users.txt for HUMAN
+        # accounts.
+        return sorted({e.user for e in self.items
+                       if e.user and not e.user.endswith("$")})
 
     def hosts(self):
         return sorted({e.host for e in self.items if e.host})

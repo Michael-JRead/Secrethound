@@ -36,12 +36,20 @@ PLAYBOOK = {
         ("dump more (if admin)", "impacket-secretsdump -hashes :<NThash> <DOMAIN>/<user>@<DC> -just-dc", ""),
     ],
     "NTLM": [("pass-the-hash or crack", "netexec smb <DC-IP> -u '<user>' -H <NThash>   # or hashcat -m 1000", "")],
+    # iter-16: removed Responder (LLMNR/NBT-NS poisoning) and ntlmrelayx
+    # (NTLM relay) command suggestions. Both are spoofing primitives and
+    # prohibited on the OSCP+ exam regardless of [LAB-ONLY] tagging - a
+    # copy-pasteable command in the playbook output is risky to ship.
+    # Cracking remains as the only legal path.
     "NetNTLMv2": [
-        ("crack (PCAP/coerced source)", "hashcat -m 5600 hashes.txt rockyou.txt", "challenge/response - not PtH-able."),
-        ("[LAB-ONLY] capture via poisoning", "responder -I eth0    # then crack -m 5600", "LLMNR/NBT-NS poisoning = spoofing = NOT OSCP-exam-legal."),
-        ("[LAB-ONLY] relay it", "impacket-ntlmrelayx -tf targets.txt -smb2support", "relay needs signing:False; spoofing-based = NOT exam-legal."),
+        ("crack (PCAP/coerced source)", "hashcat -m 5600 hashes.txt rockyou.txt",
+         "challenge/response - not PtH-able. Capture requires spoofing "
+         "primitives prohibited on OSCP+ exam; cracking only."),
     ],
-    "NetNTLMv1": [("crack v1", "hashcat -m 5500 hashes.txt rockyou.txt   # or crack.sh for guaranteed NT", "[LAB-ONLY] if captured via poisoning.")],
+    # iter-16: removed crack.sh suggestion - public online cracking service
+    # is OUT-OF-SCOPE for exam (and reveals the hash to a third party).
+    "NetNTLMv1": [("crack v1 offline", "hashcat -m 5500 hashes.txt rockyou.txt",
+                   "NetNTLMv1 cracking is offline only - no online services on exam.")],
     # ---- hashes ------------------------------------------------------------
     "bcrypt": [("crack bcrypt", "hashcat -m 3200 hashes.txt rockyou.txt", "slow by design.")],
     "sha512crypt": [("crack $6$ (Linux shadow)", "unshadow passwd shadow > u; hashcat -m 1800 u rockyou.txt", "standard Linux shadow hash.")],

