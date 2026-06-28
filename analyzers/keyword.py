@@ -59,6 +59,17 @@ _AD = [
     ("PHP var secret", re.compile(
         r"(?i)\$\w*(?:password|passwd|pwd|secret|salt|authtoken|smtppass|ftppass|dbpass)\b"
         r"\s*=\s*['\"]([^'\"\r\n]{3,})['\"]")),
+    # PHP nested-array string key: 'password' => 'X', 'db_passwd' => 'X', "PWD" => "X"
+    # (Koken database.php, OpenAdmin $ona_contexts, generic Phinx/Slim configs)
+    ("PHP array secret", re.compile(
+        r"(?i)['\"](?:db_)?(?:password|passwd|pwd|secret|salt|smtppass)['\"]"
+        r"\s*=>\s*['\"]([^'\"\r\n]{3,})['\"]")),
+    # ADO.NET / php connection-string keyword: PWD=X or UID=>X
+    ("conn-string keyword", re.compile(
+        r"(?i)['\"]?(?:PWD|PASSWORD|UID|USER\s*ID)['\"]?\s*=>?\s*['\"]([^'\"\r\n]{3,})['\"]")),
+    # MongoDB BSON shell output: { ..., "username" : "X", "password" : "Y" }
+    ("MongoDB BSON", re.compile(
+        r'"username"\s*:\s*"([^"]{1,40})"[^}]{0,200}?"password"\s*:\s*"([^"]{3,80})"')),
     # tomcat-users.xml <user username="X" password="Y" roles="Z"/>  - capture both
     # user and pw, plus roles so the hint distinguishes RCE-path (manager-script /
     # admin-gui) from read-only.
