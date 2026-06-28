@@ -14,7 +14,8 @@ from core.report import Report
 from core.ui import UI
 from core import correlate
 from analyzers import (keyword, entropy, patterns, credpairs, encoded, files,
-                       inspect, sqlite_triage, playbook, filters, notes, inventory)
+                       inspect, sqlite_triage, playbook, filters, notes, inventory,
+                       configs)
 from analyzers.ingest import run as ingest_run, Store, potfile
 
 VERSION = "2.0"
@@ -230,6 +231,7 @@ def main():
         encoded.analyze(path, report)
         keyword.analyze(path, report, store)
         patterns.analyze(path, report)
+        configs.analyze(path, report, store)
         if run_entropy and ext in ENTROPY_EXT:
             entropy.analyze(path, report, threshold=thr)
     if not args.quiet:
