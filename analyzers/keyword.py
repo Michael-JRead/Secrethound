@@ -400,6 +400,62 @@ _AD = [
     # rclone.conf saved cloud token (one-line shape)
     ("rclone token", re.compile(
         r'(?im)^\s*token\s*=\s*\{["\']access_token["\']\s*:\s*["\']([^"\']{20,})["\']')),
+    # ---- iter-10: container / CI / cloud loot detectors ----
+    # Vault unseal key (HashiCorp Vault `vault operator init` output): one of N
+    # base64 keys you need M-of-N to unseal. Distinctive shape: 'Unseal Key N:'
+    # followed by a base64 token (44 chars for default Shamir).
+    ("Vault unseal key", re.compile(
+        r'(?i)\bUnseal\s+Key\s+\d+\s*:\s*([A-Za-z0-9+/=]{40,60})')),
+    # Vault root token: `Initial Root Token: hvs.<...>` or `s.<...>` (legacy)
+    ("Vault root token", re.compile(
+        r'(?i)\b(?:Initial\s+)?Root\s+Token\s*:\s*((?:hvs|hvb|s)\.[A-Za-z0-9_\-]{20,})')),
+    # kubectl bearer-token leak in shell history / CI log:
+    # `kubectl --token=eyJ...` or `kubectl --token eyJ...`
+    ("kubectl --token", re.compile(
+        r'(?i)\bkubectl\b[^\n]*?--token[=\s]+(eyJ[A-Za-z0-9_\-\.]{20,})')),
+    # Helm values.yaml common secret keys (root-level only; nested handled by
+    # the generic ASSIGNED-SECRETS pass). Specific shape avoids the 'key:'
+    # context regex FP because values.yaml routinely has 'secret:' as a section
+    # header (no value).
+    ("Helm values secret", re.compile(
+        r'(?im)^\s{0,4}(secretKey|adminPassword|rootPassword|sharedSecret|jwtSecret|encryptionKey)'
+        r'\s*:\s*["\']?([^"\'\s#\r\n]{6,80})["\']?\s*$')),
+    # S3 / GCS presigned URL with the AWSAccessKeyId + Signature query params.
+    # Loot value: gives direct file access without further auth.
+    ("S3 presigned URL", re.compile(
+        r'https?://[^\s\'\"<>]+\?(?:[^\s\'\"<>]*&)?'
+        r'(?:X-Amz-Signature|Signature)=([A-Fa-f0-9%]{20,})')),
+    # Azure DevOps PAT (52 base64 chars with no '+' or '/'). Shape distinctive.
+    # The `pat=`/`AZURE_DEVOPS_TOKEN=` context is in the SaaS rule; this catches
+    # the bare blob shape too.
+    ("Azure DevOps PAT", re.compile(
+        r'(?i)\b(?:devops|azdo|ado)[_-]?(?:pat|token)\s*[:=]\s*["\']?([a-z0-9]{52})["\']?')),
+    # GitHub fine-grained PAT: `github_pat_` + 22 + `_` + 59 base62 chars
+    # (already in patterns.py vendor list, but here as a contextual hit when
+    # bound to a `gh auth login` / `git clone` line for chain-narrative).
+    ("gh auth PAT", re.compile(
+        r'(?i)\bgh\s+auth\s+login\s+(?:-h\s+\S+\s+)?--with-token\s+(\S{20,})')),
+    # CircleCI personal token in `~/.circleci/cli.yml` or env
+    ("CircleCI token", re.compile(
+        r'(?i)\b(?:circleci_token|CIRCLE_TOKEN)\s*[:=]\s*["\']?([a-f0-9]{40})["\']?')),
+    # Jenkins build env dump: `BUILD_USER_EMAIL=...`, `_JOB_PASSWORD=...`,
+    # `_CRED_PASSWORD=...` - if a secret leaks here, it's plaintext.
+    ("Jenkins build env secret", re.compile(
+        r'(?im)^\s*\w*(?:JOB|BUILD|CRED|SCRIPT)_(?:PASSWORD|PASS|TOKEN|SECRET|KEY|API_KEY)'
+        r'\s*=\s*([^\s\r\n]{6,200})\s*$')),
+    # AWS shared-config profile with role_arn + source_profile (multi-account
+    # pivot path). Distinctive 'role_arn = arn:aws:iam::...:role/...' line.
+    ("AWS assume-role profile", re.compile(
+        r'(?im)^\s*role_arn\s*=\s*(arn:aws:iam::\d{12}:role/[\w+=,.@/-]{1,80})\s*$')),
+    # Terraform .tfvars secret line (var name typically ends in _password /
+    # _secret / _key / _token).
+    ("Terraform tfvars secret", re.compile(
+        r'(?im)^\s*([A-Za-z][A-Za-z0-9_]*(?:_password|_secret|_key|_token|_pwd))\s*=\s*'
+        r'["\']([^"\'\r\n]{6,200})["\']')),
+    # Consul ACL token (UUID v4 shape) - common HashiCorp loot
+    ("Consul ACL token", re.compile(
+        r'(?i)\b(?:CONSUL_HTTP_TOKEN|consul_token|acl\.tokens\.\w+)\s*[:=]\s*["\']?'
+        r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\']?')),
 ]
 
 
@@ -1534,6 +1590,87 @@ def analyze(path, report, store=None):
                                    hint="hashcat -m 1800 splunk.hash rockyou.txt")
                         from analyzers.patterns import HASHES
                         HASHES.append(("1800", "sha512crypt", h, path, lineno))
+                        hit = True
+                        break
+                    # ---- iter-10 dispatch branches ----
+                    # Vault unseal key: high-value, marks a vault as crackable
+                    # (need M of N keys to unseal; if you have N keys in loot,
+                    # you OWN the vault).
+                    if name == "Vault unseal key":
+                        k = am.group(1)
+                        if filters.is_placeholder(k):
+                            continue
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"Vault unseal key share: {k}",
+                                   hint="vault operator unseal '" + k + "'  (need M of N shares; collect from loot)")
+                        hit = True
+                        break
+                    if name == "Vault root token":
+                        t = am.group(1)
+                        if filters.is_placeholder(t):
+                            continue
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"Vault root token: {t}",
+                                   hint="export VAULT_TOKEN='" + t + "'; vault secrets list  - read EVERY mounted secret store")
+                        hit = True
+                        break
+                    if name == "kubectl --token":
+                        t = am.group(1)
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"kubectl bearer token: {t[:30]}...",
+                                   hint="kubectl --token='" + t + "' --server=<api> auth can-i --list  - enumerate role privs")
+                        hit = True
+                        break
+                    if name == "Helm values secret":
+                        var, val = am.group(1), am.group(2)
+                        if filters.is_placeholder(val):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Helm values.{var}: {val}",
+                                   hint="reuse on the deployed service or pod's container")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "Terraform tfvars secret":
+                        var, val = am.group(1), am.group(2)
+                        if filters.is_placeholder(val):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"tfvars {var}: {val}",
+                                   hint="terraform .tfvars literal - reuse for the provisioned resource")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "S3 presigned URL":
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"S3/GCS presigned URL: {line.strip()[:120]}",
+                                   hint="curl '<url>' -o stolen.bin   - signed URL gives direct access without further auth")
+                        hit = True
+                        break
+                    if name == "AWS assume-role profile":
+                        role = am.group(1)
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"AWS assume-role chain: {role}",
+                                   hint="aws sts assume-role --role-arn '" + role + "' --role-session-name s   - multi-account pivot")
+                        hit = True
+                        break
+                    if name == "Jenkins build env secret":
+                        val = am.group(1).strip()
+                        if filters.is_placeholder(val):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Jenkins build env secret: {line.strip()[:140]}",
+                                   hint="Jenkins build leaked a secret in env dump - reuse on the target service")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
+                                               source=path, line=lineno))
                         hit = True
                         break
                     # SaaS service token: VAR_NAME=value
