@@ -972,6 +972,39 @@ def _multiline_passes(path, report, store):
                    f"PrivescCheck missing patch: {kb} ({cve})",
                    hint=f"verify on host: systeminfo | findstr KB ; manual PoC search: searchsploit {cve}")
 
+    # iter-12 composite: Terraform state "sensitive": true paired with the
+    # SAME block's "value": "<secret>". JSON ordering may put either field
+    # first. Iterate top-level output keys + check whether the block carries
+    # both `"sensitive": true` AND a `"value": "..."`, treating that as a
+    # validated pair within ONE block.
+    # Inner leaf block: braces don't nest (no `{` inside `body`).
+    _TF_BLOCK = re.compile(
+        r'"([\w-]{1,80})"\s*:\s*\{([^{}]{1,600})\}', re.MULTILINE)
+    plow_tf = path.lower()
+    if plow_tf.endswith((".tfstate", ".tfstate.backup", ".tfplan")):
+        tfs_seen = set()
+        for m in _TF_BLOCK.finditer(text):
+            var, block = m.group(1), m.group(2)
+            if '"sensitive"' not in block or '"value"' not in block:
+                continue
+            if not re.search(r'"sensitive"\s*:\s*true', block):
+                continue
+            vm = re.search(r'"value"\s*:\s*"([^"]{3,200})"', block)
+            if not vm:
+                continue
+            val = vm.group(1)
+            if filters.is_placeholder(val) or filters.is_known_example(val):
+                continue
+            if val in tfs_seen:
+                continue
+            tfs_seen.add(val)
+            report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
+                       f"tfstate sensitive {var}: {val}",
+                       hint=f"terraform output {var}; reuse against the provisioned resource")
+            if store is not None:
+                store.add(Evidence(kind="plaintext", plaintext=val,
+                                   source=path, line=_ln(m)))
+
     # iter-11: Pidgin accounts.xml plaintext password block (multi-line XML)
     _PIDGIN = re.compile(
         r'(?is)<account>\s*<protocol>([a-z\-]{3,30})</protocol>\s*'
@@ -1808,9 +1841,25 @@ def analyze(path, report, store=None):
                         # iter-11: also placeholder-gate kubectl bearer
                         if filters.is_placeholder(t):
                             continue
-                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                        # iter-12 composite gate: a real kubectl invocation
+                        # carries --server / --kubeconfig / -s / --insecure
+                        # OR the same line has the api server URL. A bare
+                        # `kubectl --token=...` in a tutorial usually doesn't.
+                        if not re.search(
+                            r'(?i)--server[=\s]+\S|--kubeconfig[=\s]+\S|'
+                            r'-s\s+https?://|--insecure-skip-tls-verify|'
+                            r'https?://[^\s]+:6443|api\.\w+\.k8s', line):
+                            # downgrade to HIGH (no auth-complete context)
+                            sev = "HIGH"
+                            sevhint = ("kubectl bearer token (no server on this line) - "
+                                       "check operator notes for the K8s API endpoint")
+                        else:
+                            sev = "CRITICAL"
+                            sevhint = ("kubectl --token='" + t +
+                                       "' --server=<api> auth can-i --list  - enumerate role privs")
+                        report.add(sev, "ASSIGNED SECRETS", path, lineno,
                                    f"kubectl bearer token: {t[:30]}...",
-                                   hint="kubectl --token='" + t + "' --server=<api> auth can-i --list  - enumerate role privs")
+                                   hint=sevhint)
                         hit = True
                         break
                     if name == "Helm values secret":

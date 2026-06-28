@@ -245,6 +245,39 @@ def run(report, store, ui=None):
     def dc(fallback="<DC-IP>"):
         return global_dc or fallback
 
+    # iter-12 composite: AWS access key + secret in the same file within
+    # 30 lines = an AWS auth-complete pair. Emit one CRITICAL chain with the
+    # ready-to-paste `aws sts get-caller-identity` invocation; the per-rule
+    # 'AWS access key' / 'AWS secret' findings remain in their categories.
+    aws_akids, aws_saks = {}, {}
+    for f in report.findings:
+        det = f.get("detail") or ""
+        path = f.get("file") or ""
+        line = f.get("line") or 0
+        if "AWS access key" in det:
+            # detail format: "AWS access key: AKIA..."
+            akid = det.split(":", 1)[-1].strip()
+            aws_akids.setdefault(path, []).append((akid, line))
+        elif "AWS secret" in det:
+            sak = det.split(":", 1)[-1].strip()
+            aws_saks.setdefault(path, []).append((sak, line))
+    for path, akids in aws_akids.items():
+        for akid, akline in akids:
+            for sak, sline in aws_saks.get(path, []):
+                if abs((sline or 0) - (akline or 0)) > 30:
+                    continue
+                chains.append(Chain("R30", "AWS auth-complete",
+                    f"AWS access+secret pair: {akid} / {sak[:8]}...",
+                    crit=9, conf=0.9, ready=1.5, prox=0.8,
+                    commands=[
+                        f"export AWS_ACCESS_KEY_ID={akid}",
+                        f"export AWS_SECRET_ACCESS_KEY={sak}",
+                        "aws sts get-caller-identity",
+                        "aws s3 ls; aws iam list-attached-user-policies --user-name $(aws sts get-caller-identity --query Arn --output text | cut -d/ -f2)",
+                    ],
+                    src=path, line=akline))
+                break  # one pair per akid
+
     # default creds -> log in directly
     for label, src in e.defaults:
         chains.append(Chain("R24", "default cred", f"default password '{label}' in use",
