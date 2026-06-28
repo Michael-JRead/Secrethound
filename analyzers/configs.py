@@ -152,6 +152,10 @@ def detect(path, head):
 def analyze(path, report, store=None):
     if detect(path, ""):                  # cheap by-name short circuit
         return _walk_unattend(path, report, store)
+    # iter-8: binary file-magic detection for known loot blob formats
+    n = _binary_magic_scan(path, report, store)
+    if n:
+        return n
     try:
         with open(path, "r", errors="ignore") as fh:
             head = fh.read(2048)
@@ -160,3 +164,96 @@ def analyze(path, report, store=None):
     if not _UNATTEND_HINT.search(head):
         return 0
     return _walk_unattend(path, report, store)
+
+
+# Known credential/ticket/keystore file-magic markers - operator loot dirs
+# routinely carry .pfx/.kdbx/.kirbi/.ccache without obvious extensions, and
+# even when extension is present we want a concrete crackable-hash next step.
+_BINARY_MAGIC = [
+    # (hex magic bytes, klass, severity, next-step hint)
+    (b"\x03\xD9\xA2\x9A\x67\xFB\x4B\xB5",
+     "KeePass KDBX v2/3/4 database",
+     "HIGH",
+     "keepass2john <file> > k.hash; hashcat -m 13400 k.hash rockyou.txt"),
+    (b"\x03\xD9\xA2\x9A\x66\xFB\x4B\xB5",
+     "KeePass KDBX v2 pre-release database",
+     "HIGH",
+     "keepass2john <file> > k.hash; hashcat -m 13400 k.hash rockyou.txt"),
+    (b"\x03\xD9\xA2\x9A\x65\xFB\x4B\xB5",
+     "KeePass KDBX v1 database",
+     "HIGH",
+     "keepass2john <file> > k.hash; hashcat -m 13400 k.hash rockyou.txt  (mode 13400 for v1 too)"),
+    (b"\x30\x82", "PFX/PKCS12 ASN.1 SEQUENCE (possible .pfx/.p12)",
+     "HIGH",
+     "openssl pkcs12 -info -in <file> -nodes  -or-  pfx2john <file> > p.hash; hashcat -m 24410 p.hash rockyou.txt"),
+    (b"\x76\xff\xff\xff", "Kerberos .kirbi ticket (KRB-CRED ASN.1)",
+     "HIGH",
+     "ticketConverter.py <file> ticket.ccache; export KRB5CCNAME=ticket.ccache; klist"),
+    (b"\x05\x04\x00\x10",  # MIT ccache v4 magic (0504 0010 in big-endian for some impls)
+     "MIT Kerberos ccache (likely)",
+     "HIGH",
+     "export KRB5CCNAME=<file>; klist; nxc smb <dc> --use-kcache  (PtT)"),
+    (b"-----BEGIN PGP PRIVATE KEY BLOCK-----",
+     "PGP private key block",
+     "HIGH",
+     "gpg --import <file>; gpg2john <file> > p.hash; hashcat -m 17010 p.hash rockyou.txt"),
+    (b"-----BEGIN OPENSSH PRIVATE KEY-----",
+     "OpenSSH private key (new format)",
+     "HIGH",
+     "ssh2john <file> > s.hash; hashcat -m 22921 s.hash rockyou.txt  (if encrypted)"),
+    (b"-----BEGIN RSA PRIVATE KEY-----",
+     "PEM RSA private key",
+     "HIGH",
+     "openssl rsa -in <file>  (if 'ENCRYPTED' header present -> ssh2john + hashcat)"),
+    (b"PuTTY-User-Key-File-2:", "PuTTY private key v2 (.ppk)",
+     "HIGH",
+     "puttygen <file> -O private-openssh -o id_rsa; ssh -i id_rsa"),
+    (b"PuTTY-User-Key-File-3:", "PuTTY private key v3 (Argon2 if encrypted)",
+     "HIGH",
+     "puttygen <file> -O private-openssh -o id_rsa; if encrypted: putty2john (jumbo) | hashcat"),
+    # ESEDB / NTDS.dit:
+    (b"\xef\xcd\xab\x89",   # ESEDB magic (NTDS.dit, ntds.dit, esent DB)
+     "ESEDB (NTDS.dit / WID / SCCM site DB)",
+     "CRITICAL",
+     "impacket-secretsdump -ntds <file> -system SYSTEM LOCAL  (need matching SYSTEM hive)"),
+    # MS-CFB (.msi, .doc, .vbk) — too generic to flag as loot directly
+    # PKZIP - not flagged here; password-protected zip is handled by name.
+    # LSASS minidump:
+    (b"MDMP", "LSASS-shape minidump (.dmp)",
+     "CRITICAL",
+     "pypykatz lsa minidump <file>   -or-   mimikatz: sekurlsa::minidump <file>; sekurlsa::logonpasswords"),
+    # SQLite (Firefox cookies, Chrome Login Data, KeePass keyfiles in disguise):
+    (b"SQLite format 3\x00",
+     "SQLite database (browser stores / app DBs)",
+     "INFO",
+     "sqlite3 <file> .tables; for Chrome Login Data / Firefox logins.json: firepwd.py / firefox_decrypt.py"),
+    # Sysmon / event log .evtx
+    (b"ElfFile\x00", "Windows event log (.evtx)",
+     "INFO",
+     "evtx_dump.py <file> | grep -iE 'EventID|user|target|process'; chainsaw hunt"),
+]
+
+
+def scan_magic(path, report, store=None):
+    """Public entrypoint: scan a SINGLE file for known binary loot magic.
+    Safe to call on any file, binary or text. Cheap (reads <=256 bytes).
+    Use this from the main scan loop on every raw target (not just text)."""
+    return _binary_magic_scan(path, report, store)
+
+
+def _binary_magic_scan(path, report, store):
+    """Read the first ~256 bytes; if magic matches a known cred/ticket/keystore
+    format, emit a HIGH/CRITICAL finding with a concrete next-step command."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(256)
+    except OSError:
+        return 0
+    if not head:
+        return 0
+    for magic, klass, sev, hint in _BINARY_MAGIC:
+        if head.startswith(magic):
+            report.add(sev, "INTERESTING FILES", path, None,
+                       f"binary magic: {klass}", hint)
+            return 1
+    return 0

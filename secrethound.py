@@ -189,7 +189,7 @@ def main():
     json_abs = os.path.abspath(args.json) if args.json else None
     raw = [root] if os.path.isfile(root) else list(iter_files(root))
     do_ingest = not args.no_ingest
-    targets, ingest_targets, skipped = [], [], 0
+    targets, ingest_targets, magic_targets, skipped = [], [], [], 0
     for path in raw:
         ext = os.path.splitext(path)[1].lower()
         if json_abs and os.path.abspath(path) == json_abs:
@@ -201,6 +201,9 @@ def main():
         # ingest sees ALL files (tool output arrives with arbitrary names/exts)
         if do_ingest:
             ingest_targets.append(path)
+        # iter-8: binary-magic scan sees ALL non-output files (.kdbx/.pfx/.kirbi
+        # /.ccache/lsass.dmp/ESEDB carry concrete loot regardless of extension).
+        magic_targets.append(path)
         if ext in DB_EXT:
             targets.append(path)
             continue
@@ -237,6 +240,14 @@ def main():
             entropy.analyze(path, report, threshold=thr)
     if not args.quiet:
         ui.progress_done()
+
+    # ── binary-magic loot scan on EVERY non-output file (.kdbx/.pfx/.kirbi/
+    # .ccache/lsass.dmp/ESEDB carry concrete loot regardless of extension). ──
+    for path in magic_targets:
+        try:
+            configs.scan_magic(path, report, store)
+        except Exception:
+            continue
 
     scan_root = root if os.path.isdir(root) else (os.path.dirname(root) or ".")
 

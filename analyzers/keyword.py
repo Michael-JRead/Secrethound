@@ -168,6 +168,108 @@ _AD = [
     ("LSA secret", re.compile(
         r'(?i)\$MACHINE\.ACC\s*:\s*([a-f0-9]{32}:[a-f0-9]{32})|'
         r'^SCM\s*:\s*\{[^}]*\}\s*:\s*(\S+):(\S+)', re.MULTILINE)),
+    # ---- iter-8 round-1 completeness adds ----
+    # Certipy 'find -vulnerable' template block markers (per-ESC verbose dump).
+    # The block carries 'Template Name : <name>' + 'Vulnerabilities : ESC<n>'
+    # + 'Enrollment Rights : <principal list>' - we capture the template name +
+    # ESC number for a precise per-template finding.
+    ("Certipy template ESC", re.compile(
+        r'(?i)Template\s+Name\s*:\s*(\S[^\r\n]{0,60})[\s\S]{0,800}?'
+        r'Vulnerabilit(?:y|ies)\s*:\s*([^\r\n]{1,120})')),
+    # PostgreSQL pg_hba.conf 'trust' / 'md5' / 'scram-sha-256' / 'password' lines:
+    # `local all all trust` means anyone can become any DB user from localhost
+    # without a password. 'host all all 0.0.0.0/0 trust' = unauth remote DB.
+    ("pg_hba auth method", re.compile(
+        r'^\s*(local|host|hostssl|hostnossl|hostgssenc|hostnogssenc)\s+'
+        r'(\S+)\s+(\S+)\s+(?:(\S+)\s+)?(trust|password|reject)\b', re.MULTILINE)),
+    # MySQL/MariaDB option file [client] / [mysql] / [mysqldump] sections with
+    # plaintext password=... (.my.cnf, /etc/mysql/debian.cnf).
+    ("mysql client opt", re.compile(
+        r'(?im)^\s*password\s*=\s*["\']?([^"\'#\r\n]{3,80})["\']?\s*$')),
+    # Redis requirepass / masterauth in conf - already partially handled by KEY,
+    # but here as a dedicated rule with a service-bound hint.
+    ("redis requirepass", re.compile(
+        r'(?im)^\s*(requirepass|masterauth)\s+([^\s#]{3,80})')),
+    # /etc/sudoers NOPASSWD entry: gives `user` direct root via the named cmd
+    # without a password - a single-line privesc primitive.
+    ("sudoers NOPASSWD", re.compile(
+        r'(?i)^(\S+)\s+\S+\s*=\s*\([^)]*\)\s*NOPASSWD\s*:\s*(\S[^\r\n]{0,200})', re.MULTILINE)),
+    # Writable cron entry pointing at a script - the cron line + the script's
+    # writability is the privesc. Filename gate is applied in the dispatch
+    # branch (only fires when path looks like crontab / /etc/cron* / /var/spool/cron).
+    ("cron script ref", re.compile(
+        r'^(?:[\s/*0-9,-]+\s+){4,5}(?:[\w-]+\s+)?'
+        r'((?:/[\w./-]+)(?:\.sh|\.py|\.pl|\.rb|\.bash))\b', re.MULTILINE)),
+    # Hashcat potfile line (hash:plain). Only fired when the path looks like a
+    # potfile (extension/filename gate is in the dispatch branch) AND the hash
+    # half starts with a recognised hash prefix ($1$, $2y$, $5$, $6$, $apr1$,
+    # $krb5..., $keepass$, $pwsafe$, $sntp-ms$, $DCC2$, $S$, $P$/$H$, $argon2,
+    # etc.) or is exactly 32/40 hex - the bare-shape match alone was matching
+    # every `attribute: value` LDIF line.
+    ("hashcat potfile", re.compile(
+        r'^(\$(?:1|2[aby]|5|6|y|argon2[id]+|apr1|S|P|H|NT|DCC2|krb5(?:tgs|asrep|pa)|'
+        r'keepass|pwsafe|sntp-ms|ansible|pkcs12|ANSIBLE_VAULT)\$\S{6,}|'
+        r'[a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{60}):([^\r\n:]{3,100})$',
+        re.MULTILINE)),
+    # John's john --show output and pot lines: hash:plain too. Pot lines start
+    # with $NT$, $krb5tgs$, etc. The plain half must NOT be hex-only or contain
+    # a hash-prefix '$' (which would indicate the line is still inside the hash).
+    ("john pot", re.compile(
+        r'^(\$NT\$[a-fA-F0-9]{32}|\$krb5(?:tgs|asrep|pa)\$\S{20,}):([^\r\n\$:]{3,80})$',
+        re.MULTILINE)),
+    # AWS credentials INI shape: `[profile]\naws_access_key_id = AKIA...\n
+    # aws_secret_access_key = ...`. The secret already matches our 'AWS secret'
+    # rule; here we flag the SESSION TOKEN line too.
+    ("AWS session token", re.compile(
+        r'(?i)\baws_session_token\s*=\s*([A-Za-z0-9/+=]{100,})')),
+    # GCP service-account JSON keys: 'private_key' field as PEM blob marker.
+    ("GCP service account", re.compile(
+        r'"type"\s*:\s*"service_account"[\s\S]{0,200}?"private_key_id"\s*:\s*"([a-f0-9]{40})"')),
+    # Kubeconfig bearer token: `token: <jwt>` under user.token, or
+    # `client-certificate-data: <b64>` + `client-key-data: <b64>` under user.
+    ("kubeconfig token", re.compile(
+        r'(?im)^\s*token\s*:\s*([A-Za-z0-9._-]{32,})\s*$')),
+    # Terraform state with "sensitive": true output keeps the plaintext value.
+    ("Terraform sensitive", re.compile(
+        r'"sensitive"\s*:\s*true[\s\S]{0,300}?"value"\s*:\s*"([^"]{3,200})"')),
+    # Azure CLI accessTokens.json shape - look for the bearer access token.
+    ("Azure access token", re.compile(
+        r'"accessToken"\s*:\s*"(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+)"')),
+    # Supervisord inet_http_server creds (rare, but a real OSCP-flavored box):
+    # `[inet_http_server]\nport=...\nusername=admin\npassword=...`
+    ("supervisord inet creds", re.compile(
+        r'(?is)\[inet_http_server\][\s\S]{0,500}?username\s*=\s*(\S+)[\s\S]{0,200}?password\s*=\s*(\S+)')),
+    # asterisk manager.conf - VoIP boxes (Beep-like)
+    ("asterisk manager", re.compile(
+        r'(?is)^\s*\[([\w_-]+)\]\s*[\r\n]+(?:[^\r\n]*[\r\n]+)*?secret\s*=\s*([^\s#\r\n]{3,80})', re.MULTILINE)),
+    # Veeam VBR plaintext-fielded creds in stored sessions / backup .vbm xml
+    ("Veeam creds", re.compile(
+        r'(?is)<Cred[^>]*\sUsername\s*=\s*"([^"]{1,80})"[^>]*\sPassword\s*=\s*"([^"]{3,200})"')),
+    # GitHub Actions secret REFERENCE - the secret itself is in vault, but the
+    # presence of `${{ secrets.X }}` in a checked-out workflow tells the operator
+    # which CI secret name to target.
+    ("GH Actions secret ref", re.compile(
+        r'\$\{\{\s*secrets\.(\w+)\s*\}\}')),
+    # Confluence/Atlassian seraph + LDAP password fields in atlassian-user.xml
+    ("atlassian secret", re.compile(
+        r'(?i)<password>([^<\r\n]{3,80})</password>')),
+    # PowerShell SecureString export blob (Export-Clixml of a PSCredential):
+    # `<SS N="Password">01000000d08c9ddf01...</SS>`
+    ("PSCredential SS blob", re.compile(
+        r'<SS\s+N\s*=\s*"Password"\s*>([0-9a-f]{40,})</SS>')),
+    # OpenVPN auth-user-pass file (two lines: user, pass)
+    ("ovpn auth-user-pass", re.compile(
+        r'(?im)^\s*auth-user-pass\s+(\S+)\s*$')),
+    # WireGuard PrivateKey in [Interface]
+    ("WireGuard PrivateKey", re.compile(
+        r'(?im)^\s*PrivateKey\s*=\s*([A-Za-z0-9+/]{42,44}=)\s*$')),
+    # NetSCREEN / Cisco IOS enable secret 5/7
+    ("Cisco enable secret", re.compile(
+        r'(?i)\benable\s+secret\s+(\d)\s+([\S]{6,200})')),
+    # JuicyPotato / Print Spooler / SeImpersonate output that lists a token to
+    # impersonate. Intel-only.
+    ("token impersonation", re.compile(
+        r'(?i)SeImpersonatePrivilege|SeAssignPrimaryToken|JuicyPotato\.exe|PrintSpoofer\.exe|GodPotato\.exe|RoguePotato\.exe')),
 ]
 
 
@@ -536,6 +638,225 @@ def analyze(path, report, store=None):
                             if store is not None:
                                 from analyzers.ingest.evidence import Evidence
                                 store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=lineno))
+                        hit = True
+                        break
+                    # ---- iter-8 round-1 dispatch ----
+                    if name == "Certipy template ESC":
+                        tmpl, vuln = am.group(1).strip(), am.group(2).strip()
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"ADCS template '{tmpl}' vulnerable: {vuln}",
+                                   hint=f"certipy-ad req -ca <CA> -template '{tmpl}' -upn administrator@<dom> -u <you> -p <pw>")
+                        hit = True
+                        break
+                    if name == "pg_hba auth method":
+                        host_typ, db, user, method = am.group(1), am.group(2), am.group(3), am.group(5)
+                        if method == "trust":
+                            sev = "CRITICAL" if host_typ.startswith("host") else "HIGH"
+                            report.add(sev, "ASSIGNED SECRETS", path, lineno,
+                                       f"pg_hba TRUST auth: {host_typ} {db} {user}",
+                                       hint=f"psql -U {user} -d {db} -h <pg-host>  (NO password required)")
+                            hit = True
+                            break
+                    if name == "redis requirepass":
+                        directive, val = am.group(1), am.group(2)
+                        if filters.is_placeholder(val):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"redis {directive}: {val}",
+                                   hint=f"redis-cli -h <host> -a '{val}' info")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "sudoers NOPASSWD":
+                        user, cmd = am.group(1), am.group(2).strip()
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"sudoers NOPASSWD  {user}  ->  {cmd[:80]}",
+                                   hint=f"as '{user}' run: sudo {cmd.split()[0] if cmd else '<cmd>'}  (check GTFOBins for escape)")
+                        hit = True
+                        break
+                    if name == "cron script ref":
+                        # filename gate: only fire on actual cron config files.
+                        base = os.path.basename(path).lower()
+                        in_cron = ("crontab" in base or "/cron" in path.lower()
+                                   or "spool/cron" in path.lower()
+                                   or "/etc/anacrontab" in path.lower())
+                        if not in_cron:
+                            continue
+                        script = am.group(1)
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"cron-invoked script: {script}",
+                                   hint=f"check writability: ls -la {script}  - if any non-root write -> code-as-root")
+                        hit = True
+                        break
+                    if name == "hashcat potfile":
+                        # filename gate: only fire on potfile-shaped paths.
+                        # Real hashcat ~/.local/share/hashcat/hashcat.potfile,
+                        # custom *.pot/.potfile, or any file containing 'crack'
+                        # in the basename.
+                        base = os.path.basename(path).lower()
+                        if not (base.endswith(('.pot', '.potfile'))
+                                or 'potfile' in base or 'hashcat' in base
+                                or 'cracked' in base or '.crack' in base):
+                            continue
+                        h, plain = am.group(1), am.group(2)
+                        # plain-half sanity: not just hex (still inside a hash),
+                        # not a placeholder, not exactly the same as the hash.
+                        if (filters.is_placeholder(plain) or len(plain) < 3
+                                or re.match(r'^[a-fA-F0-9]+$', plain)
+                                or plain == h):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"hashcat cracked: {h[:40]}... -> '{plain}'",
+                                   hint=f"reuse plaintext: nxc smb <host> -u <user> -p '{plain}'  (per the hash's source)")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=plain, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "john pot":
+                        base = os.path.basename(path).lower()
+                        if not (base == 'john.pot' or base.endswith('.pot')
+                                or 'john' in base or 'cracked' in base):
+                            continue
+                        h, plain = am.group(1), am.group(2)
+                        if (filters.is_placeholder(plain) or len(plain) < 3
+                                or re.match(r'^[a-fA-F0-9]+$', plain)):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"john cracked: {h[:40]}... -> '{plain}'",
+                                   hint=f"reuse plaintext: nxc smb <host> -u <user> -p '{plain}'")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=plain, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "AWS session token":
+                        tok = am.group(1)
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"AWS session token: {tok[:40]}...",
+                                   hint="aws sts get-caller-identity  (export AWS_ACCESS_KEY_ID, _SECRET_ACCESS_KEY, _SESSION_TOKEN)")
+                        hit = True
+                        break
+                    if name == "GCP service account":
+                        kid = am.group(1)
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"GCP service-account JSON key (kid {kid[:12]}...)",
+                                   hint="gcloud auth activate-service-account --key-file <this.json>; gcloud projects list")
+                        hit = True
+                        break
+                    if name == "kubeconfig token":
+                        tok = am.group(1)
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"kubeconfig token: {tok[:40]}...",
+                                   hint="kubectl --kubeconfig <this> get pods --all-namespaces  -> escalate to nodes via privileged pods")
+                        hit = True
+                        break
+                    if name == "Terraform sensitive":
+                        val = am.group(1)
+                        if filters.is_placeholder(val):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Terraform 'sensitive' output: {val[:60]}",
+                                   hint="reuse value directly - tfstate keeps the plaintext even when marked sensitive")
+                        hit = True
+                        break
+                    if name == "Azure access token":
+                        tok = am.group(1)
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Azure access token: {tok[:40]}...",
+                                   hint="paste into az or use roadtools/aztoken; check token claims via jwt.io for tenant + roles")
+                        hit = True
+                        break
+                    if name == "supervisord inet creds":
+                        u, p = am.group(1), am.group(2)
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"supervisord inet creds: {u}:{p}",
+                                   hint=f"curl -u '{u}:{p}' http://<host>:9001/  (web UI + XML-RPC)")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "asterisk manager":
+                        u, p = am.group(1), am.group(2)
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"asterisk manager.conf [{u}]: secret={p}",
+                                   hint=f"asterisk AMI: nc <host> 5038; then Action: Login user:{u} secret:{p}")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "Veeam creds":
+                        u, p = am.group(1), am.group(2)
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"Veeam stored cred: {u}:{p}",
+                                   hint="Veeam backups carry the destination repo creds; reuse against the SMB/iSCSI target")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "GH Actions secret ref":
+                        sec = am.group(1)
+                        report.add("MEDIUM", "RECON", path, lineno,
+                                   f"GH Actions secret reference: {sec}",
+                                   hint="CI vault secret name - target if you have repo write/PR-comment access")
+                        hit = True
+                        break
+                    if name == "atlassian secret":
+                        val = am.group(1)
+                        if filters.is_placeholder(val):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"atlassian config <password>: {val}",
+                                   hint="reuse against Confluence/Jira admin login; LDAP bind on the same XML often shares the pw")
+                        hit = True
+                        break
+                    if name == "PSCredential SS blob":
+                        blob = am.group(1)
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"PSCredential Export-Clixml DPAPI blob ({len(blob)//2}B)",
+                                   hint="recoverable ONLY by the same user+host: powershell -c 'Import-Clixml cred.xml | %{ \$_.GetNetworkCredential().Password }'")
+                        hit = True
+                        break
+                    if name == "ovpn auth-user-pass":
+                        f_ = am.group(1)
+                        report.add("MEDIUM", "INTERESTING FILES", path, lineno,
+                                   f"OpenVPN auth-user-pass file ref: {f_}",
+                                   hint=f"read {f_} - line 1=user, line 2=plaintext password")
+                        hit = True
+                        break
+                    if name == "WireGuard PrivateKey":
+                        key = am.group(1)
+                        report.add("HIGH", "PRIVATE KEYS", path, lineno,
+                                   f"WireGuard PrivateKey: {key[:24]}...",
+                                   hint="copy [Interface] block into wg-quick up <name>.conf and reach internal network")
+                        hit = True
+                        break
+                    if name == "Cisco enable secret":
+                        typ, val = am.group(1), am.group(2)
+                        if typ == "5":
+                            mode, label = "500", "Cisco type-5 (md5crypt)"
+                        elif typ == "7":
+                            mode, label = "", "Cisco type-7 (reversible XOR)"
+                        else:
+                            mode, label = "", f"Cisco type-{typ}"
+                        sev = "CRITICAL" if typ == "7" else "HIGH"
+                        hint = ("offline decrypt via 'ciscot7 -d <val>' (instant - reversible XOR)"
+                                if typ == "7" else
+                                f"hashcat -m {mode} <hash> rockyou.txt")
+                        report.add(sev, "PASSWORD HASHES", path, lineno,
+                                   f"{label}: {val[:40]}{'...' if len(val) > 40 else ''}",
+                                   hint=hint)
+                        hit = True
+                        break
+                    if name == "token impersonation":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "SeImpersonate / token-impersonation tooling reference",
+                                   hint="if running as a service account: PrintSpoofer / GodPotato / JuicyPotato -> SYSTEM")
                         hit = True
                         break
                     # ADO.NET connectionString: parse User ID / Password out cleanly

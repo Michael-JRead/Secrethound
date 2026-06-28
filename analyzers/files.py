@@ -74,6 +74,52 @@ INTERESTING = [
     (re.compile(r'(?i)^ultravnc\.ini$|^vnc.*\.(ini|txt|reg)$'), "VNC → reversible DES password (vncpwd)", "HIGH"),
     (re.compile(r'(?i)\.(mdb|accdb)$'), "Access DB → mdb-tools", "MEDIUM"),
     (re.compile(r'(?i)\.(reg)$'), "registry export → grep AutoAdminLogon/DefaultPassword", "MEDIUM"),
+    # ── iter-8 round-1 file-loot adds ──────────────────────────────────────
+    # DPAPI per-user / per-machine master-key files (the GUID-shaped names):
+    (re.compile(r'(?i)\\Protect\\S-1-5-21-[\d-]+\\[a-f0-9-]{36}$|/Protect/S-1-5-21-[\d-]+/[a-f0-9-]{36}$'),
+     "DPAPI masterkey → impacket-dpapi masterkey -file <f> -sid <SID> -password <pw>", "HIGH"),
+    # WindowsHello PIN / NGC containers:
+    (re.compile(r'(?i)\.ngc$|\\Ngc\\|/Ngc/'),
+     "WindowsHello NGC container → DPAPI PIN-protected creds", "MEDIUM"),
+    # Veeam VBR backup metadata + creds:
+    (re.compile(r'(?i)\.(vbm|vlb|vab|vbk)$'),
+     "Veeam backup metadata → stored repo + guest creds (DPAPI inside)", "HIGH"),
+    # SCCM PolicyAgent / NAA blob (datatransferservice cached policy):
+    (re.compile(r'(?i)CcmStore\.sdf$|DataTransferService.*\.log$|^Policy\.\d+\.\d+$'),
+     "SCCM policy / NAA blob → sccmhunter / SharpSCCM offline extraction", "HIGH"),
+    # Microsoft DPAPI Credential files:
+    (re.compile(r'(?i)\\Credentials\\[a-f0-9]{32,}$|/Credentials/[a-f0-9]{32,}$'),
+     "Windows Credential vault file (DPAPI) → mimikatz dpapi::cred", "HIGH"),
+    # NetSh wlan profile XML:
+    (re.compile(r'(?i)wlan.*-profile.*\.xml$|^Interface_.*\.xml$'),
+     "wlan profile → WiFi PSK (cleartext or DPAPI per machine)", "MEDIUM"),
+    # Vault binary / Bitwarden / 1Password DBs:
+    (re.compile(r'(?i)\.(opvault|1pif|bitwarden\.json|vault)$'),
+     "password manager export/DB → review for plaintext entries", "HIGH"),
+    # PostgreSQL pg_hba.conf:
+    (re.compile(r'(?i)^pg_hba\.conf$'),
+     "pg_hba.conf → 'trust' auth lines = unauth DB access", "HIGH"),
+    # Asterisk manager / VoIP:
+    (re.compile(r'(?i)^manager\.conf$'),
+     "asterisk manager.conf → AMI secret=", "HIGH"),
+    # ZNC IRC bouncer:
+    (re.compile(r'(?i)^znc\.conf$'),
+     "znc.conf → user Pass = + SASL credentials", "MEDIUM"),
+    # WireGuard:
+    (re.compile(r'(?i)\.(wg|wg-quick)$|^wg0\.conf$'),
+     "WireGuard config → PrivateKey + peer connectivity", "HIGH"),
+    # Sliver / Mythic / NimPlant / Brute Ratel implant state on operator disk:
+    (re.compile(r'(?i)^implant\.config$|^operator\.cfg$|sliver-\d+\.[\w.-]+$|^\.mythic.*\.json$'),
+     "C2 implant config → operator-side leaked C2 URL + auth", "HIGH"),
+    # GitHub Personal Access Token files:
+    (re.compile(r'(?i)^\.netrc$|^github_token$|^\.git-credentials$|\.npmrc$'),
+     "tool cred file → _authToken / token / user:pass", "HIGH"),
+    # Hashcat potfile / John pot:
+    (re.compile(r'(?i)^hashcat\.potfile$|\.potfile$|\.pot$|^john\.pot$'),
+     "cracking potfile → already-cracked hash:plain pairs (we parse the content)", "HIGH"),
+    # Maven / Gradle / Pipenv credentials caches:
+    (re.compile(r'(?i)^settings\.xml$|^gradle\.properties$|^\.npmrc$|^\.gem/credentials$|^\.pypirc$'),
+     "build-tool cred cache → repo auth tokens", "MEDIUM"),
     # ── generic / catch-all (lowest priority) ──────────────────────────────
     (re.compile(r'(?i)\.(ini|conf|cnf|cfg|properties|toml)$'), "config file → read for creds", "INFO"),
     (re.compile(r'(?i)\.(yml|yaml|json|xml)$'), "structured config → read for creds", "INFO"),
