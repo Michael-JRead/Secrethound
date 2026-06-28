@@ -352,6 +352,54 @@ _AD = [
     # `Recovered.........: 12/1000 (1.20%) Digests, 0/1 (0.00%) Salts`
     ("hashcat status", re.compile(
         r'(?i)^Recovered\.+:\s*(\d+)/(\d+)\s*\(([\d.]+)%\)\s*Digests', re.MULTILINE)),
+    # ---- iter-9: deeper-corpus high-value adds (operator notes, OSCP corpus) ----
+    # Ansible Vault encrypted blob marker (header line) - flag the file as needing
+    # `ansible-vault decrypt` with the vault password.
+    ("Ansible Vault header", re.compile(
+        r'(?m)^\$ANSIBLE_VAULT;\d\.\d;AES256(?:;\w+)?\s*$')),
+    # Firefox logins.json (encrypted but flags the file as crackable via firefox_decrypt)
+    ("Firefox logins.json", re.compile(
+        r'"encryptedUsername"\s*:\s*"(M[A-Za-z0-9+/=]{20,})"')),
+    # Browser password export CSV header - flag the file (rows follow)
+    ("browser password CSV", re.compile(
+        r'(?im)^\s*name\s*,\s*url\s*,\s*username\s*,\s*password\s*$')),
+    # PowerShell one-liner: New-Object PSCredential("user", (ConvertTo-SecureString -String "X" -AsPlainText))
+    # Two-group capture; needs dispatch.
+    ("PS PSCredential inline", re.compile(
+        r'(?i)New-Object\s+(?:System\.Management\.Automation\.)?PSCredential\s*\(\s*'
+        r'["\']([^"\']{1,80})["\']\s*,\s*\(\s*ConvertTo-SecureString'
+        r'\s+(?:-String\s+)?["\']([^"\']{3,80})["\']')),
+    # PowerShell encoded payload base64 (`powershell -enc <b64>`) - common in
+    # transcripts / scheduled tasks - flag the b64 blob for offline decode.
+    ("PowerShell -enc payload", re.compile(
+        r'(?i)\bpowershell(?:\.exe)?\s+(?:-\w+\s+)*-(?:e|enc|EncodedCommand)\s+'
+        r'([A-Za-z0-9+/=]{40,})')),
+    # GPP cpassword: even outside the strict Groups.xml shape - inline in notes.
+    # Distinctive 16+ base64 blob; we keep _AD entry but route to GPP category.
+    ("GPP cpassword inline", re.compile(
+        r'(?i)\bcpassword\s*=\s*["\']?([A-Za-z0-9+/=]{16,})["\']?')),
+    # Grafana datasource basicAuth password in provisioning YAML
+    ("Grafana basicAuth", re.compile(
+        r'(?i)basicAuthPassword\s*:\s*["\']?([^\s"\'\r\n#]{3,80})')),
+    # Splunk passwd / authentication.conf default admin password (already-hashed sha512crypt):
+    ("Splunk authentication", re.compile(
+        r'(?im)^\s*passwd\s*=\s*(\$6\$[\$\w./]{20,})$')),
+    # SCCM CMG token in MEMCM log (eyJ... JWT) - distinctive prefix gate
+    ("SCCM CMG token", re.compile(
+        r'(?i)\b(?:CMG|CCM)\s*token\s*[:=]\s*(eyJ[A-Za-z0-9_\-\.]{20,})')),
+    # Salesforce / Okta / Twilio / SendGrid / Mailgun typed env-var lines.
+    # Two groups (VAR_NAME, VALUE); dispatch.
+    ("SaaS service token", re.compile(
+        r'(?i)\b(SALESFORCE_(?:CLIENT_)?SECRET|OKTA_API_TOKEN|TWILIO_AUTH_TOKEN|'
+        r'SENDGRID_API_KEY|MAILGUN_API_KEY|HEROKU_API_KEY|DATADOG_API_KEY|'
+        r'PAGERDUTY_API_KEY|NEW_RELIC_LICENSE_KEY|FASTLY_API_KEY|CLOUDFLARE_API_TOKEN)'
+        r'\s*[:=]\s*["\']?([^"\'\s#\r\n]{16,200})')),
+    # `git config --list` exposing http.<url>.extraheader = AUTHORIZATION: bearer <tok>
+    ("git extraheader", re.compile(
+        r'(?i)http\.[^\s=]+\.extraheader\s*=\s*AUTHORIZATION:\s*\w+\s+(\S+)')),
+    # rclone.conf saved cloud token (one-line shape)
+    ("rclone token", re.compile(
+        r'(?im)^\s*token\s*=\s*\{["\']access_token["\']\s*:\s*["\']([^"\']{20,})["\']')),
 ]
 
 
@@ -814,7 +862,12 @@ def analyze(path, report, store=None):
                     if _is_doc and name in ("autologon password",
                                             "SQL IDENTIFIED BY",
                                             "sshpass -p",
-                                            "mysql -p inline"):
+                                            "mysql -p inline",
+                                            # iter-9: doc-file skips
+                                            "Ansible Vault header",
+                                            "PowerShell -enc payload",
+                                            "GPP cpassword inline",
+                                            "browser password CSV"):
                         continue
                     # tomcat-users: user+pass+roles -> RCE-aware severity
                     if name == "tomcat-users":
@@ -1414,6 +1467,86 @@ def analyze(path, report, store=None):
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # ---- iter-9 dispatch branches ----
+                    # Ansible Vault header: file-level intel marker, no value to emit
+                    if name == "Ansible Vault header":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "Ansible Vault AES256 encrypted blob",
+                                   hint="ansible-vault decrypt <file>   - need the vault password (look in ~/.vault_pass / playbooks)")
+                        hit = True
+                        break
+                    # Firefox logins.json: encrypted; flag the file
+                    if name == "Firefox logins.json":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "Firefox logins.json (encrypted creds)",
+                                   hint="firefox_decrypt.py <profile-dir>  (needs key4.db; if primary pw set: hashcat -m 26100)")
+                        hit = True
+                        break
+                    # Browser password CSV export header
+                    if name == "browser password CSV":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "browser password export CSV (name,url,user,password)",
+                                   hint="cat <file>  - cleartext password rows follow the header")
+                        hit = True
+                        break
+                    # PS PSCredential inline: 2 groups (user, pw)
+                    if name == "PS PSCredential inline":
+                        u, p = am.group(1), am.group(2)
+                        if filters.is_placeholder(p) or filters.is_placeholder(u):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"PowerShell PSCredential: {u}:{p}",
+                                   hint=f"reuse: netexec smb <DC-IP> -u '{u}' -p '{p}'")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # PowerShell -enc payload: decode hint only (b64 -> UTF-16LE)
+                    if name == "PowerShell -enc payload":
+                        blob = am.group(1)
+                        if filters.is_canonical_sample(blob):
+                            continue
+                        report.add("HIGH", "ENCODED/DECODED", path, lineno,
+                                   f"PowerShell -EncodedCommand: {blob[:40]}...",
+                                   hint="decode: echo '<b64>' | base64 -d | iconv -f UTF-16LE -t UTF-8")
+                        hit = True
+                        break
+                    # GPP cpassword inline (32-byte AES-CBC blob)
+                    if name == "GPP cpassword inline":
+                        blob = am.group(1)
+                        if filters.is_placeholder(blob) or filters.is_canonical_sample(blob):
+                            continue
+                        report.add("CRITICAL", "GPP cpassword", path, lineno,
+                                   f"GPP cpassword blob: {blob[:30]}...",
+                                   hint="gpp-decrypt '" + blob + "'   (fixed AES key MS published - cleartext on stdout)")
+                        hit = True
+                        break
+                    # Splunk authentication.conf hashed admin password
+                    if name == "Splunk authentication":
+                        h = am.group(1)
+                        report.add("HIGH", "PASSWORD HASHES", path, lineno,
+                                   f"Splunk admin sha512crypt: {h[:30]}...",
+                                   hint="hashcat -m 1800 splunk.hash rockyou.txt")
+                        from analyzers.patterns import HASHES
+                        HASHES.append(("1800", "sha512crypt", h, path, lineno))
+                        hit = True
+                        break
+                    # SaaS service token: VAR_NAME=value
+                    if name == "SaaS service token":
+                        var, val = am.group(1), am.group(2)
+                        if filters.is_placeholder(val) or filters.is_canonical_sample(val):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"{var}: {val}",
+                                   hint=f"SaaS API token for {var} - validate offline by checking format; do NOT hit live endpoints during the exam")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
                                                source=path, line=lineno))
                         hit = True
                         break

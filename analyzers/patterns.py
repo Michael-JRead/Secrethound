@@ -241,6 +241,12 @@ def analyze(path, report):
                     # since well-known doc-example hashes are in _KNOWN_EXAMPLES too.
                     if filters.is_known_example(val):
                         continue
+                    # iter-9: embedded placeholder (CamelCase 'ExampleKey',
+                    # 'YourTokenHere', 'CpasswordExampleHere', etc.) - safe
+                    # against real passwords because the regex requires both a
+                    # placeholder-marker word AND a secret-noun word.
+                    if filters._PLACEHOLDER_EMBEDDED.search(val):
+                        continue
                     # iter-7: canonical cheatsheet/tutorial hex (the literal
                     # '0123456789abcdef0123456789abcdef' run, 'deadbeef...',
                     # 'cafebabe...', etc.) should never fire as a hash.
@@ -264,6 +270,12 @@ def analyze(path, report):
                         # (indented bullet, inline code fence, or 'example:'/'sample:'/'e.g.')
                         if re.search(r'(?i)^\s*[-*]\s|`[^`]*`|e\.g\.|\bexample\b|\bsample\b|\btutorial\b', line):
                             continue
+                    # iter-9: Ansible Vault marker is a short, distinctive header
+                    # ('$ANSIBLE_VAULT;1.1;AES256') - in doc files it's ALWAYS
+                    # demonstrating the format, never real loot. Unconditional
+                    # skip on doc files (no line-content gate needed).
+                    if name == "Ansible Vault" and filters.is_doc_file(path):
+                        continue
 
                     # URL with creds: drop template/placeholder/default credentials
                     # (e.g. amqp://guest:guest@..., postgres://${DB_USER}:${DB_PASSWORD}@...,

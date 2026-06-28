@@ -77,6 +77,18 @@ _PLACEHOLDER_SUBSTR = re.compile(
     r"replace[\s_-]\w+[\s_-]here|to[\s_-]be[\s_-]set|"
     r"<[\w\s_-]{3,40}>|__[A-Z][A-Z0-9_]+__)"
 )
+# iter-9: embedded CamelCase placeholder words. A safe gate against doc-sample
+# strings like 'MyCpasswordExampleHere==' or 'YourTokenHere' - matches only
+# when a placeholder-marker word ('Example', 'Sample', 'Demo', 'Placeholder',
+# 'YourKey', 'NotARealKey', 'RedactedFor', 'TruncatedFor') is paired with a
+# secret-noun word ('Here', 'Password', 'Cpassword', 'Token', 'Key', 'Secret',
+# 'Cred', 'Hash', 'Value', 'Pwd'). Won't FP on legit passwords because real
+# passwords don't pair these specific tokens.
+_PLACEHOLDER_EMBEDDED = re.compile(
+    r"(?:(?:Example|Sample|Demo|Placeholder|YourKey|YourToken|YourSecret|"
+    r"NotARealKey|RedactedFor|TruncatedFor)"
+    r"(?:Here|Cpassword|Password|Pwd|Token|Key|Secret|Cred|Hash|Value))"
+)
 
 # canonical documentation / example secrets (gitleaks EXAMPLE allowlist + the
 # upstream-published doc samples our FP-audit caught in the wild).
@@ -195,6 +207,8 @@ def is_placeholder(value):
         if rx.match(v):
             return True
     if _PLACEHOLDER_SUBSTR.search(v):                  # 'put your X here', CHANGE_ME, etc.
+        return True
+    if _PLACEHOLDER_EMBEDDED.search(v):                # 'CpasswordExampleHere', 'YourTokenHere'
         return True
     # interpolation/env-template anywhere in the value -> not a literal secret
     if '${' in v or '{{' in v or '__VAR__' in v or '<your-' in v.lower():
