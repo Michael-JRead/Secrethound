@@ -543,7 +543,10 @@ _TEXTCHARS_B = bytes(range(32, 127)) + b"\t\n\r\f\b"
 
 def is_binary_ish(path, chunk=8192):
     """skip control-char-heavy files: binaries, and 'strings dumps' / prior tool
-    output (the htb run re-ingested its own test.txt full of \\x0e\\x0f garbage)."""
+    output (the htb run re-ingested its own test.txt full of \\x0e\\x0f garbage).
+    iter-8: treats valid UTF-8 (with no NUL / no excessive control bytes) as
+    text - so winPEAS/linPEAS output with heavy ╔══╝ box-drawing chars and
+    other operator-tool unicode output is correctly scanned."""
     try:
         with open(path, "rb") as fh:
             block = fh.read(chunk)
@@ -553,8 +556,19 @@ def is_binary_ish(path, chunk=8192):
         return False
     if b"\x00" in block:
         return True
+    # try UTF-8 first - if valid AND no excessive control bytes, it's text
+    try:
+        decoded = block.decode("utf-8")
+        # count control chars (< 0x20 except \n \r \t \f \b)
+        ctrl = sum(1 for c in decoded if ord(c) < 32 and c not in "\t\n\r\f\b")
+        if ctrl / max(1, len(decoded)) < 0.05:
+            return False
+    except UnicodeDecodeError:
+        pass
+    # fallback: original ASCII-based byte classifier
     nontext = block.translate(None, _TEXTCHARS_B)
-    return len(nontext) / len(block) > 0.10
+    return len(nontext) / len(block) > 0.30      # raised from 0.10 - the
+        # old threshold caught too many legitimate non-ASCII text files
 
 
 def is_secrethound_output(path):

