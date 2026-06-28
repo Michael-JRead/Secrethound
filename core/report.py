@@ -316,6 +316,8 @@ class Report:
         "DCC2": ("2100", "crack -m 2100 (slow)"),
         "Password Safe v3": ("5200", "crack -m 5200 -a 0"),
         "KeePass2 hash": ("13400", "crack -m 13400 -a 0"),
+        "Timeroast (SNTP-MS)": ("31300", "crack -m 31300 (machine acct password)"),
+        "Kerberos pre-auth": ("7500", "crack -m 7500 (AS-REQ pre-auth)"),
         "VNC reg password": ("", "offline DES decrypt (vncpwd) - fixed key, no cracking"),
         "blank NT": ("", "NO password - try empty / null auth"),
     }

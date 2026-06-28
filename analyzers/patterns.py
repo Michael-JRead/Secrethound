@@ -34,6 +34,8 @@ PATTERNS = [
     ("AS-REP roast (RC4)", "HIGH", re.compile(r'\$krb5asrep\$23\$[^\s:]+:[a-f0-9]{32}\$[a-f0-9]+'), "18200", 0),
     ("AS-REP roast (AES)", "HIGH", re.compile(r'\$krb5asrep\$1[78]\$[^\s]+'), None, 0),
     ("Kerberos pre-auth", "HIGH", re.compile(r'\$krb5pa\$23\$[^\s]+'), "7500", 0),
+    # Timeroasting (NTP MS-SNTP) - hashcat 31300, RustyKey 2024+
+    ("Timeroast (SNTP-MS)", "HIGH", re.compile(r'\$sntp-ms\$[a-f0-9]{32}\$[a-f0-9]{40,}'), "31300", 0),
     ("DCC2 (mscash2)", "HIGH", re.compile(r'\$DCC2\$\d+#[^#\s]+#[a-f0-9]{32}'), "2100", 0),
     # ---- AD: NTLM / NetNTLM -----------------------------------------------
     ("NetNTLMv2", "HIGH", re.compile(r'[^\s:]+::[^\s:]*:[a-f0-9]{16}:[a-f0-9]{32}:[a-f0-9]{20,}'), "5600", 0),

@@ -64,12 +64,31 @@ _AD = [
     ("PHP array secret", re.compile(
         r"(?i)['\"](?:db_)?(?:password|passwd|pwd|secret|salt|smtppass)['\"]"
         r"\s*=>\s*['\"]([^'\"\r\n]{3,})['\"]")),
-    # ADO.NET / php connection-string keyword: PWD=X or UID=>X
-    ("conn-string keyword", re.compile(
-        r"(?i)['\"]?(?:PWD|PASSWORD|UID|USER\s*ID)['\"]?\s*=>?\s*['\"]([^'\"\r\n]{3,})['\"]")),
     # MongoDB BSON shell output: { ..., "username" : "X", "password" : "Y" }
     ("MongoDB BSON", re.compile(
         r'"username"\s*:\s*"([^"]{1,40})"[^}]{0,200}?"password"\s*:\s*"([^"]{3,80})"')),
+    # Legacy Windows LAPS cleartext attribute: ms-Mcs-AdmPwd: <pw>
+    # (post-decryption read; Streamio / Outdated / Rebound modern fixture)
+    ("LAPS ms-Mcs-AdmPwd", re.compile(
+        r'(?i)\bms-mcs-admpwd\s*:\s*(?!\s)([^\r\n]{3,80})')),
+    # Windows LAPS v2 cleartext-after-decrypt output: 'Password : <pw>' under
+    # 'ComputerName' / 'Account' block produced by Get-LapsADPassword -AsPlainText
+    ("LAPS v2 cleartext", re.compile(
+        r'(?im)^\s*Password\s*:\s*([^\r\n]{6,80})$')),
+    # gMSA managed password LDIF attribute (base64 blob; flag, don't try to decode).
+    # The classic LDIF `::` prefix indicates base64; gMSADumper does the NTLM parse.
+    ("gMSA ManagedPassword", re.compile(
+        r'(?i)\bmsDS-ManagedPassword\b\s*::\s*([A-Za-z0-9+/=]{40,})')),
+    # Shadow credentials marker - msDS-KeyCredentialLink writes are non-destructive
+    # but high-signal (precondition for PKINIT NT-hash recovery via Certipy).
+    ("Shadow credentials", re.compile(
+        r'(?i)msDS-KeyCredentialLink\b|Adding Key Credential with device ID')),
+    # Certipy `Got hash for 'user@DOM': LM:NT` shadow-creds / PKINIT output.
+    # We DON'T put this in `_AD` to keep the unconditional CRED-pair routing
+    # below clean; instead it's split out so we can emit user-bound NT.
+    ("Certipy got-hash", re.compile(
+        r"(?i)\b(?:Got|NT)\s+hash\s+for\s+['\"]?([^\s'\":@]{1,40})(?:@[^\s'\"]+)?['\"]?\s*:\s*"
+        r"(?:([a-f0-9]{32}):)?([a-f0-9]{32})\b")),
     # tomcat-users.xml <user username="X" password="Y" roles="Z"/>  - capture both
     # user and pw, plus roles so the hint distinguishes RCE-path (manager-script /
     # admin-gui) from read-only.
@@ -221,6 +240,53 @@ def analyze(path, report, store=None):
                                    "Jenkins credentials.xml encrypted blob",
                                    hint="offline decrypt: hoto/jenkins-credentials-decryptor -m secrets/master.key "
                                    "-s secrets/hudson.util.Secret -c credentials.xml")
+                        hit = True
+                        break
+                    # Shadow credentials: msDS-KeyCredentialLink write or Certipy
+                    # output. Intel-only (the NT hash recovered THROUGH this path
+                    # is captured by the 'Certipy got-hash' rule below).
+                    if name == "Shadow credentials":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "Shadow Credentials marker (msDS-KeyCredentialLink)",
+                                   hint="certipy-ad shadow auto -account <target> -u <user>@<dom> -p <pw> "
+                                   "-> PKINIT -> NT hash via getnthash / U2U")
+                        hit = True
+                        break
+                    # Certipy 'Got hash for X: LM:NT' -> CRITICAL user-bound NT hash
+                    if name == "Certipy got-hash":
+                        user, lm, nt = am.group(1), (am.group(2) or ""), am.group(3)
+                        if not nt or filters.is_blank_hash(nt):
+                            hit = True
+                            break
+                        report.add("HIGH", "PASSWORD HASHES", path, lineno,
+                                   f"NTLM (NT) {user}: {nt}",
+                                   hint=f"PtH: netexec smb <DC-IP> -u '{user}' -H {nt}  |  crack: hashcat -m 1000 {nt} rockyou.txt")
+                        # also feed the global HASHES list so --hashes file picks it up
+                        from analyzers.patterns import HASHES
+                        HASHES.append(("1000", "NTLM", nt, path, lineno))
+                        hit = True
+                        break
+                    # LAPS cleartext (ms-Mcs-AdmPwd / Windows-LAPS) -> CRITICAL local admin pw
+                    if name in ("LAPS ms-Mcs-AdmPwd", "LAPS v2 cleartext"):
+                        pw = am.group(1).strip()
+                        if filters.is_placeholder(pw) or len(pw) < 6:
+                            hit = True
+                            break
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"LAPS local admin password: {pw}",
+                                   hint="local admin: netexec smb <host> -u Administrator -p '" + pw +
+                                   "' --local-auth  | or evil-winrm -i <host> -u Administrator -p '" + pw + "'")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user="Administrator",
+                                               plaintext=pw, source=path, line=lineno))
+                        hit = True
+                        break
+                    # gMSA blob marker - cannot decode without bloodyAD/gMSADumper auth
+                    if name == "gMSA ManagedPassword":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "gMSA msDS-ManagedPassword blob",
+                                   hint="gMSADumper.py -u <user> -p <pw> -d <dom> -l <dc>  (RetrievePrincipal right needed)")
                         hit = True
                         break
                     # PHP define('CONST', 'value') -> 2-group capture
