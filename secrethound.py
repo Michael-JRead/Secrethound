@@ -49,6 +49,8 @@ OPTIONS
   --all             show every finding incl. LOW-confidence entropy (no collapse)
   --group dir       group the per-directory dashboard by machine (default on for trees)
   --json FILE       also write findings + attack chains to FILE as JSON
+  --html FILE       self-contained HTML report (KPI + scoreboard + chains + tables)
+  --csv FILE        export CRED PAIRS / hashes / secrets to CSV for report appendix
   --hashes FILE     write crack-ready hashes to FILE + print hashcat commands
   --cap N           max findings shown per section (default 40)
   --src             also scan source code (noisy)
@@ -138,6 +140,10 @@ def main():
     ap.add_argument("--inspect", metavar="FILE")
     ap.add_argument("--hashes", metavar="FILE")
     ap.add_argument("--json")
+    ap.add_argument("--html", metavar="FILE",
+                    help="write a self-contained HTML report (KPIs + scoreboard + chains + per-cat tables)")
+    ap.add_argument("--csv", metavar="FILE",
+                    help="write CRED PAIRS + hashes + secrets as CSV for the report appendix")
     ap.add_argument("--cap", type=int, default=40)
     ap.add_argument("--ascii", action="store_true")
     ap.add_argument("--no-color", action="store_true")
@@ -340,6 +346,20 @@ def main():
     if args.json:
         report.to_json(args.json, chains=chains)
         print(ui.c("dim", f"\n[+] findings + chains + stats written to {args.json}\n"))
+    if args.html:
+        try:
+            from core import html_report
+            html_report.write_html(report, chains, store, args.html)
+            print(ui.c("dim", f"[+] HTML report written to {args.html}\n"))
+        except Exception as e:
+            print(ui.c("red", f"[x] HTML export failed: {e}\n"))
+    if args.csv:
+        try:
+            from core import html_report
+            html_report.write_csv_creds(report, store, args.csv)
+            print(ui.c("dim", f"[+] CSV creds export written to {args.csv}\n"))
+        except Exception as e:
+            print(ui.c("red", f"[x] CSV export failed: {e}\n"))
     return 0
 
 

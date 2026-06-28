@@ -448,6 +448,68 @@ _LAZAGNE = re.compile(
     r'(?im)^\s*(?:URL|Login|Username)\s*:\s*(\S{3,80})\s*\n[\s\S]{0,200}?'
     r'(?:Password|Pwd|Pass)\s*:\s*([^\r\n]{3,80})'
 )
+# pspy / pspy64 timestamped process line:
+#   2024/03/14 12:34:56 CMD: UID=0    PID=4242  | /bin/bash /opt/backup.sh secret-token
+# Real value: surfaces root-owned cron tasks + their argv (often plaintext token/path).
+_PSPY_LINE = re.compile(
+    r'(?m)^\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+CMD:\s+UID=(\d+)\s+'
+    r'PID=\d+\s*\|\s*(.{4,400})$'
+)
+# Docker registry config.json auths block (Docker for Linux/Windows, podman):
+#   "auths": { "registry.example.com": { "auth": "<base64 user:pass>" } }
+_DOCKER_AUTH = re.compile(
+    r'"auths"\s*:\s*\{[\s\S]{0,2000}?'
+    r'"([^"]{3,80})"\s*:\s*\{\s*"auth"\s*:\s*"([A-Za-z0-9+/=]{12,200})"',
+    re.MULTILINE,
+)
+# AWS instance metadata service v1/v2 capture - IAM role JSON response
+#   "AccessKeyId" : "ASIA...",  "SecretAccessKey" : "...", "Token" : "..."
+# Real value: short-lived role creds harvested via SSRF; we surface all three.
+_IMDS_BLOCK = re.compile(
+    r'"AccessKeyId"\s*:\s*"(A(?:KIA|SIA)[A-Z0-9]{16,20})"[\s\S]{0,500}?'
+    r'"SecretAccessKey"\s*:\s*"([A-Za-z0-9/+=]{30,60})"'
+    r'(?:[\s\S]{0,500}?"Token"\s*:\s*"([A-Za-z0-9/+=]{40,})")?'
+)
+# PowerShell transcript header (Start-Transcript / auto-transcription on Win10+):
+#   **********************
+#   Windows PowerShell transcript start
+#   Start time: 20240314120000
+#   Username: DOMAIN\user
+_PS_TRANSCRIPT = re.compile(
+    r'\*{10,}\s*\n\s*Windows PowerShell transcript start\s*\n[\s\S]{0,400}?'
+    r'Username\s*:\s*([^\r\n]{1,80})[\s\S]{0,400}?'
+    r'(?:Machine|Configuration Name|Process ID)\s*:\s*([^\r\n]{1,80})'
+)
+# In a PS transcript / cleartext history, captured cmdline secrets (priv. creds):
+#   ConvertTo-SecureString -String "ActualPlaintext" -AsPlainText -Force
+_PS_CONVERT_SECRET = re.compile(
+    r'(?i)ConvertTo-SecureString\s+(?:-String\s+)?["\']([^"\']{3,80})["\']\s+-AsPlainText'
+)
+# Burp Suite captured request: Authorization: Basic <base64>
+_HTTP_AUTH_BASIC = re.compile(
+    r'(?i)Authorization\s*:\s*Basic\s+([A-Za-z0-9+/]{8,}={0,2})'
+)
+# Captured Authorization: Bearer JWT (3 segments separated by '.')
+_HTTP_AUTH_BEARER_JWT = re.compile(
+    r'(?i)Authorization\s*:\s*Bearer\s+(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,})'
+)
+# Sherlock/Watson/wesng "Appears Vulnerable" missing-patch output block:
+#   Title:       Win32k Elevation of Privilege
+#   MSBulletin:  MS16-135
+#   CVEID:       CVE-2016-7255
+#   VulnStatus:  Appears Vulnerable
+_WESNG_VULN = re.compile(
+    r'(?im)Title\s*:\s*([^\r\n]{4,120})\s*\n[\s\S]{0,300}?'
+    r'(?:MSBulletin|MSKB|BulletinKB|KB Article|KB)\s*:\s*([A-Za-z0-9\-_]{2,40})\s*\n[\s\S]{0,300}?'
+    r'CVE(?:ID)?\s*:\s*(CVE-\d{4}-\d{4,7})[\s\S]{0,300}?'
+    r'(?:VulnStatus|Status)\s*:\s*((?:Appears\s+Vulnerable|Vulnerable|likely|likely vulnerable)[^\r\n]*)'
+)
+# PrivescCheck / Sherlock JSON missing-patch:
+#   {"VulnerabilityName": "MS16-135", "CVE": "CVE-2016-7255"}
+_PE_JSON_VULN = re.compile(
+    r'"(?:VulnerabilityName|Vulnerability)"\s*:\s*"([A-Za-z0-9\-_]{3,40})"'
+    r'[\s\S]{0,200}?"CVE"\s*:\s*"(CVE-\d{4}-\d{4,7})"'
+)
 
 
 def _multiline_passes(path, report, store):
@@ -548,6 +610,159 @@ def _multiline_passes(path, report, store):
                    hint=f"reuse: nxc smb <host> -u <user> -p '{p}'  - browser/wifi/mail/DPAPI lift")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=_ln(m)))
+
+    # pspy: surface ROOT (UID=0) cron/service argv only; non-root is noise.
+    # Each path emits at most a few top findings (avoid blowing the dashboard).
+    pspy_seen = set()
+    pspy_n = 0
+    for m in _PSPY_LINE.finditer(text):
+        if pspy_n >= 12:
+            break
+        uid = m.group(1)
+        cmd = m.group(2).strip()
+        # only flag root + suppress kernel-thread / login churn
+        if uid != "0":
+            continue
+        if not cmd or cmd in pspy_seen:
+            continue
+        # ignore trivially benign / noisy entries
+        cmd_lc = cmd.lower()
+        if cmd_lc.startswith(("[", "/usr/lib/systemd", "/lib/systemd",
+                              "sshd:", "(sd-pam)", "sleep ", "/usr/bin/dbus")):
+            continue
+        # interesting: scripts under /opt /home /tmp /var, or anything with a
+        # plausible secret on the cmdline (-p, --password, token=, key=)
+        is_script = any(p in cmd for p in ("/opt/", "/home/", "/tmp/", "/var/",
+                                            "/root/", "/etc/cron"))
+        is_secret_arg = bool(re.search(r'(?i)(--password|-p\s+\S|token=|api[_-]?key=|secret=)', cmd))
+        if not (is_script or is_secret_arg):
+            continue
+        pspy_seen.add(cmd)
+        pspy_n += 1
+        sev = "HIGH" if is_secret_arg else "MEDIUM"
+        report.add(sev, "INTERESTING FILES", path, _ln(m),
+                   f"pspy root cmd: {cmd[:160]}",
+                   hint="root cron/service path - check perms; if writable / argv leaks creds, that IS the privesc")
+
+    # Docker registry config.json auths - base64(user:pass) per registry
+    import base64 as _b64
+    for m in _DOCKER_AUTH.finditer(text):
+        registry, b64 = m.group(1), m.group(2)
+        if filters.is_placeholder(b64):
+            continue
+        try:
+            raw = _b64.b64decode(b64, validate=True).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        if ":" not in raw:
+            continue
+        u, _, p = raw.partition(":")
+        u, p = u.strip(), p.strip()
+        if not p or filters.is_placeholder(p) or len(p) < 3:
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"Docker registry {registry} : {u}:{p}",
+                   hint=f"docker login {registry} -u {u} -p '{p}'  - registry push/pull; sometimes reused for SSH/SMB")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                               source=path, line=_ln(m)))
+
+    # AWS IMDS capture: surface short-lived IAM role STS creds
+    for m in _IMDS_BLOCK.finditer(text):
+        akid, sak, tok = m.group(1), m.group(2), m.group(3)
+        if filters.is_placeholder(akid) or filters.is_canonical_sample(akid):
+            continue
+        report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
+                   f"AWS STS creds (IMDS): AccessKeyId={akid}",
+                   hint=(f"export AWS_ACCESS_KEY_ID={akid}; export AWS_SECRET_ACCESS_KEY=<sak>; "
+                         + ("export AWS_SESSION_TOKEN=<tok>; " if tok else "")
+                         + "aws sts get-caller-identity"))
+        report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
+                   f"AWS Secret Access Key (IMDS): {sak[:8]}{'*'*(len(sak)-8)}",
+                   hint="paired with AccessKeyId above; short-lived if 'Token' present")
+        if tok:
+            report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
+                       f"AWS Session Token (IMDS): {tok[:20]}{'*'*16}",
+                       hint="must export AWS_SESSION_TOKEN alongside the AccessKeyId/SecretAccessKey")
+
+    # PowerShell transcript header - flag the file for deeper inspection
+    for m in _PS_TRANSCRIPT.finditer(text):
+        u, machine = m.group(1).strip(), m.group(2).strip()
+        report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                   f"PowerShell transcript: {u} on {machine}",
+                   hint=("operator session log - search for ConvertTo-SecureString, "
+                         "-Password, Get-Credential, plaintext invocations"))
+
+    # PowerShell transcripts / history: ConvertTo-SecureString -String "pw"
+    for m in _PS_CONVERT_SECRET.finditer(text):
+        pw = m.group(1)
+        if filters.is_placeholder(pw):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"PowerShell plaintext secret: {pw}",
+                   hint=f"captured from -AsPlainText invocation; try as user pw: nxc smb <host> -u <user> -p '{pw}'")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", plaintext=pw, source=path, line=_ln(m)))
+
+    # Burp captured Authorization: Basic <base64>
+    for m in _HTTP_AUTH_BASIC.finditer(text):
+        b64 = m.group(1)
+        if filters.is_placeholder(b64):
+            continue
+        try:
+            raw = _b64.b64decode(b64 + "==", validate=False).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        if ":" not in raw or len(raw) > 200:
+            continue
+        u, _, p = raw.partition(":")
+        u, p = u.strip(), p.strip()
+        if (not u or not p or filters.is_placeholder(p) or len(p) < 3
+                or not raw.isprintable()):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"HTTP Basic captured: {u}:{p}",
+                   hint=f"reuse: nxc smb <host> -u {u} -p '{p}' ; also try app SSO / webmail / VPN")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=_ln(m)))
+
+    # Burp captured Authorization: Bearer <JWT>
+    jwt_seen = set()
+    for m in _HTTP_AUTH_BEARER_JWT.finditer(text):
+        tok = m.group(1)
+        if tok in jwt_seen:
+            continue
+        jwt_seen.add(tok)
+        report.add("HIGH", "ASSIGNED SECRETS", path, _ln(m),
+                   f"HTTP Bearer JWT: {tok[:30]}...",
+                   hint="decode at jwt.io (offline) - check alg=none, weak HS256 secret (hashcat -m 16500), expiry")
+
+    # Sherlock / Watson / wesng / PrivescCheck missing-patch output
+    # Skip markdown writeups / cheatsheets - they routinely show wesng sample
+    # blocks as documentation, not real loot.
+    if filters.is_doc_file(path):
+        return
+    vuln_seen = set()
+    for m in _WESNG_VULN.finditer(text):
+        title, kb, cve, status = (m.group(1).strip(), m.group(2).strip(),
+                                  m.group(3).strip(), m.group(4).strip())
+        key = (kb, cve)
+        if key in vuln_seen:
+            continue
+        vuln_seen.add(key)
+        report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                   f"missing patch: {title} ({kb}, {cve}) — {status}",
+                   hint=("verify on host: systeminfo | findstr KB ; "
+                         f"local public PoC search by CVE id (manual on Kali): searchsploit {cve}"))
+    for m in _PE_JSON_VULN.finditer(text):
+        kb, cve = m.group(1).strip(), m.group(2).strip()
+        key = (kb, cve)
+        if key in vuln_seen:
+            continue
+        vuln_seen.add(key)
+        report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                   f"PrivescCheck missing patch: {kb} ({cve})",
+                   hint=f"verify on host: systeminfo | findstr KB ; manual PoC search: searchsploit {cve}")
 
 
 def analyze(path, report, store=None):
