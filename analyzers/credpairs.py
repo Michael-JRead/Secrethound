@@ -41,11 +41,25 @@ def _good(raw, line):
     return v
 
 
+_FTP_USER = re.compile(r'^\s*USER\s+(\S{2,40})\s*$')
+_FTP_PASS = re.compile(r'^\s*PASS\s+(\S{3,80})\s*$')
+
+
 def analyze(path, report):
     users, passes = [], []
+    ftp_user = ftp_pass = None
+    ftp_ln = None
     try:
         with open(path, "r", errors="ignore") as f:
             for lineno, line in enumerate(f, 1):
+                # FTP/POP/IMAP cleartext protocol commands (tshark / pcap export,
+                # telnet logs). Captured separately from the key=value pairing.
+                fu = _FTP_USER.match(line)
+                if fu and not ftp_user:
+                    ftp_user, ftp_ln = fu.group(1), lineno
+                fp = _FTP_PASS.match(line)
+                if fp and not ftp_pass:
+                    ftp_pass = fp.group(1)
                 if SKIP_LINE.match(line):
                     continue
                 mu = USER_KEY.search(line)
@@ -60,6 +74,11 @@ def analyze(path, report):
                         passes.append((lineno, line.strip(), v))
     except Exception:
         return
+    if ftp_user and ftp_pass and not filters.is_placeholder(ftp_pass):
+        report.add("CRITICAL", "CRED PAIRS", path, ftp_ln,
+                   f"cleartext protocol login: {ftp_user}:{ftp_pass}",
+                   hint=f"captured FTP/POP/IMAP creds - reuse: ssh {ftp_user}@<ip>  /  "
+                        f"netexec smb <ip> -u '{ftp_user}' -p '{ftp_pass}'")
     if users and passes:
         u_val = users[0][2]
         p_val = passes[0][2]

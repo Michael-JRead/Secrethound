@@ -110,6 +110,26 @@ _AD = [
     # target and point to the offline decoder.
     ("Jenkins enc blob", re.compile(
         r'\{AQAAA[A-Za-z0-9+/=]{20,}\}')),
+    # ---- iter-6 INTEL markers (not raw creds; high-signal next-step pointers) ----
+    # AD CS ESC vuln from certipy/certify output. Broad match here; the dispatch
+    # branch requires an ADCS context word on the line to avoid 'ESC1' FPs.
+    ("ADCS ESC", re.compile(r'\bESC(1[0-6]|[1-9])\b')),
+    # RBCD: the attribute name is unique enough to flag unconditionally.
+    ("RBCD marker", re.compile(r'(?i)\bmsDS-AllowedToActOnBehalfOfOtherIdentity\b')),
+    # BloodHound ACL edge, arrow form: name --[WriteOwner]--> target (distinctive).
+    ("BloodHound ACL edge", re.compile(
+        r'--\[(WriteDacl|WriteOwner|GenericAll|GenericWrite|ForceChangePassword|'
+        r'AddMember|Owns|AllExtendedRights|AddKeyCredentialLink|ReadGMSAPassword|'
+        r'ReadLAPSPassword|AddSelf|WriteSPN)\]-->')),
+    # WSUS abuse tool invocation.
+    ("WSUS abuse", re.compile(r'(?i)\bSharpWSUS(?:\.exe)?\s+(?:create|approve|check|delete)\b')),
+    # DPAPI masterkey recovery output / mimikatz dpapi module.
+    ("DPAPI masterkey", re.compile(
+        r'(?i)dpapi::masterkey|\[masterkey\]\s*[a-f0-9]{32,}|guidMasterKey')),
+    # ADO.NET connection string: connectionString="...;User ID=x;Password=y;"
+    # (Mantis Orchard web.config). Captures the whole value; branch parses it.
+    ("ADO connectionString", re.compile(
+        r'(?i)connectionString\s*=\s*["\']([^"\'\r\n]{8,400})["\']')),
 ]
 
 
@@ -287,6 +307,66 @@ def analyze(path, report, store=None):
                         report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    "gMSA msDS-ManagedPassword blob",
                                    hint="gMSADumper.py -u <user> -p <pw> -d <dom> -l <dc>  (RetrievePrincipal right needed)")
+                        hit = True
+                        break
+                    # ---- iter-6 INTEL markers ----
+                    # AD CS ESC#: require an ADCS context word on the line (else
+                    # 'ESC1' in random prose / IDs would FP).
+                    if name == "ADCS ESC":
+                        if not re.search(r'(?i)vulnerab|template|certipy|certify|\benroll|manageca|'
+                                         r'managecertificates|certificate|\bCA\b|adcs', line):
+                            continue
+                        esc = am.group(0).upper()
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"AD CS {esc} vulnerable template / right",
+                                   hint=f"certipy-ad req ... ({esc}); then certipy-ad auth -pfx <out>.pfx -> NT hash / TGT")
+                        hit = True
+                        break
+                    if name == "RBCD marker":
+                        report.add("HIGH", "RECON", path, lineno,
+                                   "RBCD attribute (msDS-AllowedToActOnBehalfOfOtherIdentity)",
+                                   hint="impacket-rbcd -delegate-from <ctrl> -delegate-to <target$> -action write ...; "
+                                   "then getST.py -impersonate Administrator")
+                        hit = True
+                        break
+                    if name == "BloodHound ACL edge":
+                        edge = am.group(1)
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"BloodHound ACL edge: {edge} (privilege-escalation path)",
+                                   hint="abuse with bloodyAD / PowerView / dacledit per edge; shortest path to DA")
+                        hit = True
+                        break
+                    if name == "WSUS abuse":
+                        report.add("HIGH", "RECON", path, lineno,
+                                   "WSUS update-push abuse (SharpWSUS)",
+                                   hint="LAB-ONLY for the exam unless the WSUS host is in scope - signed-binary update -> SYSTEM on client/DC")
+                        hit = True
+                        break
+                    if name == "DPAPI masterkey":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "DPAPI masterkey material",
+                                   hint="impacket-dpapi masterkey -file <mk> -sid <SID> -password <pw>  (or -rpc on a box you own)")
+                        hit = True
+                        break
+                    # ADO.NET connectionString: parse User ID / Password out cleanly
+                    if name == "ADO connectionString":
+                        cs = am.group(1)
+                        pm = re.search(r'(?i)\b(?:password|pwd)\s*=\s*([^;"\'\r\n]{3,})', cs)
+                        um = re.search(r'(?i)\b(?:user\s*id|uid|user)\s*=\s*([^;"\'\r\n]{1,60})', cs)
+                        if not pm:
+                            continue
+                        pw = pm.group(1).strip()
+                        if filters.is_placeholder(pw) or "integrated security" in cs.lower() and not pm:
+                            continue
+                        u = (um.group(1).strip() if um else "")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"connstring {u + ':' if u else ''}{pw}",
+                                   hint=f"DB/service cred: netexec mssql <host> -u '{u or '<user>'}' -p '{pw}' "
+                                   "(or mssqlclient.py / reuse on the host)")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                                               source=path, line=lineno))
                         hit = True
                         break
                     # PHP define('CONST', 'value') -> 2-group capture
