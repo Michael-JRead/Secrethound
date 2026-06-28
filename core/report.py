@@ -73,36 +73,79 @@ class Report:
         return self.ui.c(color, text)
 
     def _dedup(self):
-        # iter-12: secondary canonical key to collapse same-secret rows that
-        # disagree on cosmetic detail-text. We hash the LAST token after ':'
-        # (the actual secret) along with (file, line, category). Keeps the
-        # most-severe row when both fire.
+        # iter-12 introduced a secondary canonical key. iter-14 audit
+        # (workflow w3cghu9kx) found 5 bugs in the original implementation:
+        #   - CATEGORY in the key defeats cross-category collapse
+        #     (CRED PAIRS finding and ASSIGNED SECRETS finding for the same
+        #      secret never merged)
+        #   - LINE in the key blocks multi-line composite dedup
+        #     (tfstate sensitive at line 7 vs Terraform tfvars at line 4
+        #      for the same secret stay split)
+        #   - rsplit(":", 1) fragile on URL-shaped values and parenthesized hints
+        #   - [:80] window mis-merges long structurally-similar tokens
+        #   - identity-based replacement is O(n^2) and unstable
         seen, sec_seen, out = set(), {}, []
+        # build an index from finding-id -> position-in-out so severity
+        # replacement is O(1) instead of O(n)
+        out_idx = {}
         for f in self.findings:
             key = (f["severity"], f["file"], f["detail"])
             if key in seen:
                 continue
             seen.add(key)
-            # canonical: extract the last colon-separated token (the secret
-            # value) - this collapses rows like "user: PW" / "user:PW" /
-            # "DOMAIN\user:PW" emitted by multiple rules.
-            det = f["detail"] or ""
-            secret_value = det.rsplit(":", 1)[-1].strip() if ":" in det else det.strip()
-            sec_key = (f["file"], f["line"], f["category"], secret_value[:80])
-            existing = sec_seen.get(sec_key)
+            # canonical secret extraction. Prefer the part AFTER the last
+            # ': ' / ':' that doesn't look like a port number or scheme.
+            # Strip trailing parenthesized notes like '... (note)'.
+            det = (f["detail"] or "").strip()
+            sec = self._canonical_secret(det)
+            # secondary key: file + canonical-secret only. Category +
+            # line removed - same secret in different categories/lines is
+            # the same secret.
+            sec_key = (f["file"], sec) if sec else None
+            existing = sec_seen.get(sec_key) if sec_key else None
             if existing is not None:
                 # keep the highest-severity row
                 if SEV_RANK.get(f["severity"], 9) < SEV_RANK.get(existing["severity"], 9):
-                    # replace the lower-severity row in out
-                    for i, e in enumerate(out):
-                        if e is existing:
-                            out[i] = f
-                            sec_seen[sec_key] = f
-                            break
+                    pos = out_idx[id(existing)]
+                    out[pos] = f
+                    out_idx[id(f)] = pos
+                    sec_seen[sec_key] = f
                 continue
-            sec_seen[sec_key] = f
+            if sec_key is not None:
+                sec_seen[sec_key] = f
+            out_idx[id(f)] = len(out)
             out.append(f)
         return out
+
+    @staticmethod
+    def _canonical_secret(detail):
+        """Extract the canonical secret-value substring from a finding's
+        detail string. Handles common shapes:
+          'user: SECRET'          -> SECRET
+          'NTLM (NT) DOM\\user: HASH' -> HASH
+          'name: VALUE  (note)'   -> VALUE  (strip trailing parens)
+          'URL: https://u:p@h'    -> URL (with creds) - keep whole tail
+        Returns lowercased canonical form, or '' if nothing extractable."""
+        import re as _re
+        if not detail:
+            return ""
+        d = detail.strip()
+        # strip trailing parenthesised note
+        d = _re.sub(r'\s*\([^()]{1,80}\)\s*$', '', d)
+        # truncated form: 'value...' or hint appended via two spaces
+        d = _re.sub(r'\s{2,}.*$', '', d)
+        # the secret usually sits after the LAST `: ` (with space) so we
+        # don't split on URL schemes / port numbers / ratio strings.
+        idx = d.rfind(": ")
+        if idx >= 0:
+            sec = d[idx + 2:].strip()
+        elif ":" in d and not _re.search(r':\d+(?:[/.]|$)', d):
+            sec = d.rsplit(":", 1)[-1].strip()
+        else:
+            sec = d
+        # strip wrapping quotes
+        sec = sec.strip("'\"`")
+        return sec.lower()
 
     def _rel(self, path):
         if not path:

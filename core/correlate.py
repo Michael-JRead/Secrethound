@@ -47,10 +47,13 @@ class Chain:
 
 class _Ents:
     def __init__(self):
-        self.creds = {}        # (user_lc, pw) -> (user_display, source, line)
+        # iter-14: value is now LIST of (user_display, source, line) so a
+        # second occurrence of the same (user, pw) accumulates evidence
+        # instead of silently dropping the earlier source/line.
+        self.creds = {}        # (user_lc, pw) -> [(user_display, source, line), ...]
         self.users = set()
-        self.nt = {}           # hash -> (user, source, line)
-        self.defaults = []     # (label, source) plaintext default creds
+        self.nt = {}           # hash -> [(user, source, line), ...]  iter-14: list
+        self.defaults = {}     # label -> [(source, line), ...]       iter-14: dict-of-list
         self.kerberoastable = set()
         self.asreproastable = set()
         self.has_tgs = self.has_asrep = self.has_shadow = False
@@ -64,9 +67,29 @@ def _add_cred(e, user, pw, src, line):
     pw = (pw or "").strip().strip("'\"")
     if not pw or len(pw) < 3:
         return
-    e.creds[((user or "").lower(), pw)] = (user or "<user>", src, line)
+    # iter-14: append (don't overwrite) so multiple sources for the same
+    # cred accumulate evidence. The R1 spray chain only needs ONE
+    # (src,line) anchor, but losing the others poisons attribution.
+    key = ((user or "").lower(), pw)
+    e.creds.setdefault(key, []).append((user or "<user>", src, line))
     if user:
         e.users.add(user)
+
+
+def _add_default(e, label, src, line=None):
+    """iter-14: track default cred as dict-of-list so 'admin/admin' seen
+    in multiple files dedups to one chain but retains all evidence."""
+    if not label:
+        return
+    e.defaults.setdefault(label, []).append((src, line))
+
+
+def _add_nt(e, hash_val, user, src, line):
+    """iter-14: append (don't overwrite) so a hash seen via SAM + secretsdump
+    + LSA accumulates all evidence; the R7 chain count reflects the truth."""
+    if not hash_val:
+        return
+    e.nt.setdefault(hash_val.lower(), []).append((user, src, line))
 
 
 def _entities(report, store):
@@ -86,20 +109,20 @@ def _entities(report, store):
                 _add_cred(e, "", mn.group(1), src, ln)
             md = _RX["default_nt"].search(d)
             if md:
-                e.defaults.append((md.group(1), src)); _add_cred(e, "", md.group(1), src, ln)
+                _add_default(e, md.group(1), src, ln); _add_cred(e, "", md.group(1), src, ln)
         if cat == "PASSWORD HASHES":
             mdn = _RX["default_nt"].search(d)
             if mdn:
-                e.defaults.append((mdn.group(1), src)); _add_cred(e, "", mdn.group(1), src, ln)
+                _add_default(e, mdn.group(1), src, ln); _add_cred(e, "", mdn.group(1), src, ln)
             elif "NTLM" in d and "blank" not in d.lower():
                 # user-bound form "NTLM (NT) <user>: <hash>" (from pwdump rows)
                 mb = re.search(r'NTLM \(NT\)\s*([^\s:]+)\s*:\s*([a-f0-9]{32})', d)
                 if mb and not filters.is_blank_hash(mb.group(2)):
-                    e.nt[mb.group(2).lower()] = (mb.group(1), src, ln)
+                    _add_nt(e, mb.group(2), mb.group(1), src, ln)
                 elif not mb:
                     mh = re.search(r'\b([a-f0-9]{32})\b', d)
                     if mh and not filters.is_blank_hash(mh.group(1)):
-                        e.nt[mh.group(1).lower()] = (None, src, ln)
+                        _add_nt(e, mh.group(1), None, src, ln)
             if d.startswith(("sha512crypt", "md5crypt", "sha256crypt", "bcrypt", "yescrypt")):
                 e.has_shadow = True; e.shadow_src = e.shadow_src or (src, ln)
             if d.startswith("Kerberoast TGS"):
@@ -109,7 +132,7 @@ def _entities(report, store):
         if "DEFAULT = '" in d and cat != "PASSWORD HASHES":
             mdg = _RX["default_generic"].search(d)
             if mdg:
-                e.defaults.append((mdg.group(1), src)); _add_cred(e, "", mdg.group(1), src, ln)
+                _add_default(e, mdg.group(1), src, ln); _add_cred(e, "", mdg.group(1), src, ln)
         if cat == "GPP cpassword":
             e.has_gpp = True; e.gpp_src = e.gpp_src or (src, ln)
         if cat == "PRIVATE KEYS":
@@ -130,7 +153,7 @@ def _entities(report, store):
         elif ev.kind == "cred" and ev.cred:
             _add_cred(e, ev.user, ev.cred, ev.source, ev.line)
         elif ev.kind == "hash" and ev.hash and not filters.is_blank_hash(ev.hash):
-            e.nt[ev.hash.lower()] = (ev.user, ev.source, ev.line)
+            _add_nt(e, ev.hash, ev.user, ev.source, ev.line)
         if ev.user:
             e.users.add(ev.user)
         if ev.fact == "kerberoastable":
@@ -183,7 +206,11 @@ def run(report, store, ui=None):
     ul = _userlist(e)
 
     # ── plaintext creds: spray + (only same-machine) service shells ──
-    for (ulc, pw), (disp, src, ln) in e.creds.items():
+    # iter-14: e.creds is now dict-of-list; iterate first occurrence as the
+    # chain anchor and accumulate count from len(list).
+    for (ulc, pw), occurrences in e.creds.items():
+        disp, src, ln = occurrences[0]
+        cred_count = len(occurrences)
         mach = _machine(src, root)
         smb = svc_on(mach, "smb") or dc_for(mach)
         utoken = ul or f"'{disp}'"
@@ -225,7 +252,11 @@ def run(report, store, ui=None):
                     "lsadump::sam", "local secretsdump"))
 
     by_target = {}
-    for h, (huser, src, ln) in e.nt.items():
+    # iter-14: e.nt is now dict-of-list. Use the FIRST occurrence as the
+    # primary src/line anchor; len(list) tells us how many distinct sources
+    # of the same hash we observed (used for chain count / inflation guard).
+    for h, occurrences in e.nt.items():
+        huser, src, ln = occurrences[0]
         mach = _machine(src, root)
         tgt = svc_on(mach, "smb") or dc_for(mach)
         by_target.setdefault(tgt, []).append((h, huser, src, ln))
@@ -296,11 +327,17 @@ def run(report, store, ui=None):
         elif "AWS secret" in det:
             sak = det.split(":", 1)[-1].strip()
             aws_saks.setdefault(path, []).append((sak, line))
+    # iter-14: dedup R30 by akid across files - same access key in two files
+    # should emit ONE chain, not two.
+    seen_aws = set()
     for path, akids in aws_akids.items():
         for akid, akline in akids:
+            if akid in seen_aws:
+                continue
             for sak, sline in aws_saks.get(path, []):
                 if abs((sline or 0) - (akline or 0)) > 30:
                     continue
+                seen_aws.add(akid)
                 # iter-13: AWS keys often rotated / disabled; PtH on a real NT
                 # hash is more reliable. Drop prox 0.8 -> 0.7 (~8.51) so PtH on
                 # non-DC SMB (8.93) wins by default. AWS is also mostly out-of-
@@ -319,13 +356,15 @@ def run(report, store, ui=None):
                 break  # one pair per akid
 
     # default creds -> log in directly. iter-13: demoted from crit=8/conf=1.0
-    # (score 10.8) because it's a GUESS, not a confirmed artifact. A known
-    # default ('admin/admin', 'manager/manager') is worth flagging but should
-    # never outrank a real NT hash you already have in hand.
-    for label, src in e.defaults:
+    # because it's a GUESS, not an artifact. iter-14: e.defaults is now a
+    # dict-of-list; dedup by label so 'admin/admin' seen in 3 files emits
+    # ONE R24 chain (with count=3) instead of three separate ones.
+    for label, occurrences in e.defaults.items():
+        src0, _ln0 = occurrences[0]
         chains.append(Chain("R24", "default cred", f"default password '{label}' in use",
             crit=6, conf=0.7, ready=1.3, prox=0.8,        # score 4.37
-            commands=[f"netexec smb {dc()} -u '<user>' -p '{label}'"], src=src))
+            commands=[f"netexec smb {dc()} -u '<user>' -p '{label}'"],
+            src=src0, count=len(occurrences)))
 
     # kerberoast. iter-13: prox honors DC presence so a known DC lifts the score
     for u in e.kerberoastable:

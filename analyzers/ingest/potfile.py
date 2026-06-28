@@ -48,14 +48,56 @@ def load_pot(path):
                 line = line.rstrip("\n")
                 if not line or ":" not in line:
                     continue
-                key, _, plain = line.rpartition(":")
+                # iter-14: hashcat/john pot rows always have the HASH on the
+                # left and plaintext on the right, split by the FIRST ":"
+                # when the hash itself is a single token. For NTLM-pair
+                # / krb5tgs / known-prefix hashes, the hash carries ':' so
+                # we need a prefix-aware split. Heuristic: if the line
+                # starts with a recognised hash-prefix shape, find the
+                # delimiter after the hash blob; otherwise split on the
+                # rightmost colon (legacy behaviour).
+                key, plain = _split_pot_line(line)
                 if not key or not plain:
                     continue
-                _POT_INDEX[normalize(key)] = (plain, p)
+                # iter-14: track ALL plaintexts seen for a hash (collisions
+                # mean two pot files; first-loaded wins, but record alt).
+                norm = normalize(key)
+                existing = _POT_INDEX.get(norm)
+                if existing is None:
+                    _POT_INDEX[norm] = (plain, p)
+                elif existing[0] != plain:
+                    # second potfile disagrees - keep first-loaded but
+                    # record so the operator can see it.
+                    _POT_COLLISIONS.setdefault(norm, [existing]).append((plain, p))
                 n += 1
     except OSError:
         pass
     return n
+
+
+def _split_pot_line(line):
+    """Split a 'hash:plain' pot line, prefix-aware so $krb5tgs$.../NTLM-pair
+    hashes don't get clobbered by rpartition."""
+    # NTLM pair: 32hex:32hex:plain   -> hash = '32hex:32hex'
+    import re as _re
+    m = _re.match(r'^([a-fA-F0-9]{32}:[a-fA-F0-9]{32}):(.*)$', line)
+    if m:
+        return m.group(1), m.group(2)
+    # known $-prefix hashes carry their own internal colons; split AFTER the
+    # last segment of the hash token.
+    if line.startswith("$"):
+        # split on the FIRST ': ' (with space) if present, else fall back
+        # to splitting on the colon that doesn't immediately follow a digit.
+        if ": " in line:
+            k, _, p = line.partition(": ")
+            return k, p
+    # default: rightmost ':' wins
+    key, _, plain = line.rpartition(":")
+    return key, plain
+
+
+# iter-14: track potfile collisions for operator visibility
+_POT_COLLISIONS = {}
 
 
 # ── adapter interface: a potfile found inside the scanned tree ──

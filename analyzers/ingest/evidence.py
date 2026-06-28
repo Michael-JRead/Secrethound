@@ -43,31 +43,69 @@ class Store:
         self._ip2names = {}             # ip -> set(names)
 
     # ── host canonicalisation ──
+    # iter-14 audit fixes (workflow w3cghu9kx):
+    #   - learn_host with no IP was a no-op for short<->fqdn alias mapping
+    #   - learn_host blindly overwrote IP when same short name appeared in
+    #     two subnets (re-imaged host, FQDN from different domains)
+    #   - canon didn't lowercase / normalize IPv6 (round-trip miss)
+    def _norm_ip(self, s):
+        """Normalise an IP string: lowercase + IPv6 canonical compression
+        when possible. Returns '' if not a valid IP."""
+        import ipaddress
+        s = (s or "").strip()
+        if not s:
+            return ""
+        try:
+            return str(ipaddress.ip_address(s))
+        except ValueError:
+            return ""
+
     def learn_host(self, ip="", names=()):
         if isinstance(names, str):
             names = [names]
-        ip = (ip or "").strip()
-        for n in names:
-            n = (n or "").strip().lower()
-            if not n:
-                continue
-            if ip:
-                self._name2ip[n] = ip
-                # also map the short label of an fqdn
-                self._name2ip[n.split(".")[0]] = ip
+        ip = self._norm_ip(ip)
+        lc = [(n or "").strip().lower() for n in names if n and (n or "").strip()]
+        # iter-14: always record short<->fqdn alias even when ip is empty so
+        # canon can later collapse short and fqdn forms.
+        if not hasattr(self, "_aliases"):
+            self._aliases = {}
+        for n in lc:
+            short = n.split(".")[0]
+            if short and short != n:
+                self._aliases.setdefault(short, set()).add(n)
+                self._aliases.setdefault(n, set()).add(short)
         if ip:
+            for n in lc:
+                # iter-14: collision detection - if a NAME maps to a DIFFERENT
+                # ip, keep first-writer (don't clobber). For the short label,
+                # only set if not already pointing somewhere else.
+                if n in self._name2ip and self._name2ip[n] != ip:
+                    self.items.append(Evidence(
+                        kind="host", fact="name_collision",
+                        meta={"name": n, "ips": [self._name2ip[n], ip]}))
+                else:
+                    self._name2ip[n] = ip
+                short = n.split(".")[0]
+                if short and short != n:
+                    if short not in self._name2ip:
+                        self._name2ip[short] = ip
+                    elif self._name2ip[short] != ip:
+                        # don't overwrite a DIFFERENT short-label mapping;
+                        # the FQDN still resolves correctly via the full key.
+                        pass
             s = self._ip2names.setdefault(ip, set())
-            for n in names:
-                if n:
-                    s.add(n.lower())
+            for n in lc:
+                s.add(n)
 
     def canon(self, host):
         """resolve any host token to a canonical key (IP when known)."""
         if not host:
             return ""
         h = host.strip().lower()
-        if _IP.match(h):
-            return h
+        # iter-14: normalise IPv6 too (was IPv4-only)
+        ip = self._norm_ip(h)
+        if ip:
+            return ip
         return self._name2ip.get(h) or self._name2ip.get(h.split(".")[0]) or h
 
     def names_for(self, host):
