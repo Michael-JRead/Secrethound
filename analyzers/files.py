@@ -52,6 +52,18 @@ INTERESTING = [
     (re.compile(r'(?i)^\.env$|^\.env\.|^\.envrc$|^\.flaskenv$'), "dotenv → APP_KEY/DB/API keys", "HIGH"),
     # ── browser saved creds ────────────────────────────────────────────────
     (re.compile(r'(?i)^logins\.json$|^key4\.db$|^cookies\.sqlite$'), "Firefox creds → firefox_decrypt.py", "HIGH"),
+    # iter-11: macOS keychain artifacts
+    (re.compile(r'(?i)^login\.keychain(?:-db)?$|^keychain-\d+\.db$|^System\.keychain$'),
+     "macOS keychain → security dump-keychain -d <f> (interactive) | chainbreaker.py -f <f>", "HIGH"),
+    (re.compile(r'(?i)^kcpassword$'),
+     "macOS auto-login token → /etc/kcpassword XOR-decode (published key); reuse against login pw", "HIGH"),
+    # iter-11: mRemoteNG / Remmina / SecureCRT saved connection profiles
+    (re.compile(r'(?i)^confCons(?:\.\w+)?\.xml$'),
+     "mRemoteNG confCons → mremoteng-decrypt.py (default AES key 'mR3m')", "HIGH"),
+    (re.compile(r'(?i)\.remmina$'),
+     "Remmina connection → ~/.config/remmina/RemminaSecret hash + AES-CBC", "HIGH"),
+    (re.compile(r'(?i)^(?:portable_)?connections\.json$'),
+     "DBeaver / HeidiSQL conn store → hex(...) XOR-reversible passwords", "HIGH"),
     (re.compile(r'(?i)^login data$|^cookies$'), "Chrome creds → DPAPI decrypt", "HIGH"),
     # ── web app configs ────────────────────────────────────────────────────
     (re.compile(r'(?i)^wp-config\.php$'), "WordPress config → DB creds + keys", "HIGH"),

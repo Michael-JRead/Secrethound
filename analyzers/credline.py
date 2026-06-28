@@ -104,6 +104,18 @@ def _ok_pw(pw):
     return True
 
 
+# iter-11 corpus mining: ~/.netrc inline cred:
+#   machine HOST login USER password PW
+#   default login USER password PW
+_NETRC = re.compile(
+    r'(?i)\b(?:machine\s+(\S+)|default)\s+login\s+(\S+)\s+password\s+([^\s#\r\n]{3,200})')
+# iter-11 corpus mining: ~/.pgpass colon-delimited cred row:
+#   host:port:db:user:password   ('*' allowed in any of host/port/db/user)
+_PGPASS = re.compile(
+    r'^(\*|[^:\s#][^:\s]{0,80}):(\*|\d{1,5}):(\*|[^:\s][^:]{0,63}):(\*|[^:\s][^:]{0,63}):'
+    r'((?:\\.|[^:\\\r\n]){3,200})\s*$')
+
+
 # sentence-shaped password hints in notes / LDAP description / HR docs:
 #   "password set to X"     (Resolute LDAP description)
 #   "my password is X"      (Cicada david.orelious description)
@@ -136,6 +148,20 @@ def classify(line):
         return None
     if _HELPSTR.search(s) and "[+]" not in s and "[-]" not in s:
         return None
+
+    # iter-11: .netrc inline (machine HOST login USER password PW)
+    m = _NETRC.search(s)
+    if m and _ok_pw(m.group(3)):
+        return Cred("cred", user=m.group(2),
+                    password=m.group(3).strip("'\""),
+                    note=f"netrc machine {m.group(1) or 'default'}")
+
+    # iter-11: .pgpass colon-delimited (host:port:db:user:password)
+    m = _PGPASS.match(s)
+    if m and _ok_pw(m.group(5)):
+        host, _, _, user, pw = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+        return Cred("cred", user=user, password=pw.replace("\\:", ":"),
+                    note=f"pgpass host={host}")
 
     # ---- PowerShell ConvertTo-SecureString (real plaintext in quotes) ----
     m = _SECSTR.search(s)

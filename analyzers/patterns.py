@@ -63,7 +63,26 @@ PATTERNS = [
     ("GitHub PAT (fine)", "HIGH", re.compile(r'github_pat_[A-Za-z0-9_]{82}'), None, 0),
     ("GitLab PAT", "HIGH", re.compile(r'glpat-[0-9A-Za-z_\-]{20}'), None, 0),
     ("Slack token", "HIGH", re.compile(r'xox[baprse]-[0-9A-Za-z-]{10,}'), None, 0),
-    ("Stripe key", "HIGH", re.compile(r'(?:sk|rk)_live_[0-9a-zA-Z]{24,}'), None, 0),
+    ("Stripe key", "HIGH", re.compile(r'(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{24,}'), None, 0),
+    # iter-11: Stripe publishable key (low sev: PK is meant to be public, but
+    # operators sometimes paste -test keys mistaking them for usable)
+    ("Stripe publishable", "LOW", re.compile(r'\bpk_(?:live|test)_[0-9a-zA-Z]{24,}\b'), None, 0),
+    # iter-11: Stripe webhook signing secret (forge HMAC-signed webhooks).
+    ("Stripe webhook secret", "HIGH", re.compile(r'\bwhsec_[A-Za-z0-9]{32,64}\b'), None, 0),
+    # iter-11: Discord webhook URL (unauth POST as bot).
+    ("Discord webhook", "HIGH", re.compile(
+        r'https?://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_\-]{40,100}'),
+     None, 0),
+    # iter-11: Tailscale auth key (machine onboard / OAuth client).
+    ("Tailscale authkey", "HIGH", re.compile(
+        r'tskey-(?:auth|client|api|scim|webhook)-[A-Za-z0-9]{6,}-[A-Za-z0-9]{16,}'), None, 0),
+    # iter-11: HashiCorp Cloudflared connector token (b64; gated by typed var).
+    ("Cloudflared tunnel token", "HIGH", re.compile(
+        r'(?i)\bcloudflared\b[^\n]{0,200}?--token\s+([A-Za-z0-9+/=._\-]{40,})'), None, 1),
+    # iter-11: HeidiSQL / DBeaver / Navicat hex(...) password envelope (XOR
+    # reversible with their published key).
+    ("HeidiSQL hex password", "HIGH", re.compile(
+        r'(?i)"(?:Password|EncryptedPassword)"\s*[:=]\s*"hex\(([0-9a-fA-F]{8,})\)"'), None, 1),
     ("SendGrid key", "HIGH", re.compile(r'SG\.[\w\-]{22}\.[\w\-]{43}'), None, 0),
     ("Mailgun key", "HIGH", re.compile(r'key-[0-9a-zA-Z]{32}'), None, 0),
     ("Twilio SID", "HIGH", re.compile(r'SK[0-9a-fA-F]{32}'), None, 0),
@@ -79,6 +98,12 @@ PATTERNS = [
     ("KeePass2 hash", "HIGH", re.compile(r'\$keepass\$\*[12]\*\d+\*[a-fA-F0-9]+\*[a-fA-F0-9]+'), "13400", 0),
     ("VNC reg password", "HIGH", re.compile(r'(?i)"?Password"?\s*=\s*hex:([0-9a-fA-F]{2}(?:[,\s][0-9a-fA-F]{2}){7})'), None, 1),
     ("Ansible Vault", "HIGH", re.compile(r'\$ANSIBLE_VAULT;\d+\.\d+;AES256'), None, 0),
+    # iter-11: SAMLResponse blob (SSO abuse - replay / sign / inject). Bound
+    # to a SAMLResponse field name to avoid base64-everywhere FPs. Accept both
+    # raw `=` padding and URL-encoded `%3D`.
+    ("SAMLResponse blob", "HIGH", re.compile(
+        r'(?i)SAMLResponse(?:=|"\s*:\s*"|\s*:\s*"|"\s*,\s*"value"\s*:\s*")\s*"?'
+        r'([A-Za-z0-9+/]{200,}(?:={0,2}|(?:%3D){0,2}))'), None, 1),
     ("Private key", "HIGH", re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----'), None, 0),
     # `conn string` (bare DB URI without user:pass) was removed in iter-7: the
     # FP-audit produced 22 FPs on innocuous URLs (redis://redis:6379/0,

@@ -47,6 +47,9 @@ _PLACEHOLDER_WORDS = {
     "xxxxx", "xxxxxxxx", "password1", "qwerty", "abc123", "letmein", "secret123",
     "hunter2", "topsecret", "supersecret", "enter_password_here", "string",
     "anonymous", "value", "somevalue", "pwd", "credentials",
+    # iter-11: JDK/JKS/Tomcat/Atlassian canonical defaults that fill docs +
+    # writeups (Maven settings.xml, Confluence install guides, Java truststore).
+    "changeit", "changeit123", "tomcat", "manager", "jonas", "redhat", "kafka",
     # development/test/local placeholder credentials caught by the URL-with-creds
     # and CRED PAIRS rules in iter-7 (docker-compose dev fixtures, .env.dev,
     # *.fixture.json - 'devuser:devpass', 'appuser:apppass', 'minio_admin', etc.).
@@ -212,6 +215,9 @@ def is_placeholder(value):
         return True
     # interpolation/env-template anywhere in the value -> not a literal secret
     if '${' in v or '{{' in v or '__VAR__' in v or '<your-' in v.lower():
+        return True
+    # iter-11 FP audit: Symfony env-template '%env(VAR)%' / '%kernel.X%'
+    if v.startswith('%') and v.endswith('%') and ('(' in v or '.' in v):
         return True
     return False
 

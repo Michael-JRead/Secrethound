@@ -315,9 +315,14 @@ _AD = [
     ("kerbrute valid user", re.compile(
         r'(?i)\[\+\]\s+VALID\s+USERNAME\s*:\s*(\S+@\S+)')),
     # PowerView Get-DomainUser kerberoastable block -> _multiline_passes().
-    # accesschk.exe writable service / dir: `RW <PRINCIPAL> <PATH>` (single-line)
+    # accesschk.exe writable service / dir. Real accesschk RW lines are:
+    #   RW DOMAIN\user    C:\Windows\System32\drivers\foo.sys
+    #   RW BUILTIN\Users  \\share\folder\file
+    # iter-11 FP audit: require a Windows principal (optional `\` for domain)
+    # in col 1 and an absolute path (drive-letter, UNC, or POSIX) in col 2.
     ("accesschk RW", re.compile(
-        r'^\s*RW\s+(\S+)\s+(.+?)$', re.MULTILINE)),
+        r'^\s*RW\s+((?:[A-Za-z][\w.\- ]*\\)?[A-Za-z][\w.\-$ ]+?)\s+'
+        r'([A-Za-z]:\\\S.*|\\\\\S+\\\S.*|/\S.*)\s*$', re.MULTILINE)),
     # cmdkey /list saved-RDP-credentials section -> _multiline_passes().
     # LinPEAS sudo-version line tied to known CVE: `Sudo version 1.8.31` or
     # similar (CVE-2021-3156 'sudoedit -s' is the classic).
@@ -333,10 +338,12 @@ _AD = [
         r'taskset|tclsh|unzip|wget|curl|xargs|xxd|zsh))$')),
     # `getcap -r /` output - capability bits on binaries.
     # `/usr/bin/python3 = cap_setuid+ep`
+    # iter-11 FP audit: LHS must be an absolute path (rejects Makefile
+    # `MY_VAR = cap_setuid_helper`); RHS cap must be properly suffixed.
     ("Linux capability", re.compile(
-        r'^(\S+)\s+=\s+(cap_(?:setuid|setgid|net_raw|dac_read_search|chown|'
+        r'^(/\S+)\s+=\s+(cap_(?:setuid|setgid|net_raw|dac_read_search|chown|'
         r'fowner|kill|net_bind_service|sys_admin|sys_ptrace|net_admin|'
-        r'sys_module|sys_chroot|sys_time|audit_control)[+\w]*)(?:,|$)',
+        r'sys_module|sys_chroot|sys_time|audit_control)(?:[,+][\w+]+)?)(?:\s|,|$)',
         re.MULTILINE)),
     # NFS export with no_root_squash - direct root via remote NFS mount + suid.
     ("NFS no_root_squash", re.compile(
@@ -400,6 +407,50 @@ _AD = [
     # rclone.conf saved cloud token (one-line shape)
     ("rclone token", re.compile(
         r'(?im)^\s*token\s*=\s*\{["\']access_token["\']\s*:\s*["\']([^"\']{20,})["\']')),
+    # ---- iter-11 deep-corpus adds (audit wijdgt0aa) ----
+    # AAD / MSA refresh token (AzureAD / Office 365 token endpoint reply).
+    # `0.AVoA...`, `M.XXX...`, `1.AVoA...` are the canonical leading-byte forms.
+    ("AAD/MSA refresh token", re.compile(
+        r'"refresh_token"\s*:\s*"(0\.[A-Za-z0-9_\-]{20,}(?:\.[A-Za-z0-9_\-]+){1,5}|'
+        r'M\.[A-Za-z0-9_.\-]{100,}|1\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]+)"')),
+    # AAD FOCI marker - a "1" foci flag means the refresh token is FOCI and
+    # can be exchanged for tokens for ANY 1P Microsoft app.
+    ("AAD FOCI marker", re.compile(
+        r'"foci"\s*:\s*"1"')),
+    # Cisco IOS type-7 reversible XOR password (instant decode via published key).
+    # Distinct from "Cisco enable secret" (which captures the type digit).
+    ("Cisco type-7 password", re.compile(
+        r'(?i)(?:^|[\s,;])(?:password|enable\s+password|key-string|key\s+\d+)\s+7\s+'
+        r'([0-9A-Fa-f]{4,}(?:[0-9A-Fa-f]{2})+)\b')),
+    # PFX / certutil / certreq / openssl pkcs12 password on the cmdline.
+    ("PFX export/import password", re.compile(
+        r'(?i)\b(?:certutil(?:\.exe)?|certreq(?:\.exe)?|openssl\s+pkcs12)\b[^\n]{0,200}?'
+        r'\s-(?:p|passin|passout|password)\s+(?:pass:)?["\']?([^\s"\'#]{3,80})')),
+    # Certipy/Rubeus -pfx -password chain (HTB Sizzle/Authority/Certified)
+    ("Certipy -pfx password", re.compile(
+        r'(?i)\bcertipy(?:-ad)?\s+auth\b[^\n]*?-pfx\s+\S+[^\n]*?-password\s+["\']?([^\s"\'#]{3,80})')),
+    # mRemoteNG saved-node creds (XML attribute on a Node element).
+    ("mRemoteNG Node creds", re.compile(
+        r'(?is)<Node\b[^>]*?\bUsername\s*=\s*"([^"]{1,80})"[^>]*?'
+        r'\bPassword\s*=\s*"([A-Za-z0-9+/=]{8,400})"')),
+    # Pidgin IM accounts.xml plaintext password block - handled at file scope
+    # in _multiline_passes() because the <account> block spans multiple lines.
+    # curl/wget/httpie/Invoke-WebRequest `-u user:pass` or `--user=user:pass`.
+    ("curl/wget -u basic-auth", re.compile(
+        r'(?i)\b(?:curl|wget|http(?:ie)?|Invoke-WebRequest|iwr)\b[^\n]{0,200}?'
+        r'(?:\s-u\s+|--user(?:name)?[\s=])'
+        r'["\']?([^\s:"\']{1,60}):([^\s"\']{3,80})["\']?(?=\s|$)')),
+    # AD custom-attr cleartext-or-b64 password (HTB Cascade cascadeLegacyPwd
+    # style). Match attribute names ending in -Pwd/-Password/-Pass and decode
+    # a base64-or-text value.
+    ("AD custom-attr b64 password", re.compile(
+        r'(?im)^\s*([a-z][\w\-]*(?:Pwd|Password|Pass))\s*:\s*([A-Za-z0-9+/=]{8,200})\s*$')),
+    # netsh wlan show profile key=clear console output: 'Key Content: <psk>'
+    ("netsh wlan Key Content", re.compile(
+        r'(?im)^[ \t]*Key\s+Content[ \t]*:[ \t]*([^\r\n]{8,63})[ \t]*$')),
+    # wlan profile XML: <keyMaterial>X</keyMaterial>
+    ("wlan keyMaterial XML", re.compile(
+        r'(?is)<keyMaterial>\s*([^<\s][^<]{6,62})\s*</keyMaterial>')),
     # ---- iter-10: container / CI / cloud loot detectors ----
     # Vault unseal key (HashiCorp Vault `vault operator init` output): one of N
     # base64 keys you need M-of-N to unseal. Distinctive shape: 'Unseal Key N:'
@@ -868,6 +919,21 @@ def _multiline_passes(path, report, store):
                    f"PrivescCheck missing patch: {kb} ({cve})",
                    hint=f"verify on host: systeminfo | findstr KB ; manual PoC search: searchsploit {cve}")
 
+    # iter-11: Pidgin accounts.xml plaintext password block (multi-line XML)
+    _PIDGIN = re.compile(
+        r'(?is)<account>\s*<protocol>([a-z\-]{3,30})</protocol>\s*'
+        r'<name>([^<\r\n]{1,120})</name>\s*<password>([^<\r\n]{3,120})</password>')
+    for m in _PIDGIN.finditer(text):
+        proto, u, p = m.group(1), m.group(2), m.group(3)
+        if filters.is_placeholder(p):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"pidgin {proto}: {u}:{p}",
+                   hint=f"plaintext IM cred; this acct often shares pw with the host or domain account")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                               source=path, line=_ln(m)))
+
 
 def analyze(path, report, store=None):
     ext = os.path.splitext(path)[1].lower()
@@ -925,6 +991,23 @@ def analyze(path, report, store=None):
                                             "GPP cpassword inline",
                                             "browser password CSV"):
                         continue
+                    # iter-11 FP audit: MongoDB BSON shell output has TWO groups
+                    # (user, pass) but no dedicated dispatch branch existed -
+                    # the generic fallthrough only emitted group(1) (user) as
+                    # ASSIGNED SECRETS, losing the pw value. Fix: split here.
+                    if name == "MongoDB BSON":
+                        u, p = am.group(1), am.group(2)
+                        if not p or filters.is_placeholder(p) or filters.is_placeholder(u):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"MongoDB user: {u}:{p}",
+                                   hint=f"mongosh 'mongodb://{u}:{p}@<host>:27017/'  - admin role allows db.adminCommand(...)")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
                     # tomcat-users: user+pass+roles -> RCE-aware severity
                     if name == "tomcat-users":
                         u, p, roles = am.group(1), am.group(2), (am.group(3) or "")
@@ -1028,7 +1111,15 @@ def analyze(path, report, store=None):
                     # operator's loot never lives in those - we suppress intel
                     # detectors on them entirely.
                     if name in ("ADCS ESC", "RBCD marker", "BloodHound ACL edge",
-                                "WSUS abuse", "DPAPI masterkey") and filters.is_doc_file(path):
+                                "WSUS abuse", "DPAPI masterkey",
+                                # iter-11 FP-audit additions (workflow wijdgt0aa)
+                                "PEAS finding", "AlwaysInstallElevated",
+                                "token impersonation", "Snaffler red",
+                                "SUID GTFOBins", "Linux capability",
+                                "NFS no_root_squash", "smbmap rw share",
+                                "kerbrute valid user", "Helm values secret",
+                                "Vault unseal key", "Vault root token",
+                                "kubectl --token") and filters.is_doc_file(path):
                         continue
                     # AD CS ESC#: must look like ACTUAL certipy / certify output
                     # ('Vulnerabilities:', '[!] ESC1', 'Template Name :',
@@ -1334,7 +1425,20 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     if name == "GH Actions secret ref":
+                        # iter-11 FP audit: only fire on real GitHub Actions
+                        # workflow files; dedup per (path, secret) so the same
+                        # ${{ secrets.X }} doesn't spam N findings per file.
+                        if filters.is_doc_file(path):
+                            continue
+                        plow = path.lower()
+                        if not (".github/workflows/" in plow
+                                or os.path.basename(plow) == "action.yml"
+                                or os.path.basename(plow) == "action.yaml"):
+                            continue
                         sec = am.group(1)
+                        if sec in seen_svc:
+                            continue
+                        seen_svc.add(sec)
                         report.add("MEDIUM", "RECON", path, lineno,
                                    f"GH Actions secret reference: {sec}",
                                    hint="CI vault secret name - target if you have repo write/PR-comment access")
@@ -1342,10 +1446,37 @@ def analyze(path, report, store=None):
                         break
                     if name == "atlassian secret":
                         val = am.group(1)
-                        if filters.is_placeholder(val):
+                        # iter-11 FP audit: <password>X</password> alone fires
+                        # on Maven settings, README snippets, Spring XML examples,
+                        # Pidgin accounts.xml, anywhere. Gate on:
+                        #   1. doc files - never real loot
+                        #   2. filename / path that names a known Atlassian /
+                        #      tomcat / dbconfig / Pidgin file
+                        #   3. value isn't a placeholder OR canonical default
+                        #      (changeit/changeit123/admin/tomcat/manager/etc.)
+                        if filters.is_placeholder(val) or filters.is_doc_file(path):
+                            continue
+                        low_v = val.lower().strip("'\"")
+                        if low_v in ("changeit", "changeit123", "tomcat",
+                                     "manager", "admin", "jonas", "redhat",
+                                     "kafka", "jdbc:default"):
+                            continue
+                        base = os.path.basename(path).lower()
+                        plow = path.lower()
+                        is_atlassian_file = (
+                            base in ("atlassian-user.xml", "dbconfig.xml",
+                                     "server.xml", "confluence.cfg.xml",
+                                     "jira-config.properties.xml",
+                                     "crowd.cfg.xml", "seraph-config.xml",
+                                     "accounts.xml")
+                            or any(k in plow for k in ("/confluence/", "/jira/",
+                                                       "/atlassian/", "/crowd/",
+                                                       "/.purple/")))
+                        if not is_atlassian_file:
+                            # too generic outside an atlassian-shaped path
                             continue
                         report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
-                                   f"atlassian config <password>: {val}",
+                                   f"atlassian/<password>: {val}",
                                    hint="reuse against Confluence/Jira admin login; LDAP bind on the same XML often shares the pw")
                         hit = True
                         break
@@ -1598,7 +1729,11 @@ def analyze(path, report, store=None):
                     # you OWN the vault).
                     if name == "Vault unseal key":
                         k = am.group(1)
-                        if filters.is_placeholder(k):
+                        # iter-11 FP audit: HashiCorp docs publish literal sample
+                        # 'Unseal Key 1: dEadBeEf...' rows; add is_known_example
+                        # + canonical-sample gate alongside the placeholder check.
+                        if (filters.is_placeholder(k) or filters.is_known_example(k)
+                                or filters.is_canonical_sample(k)):
                             continue
                         report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
                                    f"Vault unseal key share: {k}",
@@ -1607,7 +1742,8 @@ def analyze(path, report, store=None):
                         break
                     if name == "Vault root token":
                         t = am.group(1)
-                        if filters.is_placeholder(t):
+                        if (filters.is_placeholder(t) or filters.is_known_example(t)
+                                or filters.is_canonical_sample(t)):
                             continue
                         report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
                                    f"Vault root token: {t}",
@@ -1616,6 +1752,9 @@ def analyze(path, report, store=None):
                         break
                     if name == "kubectl --token":
                         t = am.group(1)
+                        # iter-11: also placeholder-gate kubectl bearer
+                        if filters.is_placeholder(t):
+                            continue
                         report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
                                    f"kubectl bearer token: {t[:30]}...",
                                    hint="kubectl --token='" + t + "' --server=<api> auth can-i --list  - enumerate role privs")
@@ -1623,7 +1762,20 @@ def analyze(path, report, store=None):
                         break
                     if name == "Helm values secret":
                         var, val = am.group(1), am.group(2)
-                        if filters.is_placeholder(val):
+                        # iter-11 FP audit: helm 'secretKey: TBD-later' on a
+                        # README/schema/example file is documentation. Gate on
+                        # known helm-shaped filenames + the existing placeholder
+                        # check; also reject 'tbd', 'fixme', 'todo' literals.
+                        base = os.path.basename(path).lower()
+                        if (filters.is_placeholder(val)
+                                or filters.is_known_example(val)
+                                or filters.is_doc_file(path)
+                                or base.endswith((".schema.json", "-schema.yaml"))
+                                or "example" in base or "sample" in base):
+                            continue
+                        if val.lower() in ("tbd", "fixme", "todo", "later",
+                                           "tbd-later", "fill-in", "fill_in",
+                                           "_template_"):
                             continue
                         report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
                                    f"Helm values.{var}: {val}",
@@ -1684,6 +1836,138 @@ def analyze(path, report, store=None):
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", plaintext=val,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # ---- iter-11 deep-corpus dispatch branches ----
+                    if name == "AAD/MSA refresh token":
+                        tok = am.group(1)
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"AAD/MSA refresh token: {tok[:30]}...",
+                                   hint="exchange for access token: TokenTactics / ROADtools; FOCI=1 means it works for ANY 1P app")
+                        hit = True
+                        break
+                    if name == "AAD FOCI marker":
+                        report.add("HIGH", "RECON", path, lineno,
+                                   "AAD FOCI=1 (refresh token works for any 1P Microsoft app)",
+                                   hint="pair with the AAD refresh_token above; foci tokens grant Graph/AzureCLI/Teams scopes interchangeably")
+                        hit = True
+                        break
+                    if name == "Cisco type-7 password":
+                        ct = am.group(1)
+                        report.add("CRITICAL", "PASSWORD HASHES", path, lineno,
+                                   f"Cisco type-7 reversible: {ct}",
+                                   hint="instant decode: ciscot7.py -d " + ct + "  - reversible XOR with published key")
+                        from analyzers.patterns import HASHES
+                        HASHES.append(("0", "Cisco type-7", ct, path, lineno))
+                        hit = True
+                        break
+                    if name in ("PFX export/import password",
+                                "Certipy -pfx password"):
+                        pw = am.group(1).strip("'\"")
+                        if filters.is_placeholder(pw):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"PFX cert password: {pw}",
+                                   hint=f"openssl pkcs12 -in <file> -nodes -password pass:'{pw}'  - extract key; certipy auth -pfx <out> -p '{pw}'")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "mRemoteNG Node creds":
+                        u, p = am.group(1), am.group(2)
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"mRemoteNG node: {u}:<encrypted {p[:20]}...>",
+                                   hint="mremoteng-decrypt.py -f confCons.xml  - AES-CBC w/ default key 'mR3m'; cleartext on stdout")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="ciphertext", user=u,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "pidgin IM cleartext":
+                        proto, u, p = am.group(1), am.group(2), am.group(3)
+                        if filters.is_placeholder(p):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"pidgin {proto}: {u}:{p}",
+                                   hint=f"plaintext IM cred - reuse: this acct often shares pw with the host or domain account")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "curl/wget -u basic-auth":
+                        u, p = am.group(1), am.group(2)
+                        if filters.is_placeholder(p) or filters.is_placeholder(u):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"HTTP basic on cmdline: {u}:{p}",
+                                   hint=f"reuse: nxc smb <host> -u '{u}' -p '{p}' ; also try VPN / SSO / webmail")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "AD custom-attr b64 password":
+                        attr, b64v = am.group(1), am.group(2)
+                        # only fire on LDIF-shaped basenames or surroundings;
+                        # this rule is line-only so check filename + skip code/doc
+                        plow = path.lower()
+                        is_ldap_artifact = (plow.endswith((".ldif", ".ldap", ".ldp"))
+                                            or "ldap" in plow or "bloodhound" in plow
+                                            or "cascade" in plow)
+                        if not is_ldap_artifact:
+                            continue
+                        if filters.is_placeholder(b64v) or filters.is_canonical_sample(b64v):
+                            continue
+                        import base64 as _b64
+                        decoded = None
+                        try:
+                            raw = _b64.b64decode(b64v, validate=True)
+                            try:
+                                decoded = raw.decode("utf-16-le").rstrip("\x00")
+                                if not decoded.isprintable():
+                                    decoded = None
+                            except Exception:
+                                pass
+                            if not decoded:
+                                try:
+                                    decoded = raw.decode("utf-8")
+                                    if not decoded.isprintable():
+                                        decoded = None
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        if decoded:
+                            report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                       f"AD {attr}: {decoded}  (b64-decoded)",
+                                       hint=f"custom LDAP attribute carried base64 cleartext - reuse: nxc smb <host> -u <user> -p '{decoded}'")
+                            if store is not None:
+                                from analyzers.ingest.evidence import Evidence
+                                store.add(Evidence(kind="plaintext", plaintext=decoded,
+                                                   source=path, line=lineno))
+                        else:
+                            report.add("HIGH", "ENCODED/DECODED", path, lineno,
+                                       f"AD {attr} b64 (decode failed): {b64v[:40]}...",
+                                       hint="non-UTF-8/UTF-16 blob; may be NT hash / DPAPI / kerberos key")
+                        hit = True
+                        break
+                    if name in ("netsh wlan Key Content", "wlan keyMaterial XML"):
+                        psk = am.group(1).strip()
+                        if filters.is_placeholder(psk):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Wi-Fi PSK: {psk}",
+                                   hint="WPA-PSK plaintext - reuse on the captured wifi; also try as host pw (common reuse)")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=psk,
                                                source=path, line=lineno))
                         hit = True
                         break
