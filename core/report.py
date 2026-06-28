@@ -309,9 +309,14 @@ class Report:
         "AS-REP roast": ("18200", "crack -m 18200 (no creds needed)"),
         "Kerberoast TGS": ("13100", "crack -m 13100 rockyou+best64"),
         "sha512crypt": ("1800", "crack -m 1800"),
+        "sha256crypt": ("7400", "crack -m 7400"),
         "md5crypt": ("500", "crack -m 500"),
         "bcrypt": ("3200", "crack -m 3200"),
+        "yescrypt": ("", "route to John (--format=yescrypt); no hashcat GPU kernel"),
         "DCC2": ("2100", "crack -m 2100 (slow)"),
+        "Password Safe v3": ("5200", "crack -m 5200 -a 0"),
+        "KeePass2 hash": ("13400", "crack -m 13400 -a 0"),
+        "VNC reg password": ("", "offline DES decrypt (vncpwd) - fixed key, no cracking"),
         "blank NT": ("", "NO password - try empty / null auth"),
     }
 
@@ -339,15 +344,15 @@ class Report:
             agg[(src, t)] = agg.get((src, t), 0) + 1
         if len(items) < 8 and len(agg) >= len(items):
             return None        # all distinct, short -> the plain list is clearer
-        rows = [self.ui.c("dim", "  " + self.ui.cell("", 5) + self.ui.cell("TYPE", 16) +
+        rows = [self.ui.c("dim", "  " + self.ui.cell("", 5) + " " + self.ui.cell("TYPE", 17) +
                           self.ui.cell("SOURCE", 18) + "CRACK / USE")]
         mult = "×" if not self.ui.ascii else "x"
         for (src, t), n in sorted(agg.items(), key=lambda kv: -kv[1]):
             plan = self._HASH_PLAN.get(t, ("", "hashid first, then hashcat -m <mode>"))[1]
             cnt = self.ui.cell(f"{n}{mult}", 4, "yellow" if n > 5 else "white", ">")
-            rows.append("  " + cnt + " " + self.ui.cell(t, 16, "white") +
+            rows.append("  " + cnt + " " + self.ui.cell(t, 17, "white") +
                         self.ui.cell(self.ui.truncate_end(src, 17), 18, "bcyan") +
-                        self.ui.c("gray", self.ui.truncate_end(plan, max(16, self.ui.cols - 47))))
+                        self.ui.c("gray", self.ui.truncate_end(plan, max(16, self.ui.cols - 48))))
         return self.ui.box(rows, color="red")
 
     # ── findings by category ──

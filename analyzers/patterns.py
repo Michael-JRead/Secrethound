@@ -70,7 +70,12 @@ PATTERNS = [
     ("JWT", "HIGH", re.compile(r'eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'), "16500", 0),
     ("Azure storage key", "HIGH", re.compile(r'(?i)AccountKey=([A-Za-z0-9+/]{86}==)'), None, 1),
     # ---- secrets in well-known shapes -------------------------------------
-    ("GPP cpassword", "HIGH", re.compile(r'(?i)cpassword\s*=\s*["\x27]?([A-Za-z0-9+/=]{8,})["\x27]?'), None, 1),
+    # GPP cpassword: word-bounded `cpassword` only (so `SQLSVCPASSWORD` does NOT
+    # match), and the value must be >= 24 b64 chars (one AES block padded).
+    ("GPP cpassword", "HIGH", re.compile(r'(?i)\bcpassword\s*=\s*["\x27]?([A-Za-z0-9+/=]{24,})["\x27]?'), None, 1),
+    ("Password Safe v3", "HIGH", re.compile(r'\$pwsafe\$\*3\*[a-fA-F0-9]{64}\*\d+\*[a-fA-F0-9]{64}'), "5200", 0),
+    ("KeePass2 hash", "HIGH", re.compile(r'\$keepass\$\*[12]\*\d+\*[a-fA-F0-9]+\*[a-fA-F0-9]+'), "13400", 0),
+    ("VNC reg password", "HIGH", re.compile(r'(?i)"?Password"?\s*=\s*hex:([0-9a-fA-F]{2}(?:[,\s][0-9a-fA-F]{2}){7})'), None, 1),
     ("Ansible Vault", "HIGH", re.compile(r'\$ANSIBLE_VAULT;\d+\.\d+;AES256'), None, 0),
     ("Private key", "HIGH", re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----'), None, 0),
     ("conn string", "MEDIUM", re.compile(r'(?i)(mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp|mssql|jdbc:[a-z]+)://[^\s"\']{6,}'), None, 0),
@@ -168,8 +173,13 @@ def analyze(path, report):
                         "AWS secret", "JWT", "GPP cpassword")
                     cat = "PASSWORD HASHES" if is_hash else (
                         "PRIVATE KEYS" if "Private key" in name else
-                        "GPP cpassword" if "GPP" in name else "PATTERNS")
+                        "GPP cpassword" if "GPP" in name else
+                        "ASSIGNED SECRETS" if name == "VNC reg password" else "PATTERNS")
                     hint = None
+                    if name == "VNC reg password":
+                        # 8-byte single-DES with fixed key (Cascade-style) - fully offline.
+                        hint = ("vncpwd $(printf '" + val.replace(",", "") +
+                                "' | xxd -r -p) | strings   # or jeroennijhof/vncpwd")
 
                     if is_hash:
                         known = known_hashes.lookup(val)

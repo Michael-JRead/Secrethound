@@ -22,7 +22,8 @@ TEXT_EXT = {".ini", ".conf", ".cnf", ".cfg", ".env", ".yml", ".yaml", ".json", "
             ".toml", ".properties", ".txt", ".js", ".sql", ".bak", ".old", ".log", ".md",
             ".netrc", ".htpasswd", ".pem", ".key", ".config", ".tmpl", ".template",
             ".ps1", ".psd1", ".reg", ".ovpn", ".kdbx", ".php", ".inc", ".tfstate",
-            ".tfvars", ".sh", ".bat", ".cmd", ""}
+            ".tfvars", ".sh", ".bat", ".cmd", ".hash", ".hashes", ".pot", ".potfile",
+            ".lst", ".csv", ".tsv", ""}
 SRC_EXT = {".js", ".pl", ".ps1", ".py", ".php", ".rb", ".java", ".go", ".cs", ".sh"}
 DB_EXT = {".sqlite", ".sqlite3", ".db", ".db3"}
 MAX_BYTES = 5 * 1024 * 1024

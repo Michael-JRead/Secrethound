@@ -100,8 +100,15 @@ def _ok_pw(pw):
     return True
 
 
-# password-is / GETS PASSWORD: / creds: <value>   (note shorthand)
-_GETS = re.compile(r'(?i)\b(?:gets?\s+password|password\s+is|the\s+password)\b\s*[:=]?\s*["\']?([^\s"\',;]{3,})')
+# sentence-shaped password hints in notes / LDAP description / HR docs:
+#   "password set to X"     (Resolute LDAP description)
+#   "my password is X"      (Cicada david.orelious description)
+#   "the password is X"     (generic ops notes)
+#   "default password is X" / "Your default password is: X"  (HR notices)
+#   "gets password X"       (jeffersonian notes shorthand)
+_GETS = re.compile(
+    r'(?i)\b(?:gets?\s+password|password\s+set\s+to|(?:my|the|default|your)\s+(?:default\s+)?password\s+is)\b'
+    r'\s*[:=]?\s*["\']?([^\s"\',;]{3,})')
 
 
 def classify(line):
