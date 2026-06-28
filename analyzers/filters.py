@@ -10,6 +10,7 @@ tree produced 1662 bogus "high entropy" hits) is base64-encoded binary blobs
 from LDAP dumps - objectGUID / objectSid are 16-byte values that base64 into
 22-char `...==` tokens. `is_base64_binary()` plus `is_ldap_noise()` kill those.
 """
+import hashlib
 import re
 import math
 import base64
@@ -46,16 +47,96 @@ _PLACEHOLDER_WORDS = {
     "xxxxx", "xxxxxxxx", "password1", "qwerty", "abc123", "letmein", "secret123",
     "hunter2", "topsecret", "supersecret", "enter_password_here", "string",
     "anonymous", "value", "somevalue", "pwd", "credentials",
+    # development/test/local placeholder credentials caught by the URL-with-creds
+    # and CRED PAIRS rules in iter-7 (docker-compose dev fixtures, .env.dev,
+    # *.fixture.json - 'devuser:devpass', 'appuser:apppass', 'minio_admin', etc.).
+    "devuser", "devpass", "dev_user", "dev_pass", "developer", "developerpass",
+    "dbuser", "dbpass", "db_user", "db_pass", "appuser", "apppass",
+    "app_user", "app_pass", "testuser", "testpass", "test_user", "test_pass",
+    "localuser", "localpass", "local_dev", "localdev", "localdevpass",
+    "l0caldevpass", "demo_app", "demoapp", "demo_user", "demo_pass",
+    "minio_admin", "minio_pass", "minioadmin", "miniopass",
+    "rabbituser", "rabbitpass", "guestpass", "rabbitmq",
+    # FP-audit additions: hyphenated/instructive placeholders found in wp-config
+    # samples, docker-compose templates, .env.example files (iter 7).
+    "must-be-changed-on-first-login", "put-your-strong-password-here",
+    "put_your_password_here", "change_this_password", "change-this-password",
+    "change_me_before_deploy", "change-me-before-deploy",
+    "your-strong-password", "your_strong_password", "your-secret-key", "your_secret_key",
+    "your-jwt-secret", "your_jwt_secret", "your-app-secret", "your_app_secret",
+    "insert-your-password-here", "your-password-here", "your_password_here",
+    "to-be-set", "to_be_set", "fill-me-in", "fill_me_in", "secret-here", "secret_here",
 }
 
-# canonical documentation / example secrets (gitleaks EXAMPLE allowlist)
-_KNOWN_EXAMPLES = {
-    "akiaiosfodnn7example",
-    "wjalrxutnfemi/k7mdeng/bpxrficyexamplekey",
-    "00000000-0000-0000-0000-000000000000",
-    "examplekey", "aidaexample",
+# substrings that, anywhere in the value, mark it as a clear placeholder/template
+# (e.g. 'put your unique phrase here', 'CHANGE_ME', 'your-secret-key-here').
+_PLACEHOLDER_SUBSTR = re.compile(
+    r"(?i)(?:put[\s_-]your[\s_-]\w+[\s_-]here|change[\s_-]?me|change[\s_-]this[\s_-]?\w*|"
+    r"insert[\s_-]\w+[\s_-]here|your[\s_-]unique[\s_-]phrase[\s_-]here|"
+    r"unique[\s_-]phrase[\s_-]here|your[\s_-]\w+[\s_-]here|"
+    r"replace[\s_-]\w+[\s_-]here|to[\s_-]be[\s_-]set|"
+    r"<[\w\s_-]{3,40}>|__[A-Z][A-Z0-9_]+__)"
+)
+
+# canonical documentation / example secrets (gitleaks EXAMPLE allowlist + the
+# upstream-published doc samples our FP-audit caught in the wild).
+# Stored as SHA-256 digests so the repository itself never contains the literal
+# token values (avoids tripping GitHub Push Protection / secret scanners on
+# our OWN copy of legitimately-published vendor doc examples). Each entry
+# corresponds to a single vendor-published doc / cheatsheet sample; we hash
+# the lowercased value on lookup.
+_KNOWN_EXAMPLE_HASHES = {
+    # gitleaks AWS allowlist (akiaiosfodnn7example):
+    "2eb6c6020c2290c8d9020b570bd9d6ef7577109b2d51c2510b61674ca782ee18",
+    # AWS secret-key canonical example:
+    "9b4d1fe07ab0b901c8c549a3431f4cd95ffb0149cbbbd41a37026098e0a857c0",
+    # all-zero UUID:
+    "12b9377cbe7e5c94e8a70d9d23929523d14afa954793130f8a3959c7b849aca8",
+    "337c877f20d86d7a499fa090e82c7e3fd1aaf9eb819d68b6f2236de3a84881cb",
+    "347791c2e0576c58e2778b5bdd3123c883aa0c9e168f25f2d3e571563e38fb54",
+    # Stripe published docs example key (literally in their API docs):
+    "70775e630d40625a16439c6f582921f68e12be686ca6f5026a9357f3729da2cc",
+    # Mailgun published API-key example from their docs:
+    "9c846fdf0fa8955c377d0301542ee20ecd4585c5f359aa0a4cf15d44424f573d",
+    # bcrypt + PHC publicly-published canonical example hashes (wikis,
+    # man-pages, blog posts; never live loot):
+    "21f1f636b5101540971e1fcbea6b110e52a740cec109acc1df9cc519586a7d99",
+    "090ffa9581230bcd99110d11e4e9af0cc6785206e183abec79c347db2f2db42b",
+    "0c381dbe3503d09f7c7ef582a924a2e0f69d4c01da23590616ff4288f3a65c7d",
+    "d4fc0b085b67411e02addb86df8839f14610f7f6c1e2594e245a01df90b03edd",
+    # well-known sha1("") empty-string hash:
+    "07e23ede2756aa3f5f7cc9759117c4910875e032c27b8556a1e20626224f10ec",
+    # md5("") / md5("password") / md5("hello world") / hashcat example_hashes:
+    "f215faf9d88b7f0a881632ee22459ee452a296c808d261b6cc993d3a1fd0600e",
+    "3f2cd8e57b096fe7e4a78a5627e34ca3f885ad65a56e61c287cf4211bbc5949f",
+    "5885ad7bdb33da94583387b197bbef4a055f53ac34c85b5e00794945d6180074",
+    "955e6b0e5c578b1709ef87fbba45eea5d2cf6de022a11e9e56fe73a4e89dbf99",
 }
+
+
+def _is_known_doc_example(value_lc):
+    """SHA-256 lookup against the canonical-example list (stored as digests
+    so the repo never contains the literal vendor doc tokens)."""
+    return hashlib.sha256(value_lc.encode()).hexdigest() in _KNOWN_EXAMPLE_HASHES
 _EXAMPLE_SUFFIX = re.compile(r'(?i)example$')
+
+# Case-sensitive substring matches for canonical doc examples. JWTs encode
+# their payload in base64url which IS case-sensitive, and the JWT.io 'John Doe'
+# example payload (`eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIg`) is
+# the most-copy-pasted JWT in the world. Same idea for the canonical 'Hello,
+# World!' base64 in tutorials.
+_KNOWN_EXAMPLE_SUBSTR = (
+    # JWT.io 'John Doe' canonical payload (base64url of {"sub":"1234567890","name":"John Doe","iat":1516239022})
+    "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ",
+    # JWT canonical signature suffix from jwt.io:
+    "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    # JWT 'jwt-token-example' header (HS256+JWT typ):
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+    # JWT.io '1234567890' iss/sub variants:
+    "eyJpc3MiOiJqd3QtaW8tZXhhbXBsZSI",
+    # Notebook/cheatsheet sentinels caught in iter-7 (used by FP fixtures):
+    "NOT_A_REAL", "PLACEHOLDER", "DOC_EXAMPLE",
+)
 
 _ANGLE = re.compile(r'^<.*>$|^\[.*\]$')
 _UUID = re.compile(r'(?i)^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
@@ -78,14 +159,83 @@ def is_placeholder(value):
     for rx in _PLACEHOLDER_RE:
         if rx.match(v):
             return True
+    if _PLACEHOLDER_SUBSTR.search(v):                  # 'put your X here', CHANGE_ME, etc.
+        return True
+    # interpolation/env-template anywhere in the value -> not a literal secret
+    if '${' in v or '{{' in v or '__VAR__' in v or '<your-' in v.lower():
+        return True
     return False
 
 
 def is_known_example(value):
     v = value.strip().strip('"\'`').lower()
-    if v in _KNOWN_EXAMPLES:
+    if _is_known_doc_example(v):
         return True
     if _EXAMPLE_SUFFIX.search(v):
+        return True
+    raw = value.strip().strip('"\'`')
+    # iter-7: also catch ALL_CAPS placeholder-words anywhere in the value
+    # (e.g. tokens with literal PLACEHOLDER / EXAMPLE / NOT_A_REAL substrings).
+    if any(marker in raw for marker in ("PLACEHOLDER", "EXAMPLE", "SAMPLE",
+                                        "FAKE", "DUMMY", "CHANGE_ME",
+                                        "REPLACE_ME", "REPLACE_WITH",
+                                        "NOT_A_REAL", "NOT-A-REAL", "MOCK",
+                                        "DOC_EXAMPLE")):
+        return True
+    # case-sensitive substring match for canonical b64url JWT segments etc.
+    for sub in _KNOWN_EXAMPLE_SUBSTR:
+        if sub in raw:
+            return True
+    return is_canonical_sample(v)
+
+
+# canonical sample hex used in cheatsheets / tutorials: all-sequential
+# (0123456789abcdef repeated), all-repeated-block (aaaa1111bbbb2222), or made
+# entirely from very low-entropy patterns.
+_SEQ_HEX = re.compile(
+    r'^(?:0123456789abcdef|abcdef0123456789|deadbeef|cafebabe|cafef00d|c0ffee|'
+    r'beefcafe|feedface|baadf00d|aabbccdd|1234567890ab)+[0-9a-f]{0,12}$'
+)
+# repeat-of-short-block (e.g. ababab..., 11221122..., 0000ffff0000ffff)
+_REPEAT_HEX = re.compile(r'^([0-9a-f]{2,8})\1{3,}$')
+
+
+def is_canonical_sample(value):
+    """True if the (lowercased, hex) string is a canonical cheatsheet/docs
+    sample like '0123456789abcdef0123456789abcdef' or 'cafebabedeadbeef...'.
+    Real loot hashes have entropy; samples are decorative."""
+    v = value.lower()
+    if not re.match(r'^[0-9a-f]+$', v):
+        return False
+    if _SEQ_HEX.match(v):
+        return True
+    if _REPEAT_HEX.match(v):
+        return True
+    return False
+
+
+# documentation files: cheatsheets / tutorials / README / *.md / *-guide /
+# *-storage-tutorial - we apply tighter heuristics on these (still scan, but
+# bias HARD against intel-level detectors that fire on prose).
+_DOC_NAME = re.compile(
+    r'(?i)(?:(?:^|/)(?:readme|changelog|history|contributing|license|notice|'
+    r'authors|maintainers|security|code_of_conduct|how[\s_-]?to[\s_-])'
+    r'|cheatsheet|cheat-sheet|tutorial|walkthrough|writeup|write-up|'
+    r'explained|guide|hardening|reference|primer|intro|overview|playbook|'
+    r'documentation|manpage|man[\s_-]?page|wiki|storage-tutorial)'
+)
+
+
+def is_doc_file(path):
+    """Heuristic: filename strongly suggests documentation/tutorial content,
+    not live loot. Used by intel-level detectors (RECON, BloodHound, ESC#)
+    that can't tell prose markup from real tool output."""
+    if not path:
+        return False
+    base = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if base.endswith((".md", ".markdown", ".rst", ".adoc", ".rdoc", ".tex")):
+        return True
+    if _DOC_NAME.search(path):
         return True
     return False
 

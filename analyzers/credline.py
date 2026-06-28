@@ -90,7 +90,11 @@ def _ok_pw(pw):
         return False
     if pw.isdigit() or _HASHY.match(pw):
         return False
-    if "&" in pw or "=" in pw or pw.startswith(("$(", "^", "<", "%", "-", "/")):
+    # iter-7: also reject leading '$' (so '$apr1$...', '$2y$...', etc. don't
+    # get mis-classified as plaintext when they're hashes), and embedded ','
+    # (which appears in CSV column headers like 'content_md5:thumb_md5,filename,N'
+    # but never in real password values).
+    if "&" in pw or "=" in pw or "," in pw or pw.startswith(("$(", "$", "^", "<", "%", "-", "/")):
         return False
     if filters.is_placeholder(pw) or filters.is_known_example(pw):
         return False
@@ -109,6 +113,17 @@ def _ok_pw(pw):
 _GETS = re.compile(
     r'(?i)\b(?:gets?\s+password|password\s+set\s+to|(?:my|the|default|your)\s+(?:default\s+)?password\s+is)\b'
     r'\s*[:=]?\s*["\']?([^\s"\',;]{3,})')
+# English words that *continue* a passive "password is ..." sentence in prose
+# (docs/READMEs/security writeups), so the captured token is NOT the secret.
+# Only consulted for the colon-less _GETS shape, where the separator is absent.
+_GETS_STOP = frozenset((
+    "never", "not", "stored", "hashed", "encrypted", "required", "used", "also",
+    "only", "set", "case", "sensitive", "same", "different", "correct", "wrong",
+    "valid", "invalid", "empty", "blank", "optional", "mandatory", "unique",
+    "strong", "weak", "visible", "hidden", "shown", "displayed", "saved", "kept",
+    "generated", "created", "changed", "reset", "expired", "disabled", "enabled",
+    "important", "secure", "safe", "protected", "transmitted", "sent", "checked",
+))
 
 
 def classify(line):
@@ -189,7 +204,7 @@ def classify(line):
 
     # ---- note shorthand: "GETS PASSWORD: x" / "the password is x" ----
     m = _GETS.search(s)
-    if m and _ok_pw(m.group(1)):
+    if m and _ok_pw(m.group(1)) and m.group(1).strip("'\"`").lower() not in _GETS_STOP:
         return Cred("cred", password=m.group(1).strip("'\"`"), note="note password")
 
     return None

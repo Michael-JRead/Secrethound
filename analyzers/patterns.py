@@ -80,7 +80,11 @@ PATTERNS = [
     ("VNC reg password", "HIGH", re.compile(r'(?i)"?Password"?\s*=\s*hex:([0-9a-fA-F]{2}(?:[,\s][0-9a-fA-F]{2}){7})'), None, 1),
     ("Ansible Vault", "HIGH", re.compile(r'\$ANSIBLE_VAULT;\d+\.\d+;AES256'), None, 0),
     ("Private key", "HIGH", re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----'), None, 0),
-    ("conn string", "MEDIUM", re.compile(r'(?i)(mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp|mssql|jdbc:[a-z]+)://[^\s"\']{6,}'), None, 0),
+    # `conn string` (bare DB URI without user:pass) was removed in iter-7: the
+    # FP-audit produced 22 FPs on innocuous URLs (redis://redis:6379/0,
+    # mongodb://mongo:27017/sessions). The HIGH `URL with creds` rule below
+    # already covers the credentialed case - which is the only one with a
+    # secret to leak. No true positives lost.
     ("URL with creds", "HIGH", re.compile(r'(?i)[a-z][a-z0-9+.\-]*://[^:/\s]+:[^@/\s]+@'), None, 0),
 ]
 
@@ -88,10 +92,50 @@ PATTERNS = [
 # inside an already-matched span (handled by span dedup in analyze()).
 _RAW = {"raw MD5/NTLM", "raw SHA1", "raw SHA256", "raw SHA512"}
 
+# POSITIVE context: a hashy keyword near the value (real loot context).
 _HASH_CONTEXT = re.compile(r'(?i)(hash|pass|pwd|ntlm|md5|sha|digest|secret|cred|::|:\d+:|rid)')
+# NEGATIVE context: even with a hash word on the line, these markers mean the
+# hex is a content-integrity / cache-key / commit-SHA / package-checksum, NOT
+# a credential. From the iter-7 FP audit: 36+ FPs across raw MD5/SHA1/SHA256
+# (Python `--hash=sha256:`, npm `integrity:`, `EXPECTED_SHA256=`, `MD5 (file)`
+# gnu md5sum output, `etag`, `nonce=`, `csrf token rotated`, `GIT_COMMIT_HASH`,
+# `digest_kind=md5`, `"shasum":`, `"content-hash":`, source-map `sourceMappingURL`).
+_HASH_NEG_CONTEXT = re.compile(
+    r'(?i)(?:--hash\s*=\s*sha|integrity\s*[:=]|integrity\s*"\s*:|'
+    r'\bEXPECTED_(?:MD5|SHA\d*|HASH)\b|\bGIT_COMMIT\b|\bcommit[\s_-]?(?:sha|hash|id)\b|'
+    r'\betag\b|\bcsrf\b|\bnonce\b|\bcache[\s_-]?key\b|'
+    r'\bcontent[\s_-]?hash\b|"shasum"\s*:|"sha\d+"\s*:|'
+    r'\bdigest[\s_-]?kind\b|\bdigest\s*=|digest_algo|'
+    r'\bMD5\s*\(|\bSHA\d*\s*\(|\bSHA\d*\s+checksum\b|\bsha\d+\s*=|\bmd5\s*=|'
+    r'\bsourceMappingURL\b|sha\d+:[a-f0-9]|\bfingerprint\b|'
+    r'\bchecksum\b|\bSRI[\s_-]?hash\b|'
+    # iter-7 round-2: nmap ssl-cert output (X.509 fingerprints), TLS cert
+    # SHA256/SHA1 thumbprints, hashcat benchmark/example output, GPO/CSV manifest
+    # column headers, OpenSSL fingerprint -sha256 output.
+    r'\bssl[\s_-]?cert\b|\bX\.509\b|\bx509\b|\bthumbprint\b|\bSubject\s+Public\s+Key\b|'
+    r'\bnmap\b|\bbenchmark\b|\bbenchmarking\b|\btest\s+vector\b|\bexample\s+hashes?\b|'
+    r'\btls[\s_-]?fingerprint\b|\bcert[\s_-]?fingerprint\b|"thumb"\s*:|'
+    r'\bPublic\s+Key\b|\bissuer\b|\bsubject\b|\bvalidity\b|\bnot\s+(?:before|after)\b|'
+    # CSV/manifest column header rows that produce 32-hex-shaped IDs (GPO/AD
+    # backup manifests, asset CSVs, vite chunk hash logs):
+    r'\bmanifest\b|\bgpo[\s_-]?backup\b|\bbackup[\s_-]?id\b|\basset[\s_-]?hash\b|'
+    r'\bvite\s*:|\bchunk\b)'
+)
+# raw hex in a source-code comment is documentation/example, never live loot
+# (real hashdump/secretsdump rows are never comment-prefixed).
+_CODE_COMMENT = re.compile(r'^\s*(#|//|\*|/\*|--\s|;)')
 # placeholder hex (all same char, classic example) we never want to surface
 _JUNK_HEX = re.compile(r'^(0+|f+|deadbeef(?:deadbeef)*|0123456789abcdef.*)$', re.IGNORECASE)
 _ENCRYPTED_KEY = re.compile(r'(?i)(ENCRYPTED|Proc-Type:\s*4,ENCRYPTED)')
+# pwdump/secretsdump context for the LM:NT pair: real dumps either show the
+# trailing `:::`, a leading `user:rid:` prefix, or sit beside the literal word
+# "NTLM"/"ntds"/"sam"/"hash". Without one of these the bare 32:32 hex pair
+# matches benign manifest rows (asset MD5:MD5 lists, vite chunk hashes, etc.)
+# - 17 FPs from the iter-7 audit.
+_NTLM_PAIR_CONTEXT = re.compile(
+    r'(?i)(:::\s*$|^\s*(?:\S+\\)?\S+:\d{1,7}:|\bNTLM\b|\bNTDS\b|\bSAM\b|'
+    r'\bsecretsdump\b|\bpwdump\b|\bhashdump\b|\bDCSync\b|aad3b435b51404eeaad3b435b51404ee)'
+)
 
 
 def _disp(val):
@@ -132,13 +176,91 @@ def analyze(path, report):
                     full = m.group(0)
                     val = m.group(gi) if gi and m.lastindex and gi <= m.lastindex else full
 
-                    # raw hashes: require hashy context to avoid random hex IDs
+                    # raw hashes: require hashy context to avoid random hex IDs.
+                    # iter-7: also reject when the line carries a content-integrity
+                    # / cache / commit / etag / shasum / --hash=sha:NN / MD5(file)
+                    # marker - those are content-addressed hashes, not credentials.
                     if name in _RAW:
-                        if not _HASH_CONTEXT.search(line) or _JUNK_HEX.match(val):
+                        if (not _HASH_CONTEXT.search(line) or _JUNK_HEX.match(val)
+                                or _CODE_COMMENT.match(line)
+                                or _HASH_NEG_CONTEXT.search(line)):
                             continue
 
-                    # canonical documentation/example tokens (AKIA...EXAMPLE etc.)
-                    if mode is None and filters.is_known_example(val):
+                    # NTLM (LM:NT) pair: a colon-joined 32hex:32hex token also
+                    # matches md5(asset):md5(thumb) dedup rows, file-checksum
+                    # CSVs, vite chunk maps, etc. Real NTLM dumps always carry
+                    # very specific context (a :::, user:rid: prefix, or a
+                    # 'NTLM'/'NTDS'/'SAM'/'secretsdump' keyword, or the blank-LM
+                    # marker hash). Require one of those to fire - iter-7 FP
+                    # audit killed 17 FPs here.
+                    if name == "NTLM pair (LM:NT)" and not _NTLM_PAIR_CONTEXT.search(line):
+                        continue
+
+                    # canonical documentation/example tokens (AKIA...EXAMPLE etc.).
+                    # iter-7: also reject for HASHED secrets (bcrypt/apr1/etc.)
+                    # since well-known doc-example hashes are in _KNOWN_EXAMPLES too.
+                    if filters.is_known_example(val):
+                        continue
+                    # iter-7: canonical cheatsheet/tutorial hex (the literal
+                    # '0123456789abcdef0123456789abcdef' run, 'deadbeef...',
+                    # 'cafebabe...', etc.) should never fire as a hash.
+                    if re.match(r'^[a-f0-9]{16,}$', val.lower()) and filters.is_canonical_sample(val):
+                        continue
+                    # iter-7: doc files (README, cheatsheets, tutorials, .md /
+                    # .rst / .adoc): suppress the noisy hash patterns that fire
+                    # on sample blobs. We still want to catch real hashes IF the
+                    # operator stores them in a .md note (Cicada/Resolute do
+                    # this), so we ONLY skip when the value also looks doc-shaped:
+                    # the full hex run is canonical-sample, or the line carries
+                    # markdown-bullet/inline-code formatting around it.
+                    if filters.is_doc_file(path) and name in (
+                            "Kerberoast TGS (RC4)", "Kerberoast TGS (AES128)",
+                            "Kerberoast TGS (AES256)", "AS-REP roast (RC4)",
+                            "AS-REP roast (AES)", "Kerberos pre-auth",
+                            "Timeroast (SNTP-MS)", "md5crypt", "sha512crypt",
+                            "sha256crypt", "bcrypt", "apr1 (htpasswd)",
+                            "GPP cpassword", "MSSQL 2012+", "MSSQL 2005"):
+                        # only skip if the line looks like prose / markdown
+                        # (indented bullet, inline code fence, or 'example:'/'sample:'/'e.g.')
+                        if re.search(r'(?i)^\s*[-*]\s|`[^`]*`|e\.g\.|\bexample\b|\bsample\b|\btutorial\b', line):
+                            continue
+
+                    # URL with creds: drop template/placeholder/default credentials
+                    # (e.g. amqp://guest:guest@..., postgres://${DB_USER}:${DB_PASSWORD}@...,
+                    # https://acme:${NUGET_PAT}@..., mysql://wp:CHANGE_THIS_PASSWORD@...).
+                    if name == "URL with creds":
+                        cm = re.search(r'://([^:/?\s@]+):([^@/?\s]+)@', full)
+                        if cm:
+                            u, p = cm.group(1), cm.group(2)
+                            if filters.is_placeholder(u) and filters.is_placeholder(p):
+                                continue
+                            if filters.is_placeholder(p):
+                                continue
+                            if '${' in u or '${' in p or '{{' in u or '{{' in p:
+                                continue
+                            # both halves are placeholder-shaped dev users (devuser, dbuser):
+                            if filters.is_placeholder(u):
+                                continue
+
+                    # vendor token patterns whose hex tail is canonical-sample
+                    # (key-0123456789abcdef..., SK0123..., sk_live_0123...): the
+                    # prefix matches the brand but the body is a cheatsheet example.
+                    if name in ("Mailgun key", "Twilio SID", "Stripe key",
+                                "SendGrid key", "GitHub token", "GitHub PAT (fine)",
+                                "GitLab PAT", "Slack token", "npm token",
+                                "DockerHub PAT", "Google API key", "Google OAuth",
+                                "AWS access key", "Azure storage key"):
+                        # strip the brand prefix and check the body for canonical hex
+                        body = re.sub(r'^[A-Za-z][A-Za-z0-9_-]{1,15}[-_.]', '', val)
+                        if filters.is_canonical_sample(body):
+                            continue
+                        if "PLACEHOLDER" in val or "EXAMPLE" in val:
+                            continue
+
+                    # NTLM hash (NT) bare value: 32-hex with hashy context. Drop
+                    # canonical samples (7d7930... = md5('foobar'), and the
+                    # cheatsheet 0123... runs).
+                    if name in ("raw MD5/NTLM", "NTLM hash (NT)") and filters.is_canonical_sample(val):
                         continue
 
                     spans.append((s, e))

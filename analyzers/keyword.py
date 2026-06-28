@@ -117,10 +117,13 @@ _AD = [
     # RBCD: the attribute name is unique enough to flag unconditionally.
     ("RBCD marker", re.compile(r'(?i)\bmsDS-AllowedToActOnBehalfOfOtherIdentity\b')),
     # BloodHound ACL edge, arrow form: name --[WriteOwner]--> target (distinctive).
+    # A real edge always points at a destination principal; require a node token
+    # after the arrow so prose that merely names the notation (e.g. a markdown doc:
+    # "reading `--[GenericAll]-->` style edges") doesn't FP.
     ("BloodHound ACL edge", re.compile(
         r'--\[(WriteDacl|WriteOwner|GenericAll|GenericWrite|ForceChangePassword|'
         r'AddMember|Owns|AllExtendedRights|AddKeyCredentialLink|ReadGMSAPassword|'
-        r'ReadLAPSPassword|AddSelf|WriteSPN)\]-->')),
+        r'ReadLAPSPassword|AddSelf|WriteSPN)\]-->\s*["\']?[A-Za-z0-9][\w$.@-]+')),
     # WSUS abuse tool invocation.
     ("WSUS abuse", re.compile(r'(?i)\bSharpWSUS(?:\.exe)?\s+(?:create|approve|check|delete)\b')),
     # DPAPI masterkey recovery output / mimikatz dpapi module.
@@ -310,11 +313,30 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     # ---- iter-6 INTEL markers ----
-                    # AD CS ESC#: require an ADCS context word on the line (else
-                    # 'ESC1' in random prose / IDs would FP).
+                    # Iter-7: doc/cheatsheet/tutorial files (`pentest-cheatsheet.md`,
+                    # `AD-hardening-guide.md`, `bloodhound-acl-edges.md`,
+                    # `kerberoasting-explained.txt`) are designed to TEACH these
+                    # primitives, so the markers appear in prose constantly. The
+                    # operator's loot never lives in those - we suppress intel
+                    # detectors on them entirely.
+                    if name in ("ADCS ESC", "RBCD marker", "BloodHound ACL edge",
+                                "WSUS abuse", "DPAPI masterkey") and filters.is_doc_file(path):
+                        continue
+                    # AD CS ESC#: must look like ACTUAL certipy / certify output
+                    # ('Vulnerabilities:', '[!] ESC1', 'Template Name :',
+                    # 'Certipy v4...', 'EnableTemplate', 'ManageCA :', etc.),
+                    # NOT a markdown bullet from a docs cheatsheet ('- ESC1:
+                    # enrollee-supplies-subject ...'). Iter-7 FP audit: 11 doc
+                    # FPs killed by this stricter gate.
                     if name == "ADCS ESC":
-                        if not re.search(r'(?i)vulnerab|template|certipy|certify|\benroll|manageca|'
-                                         r'managecertificates|certificate|\bCA\b|adcs', line):
+                        is_markdown_bullet = re.match(r'^\s*[-*]\s+ESC\d', line)
+                        ctx = re.search(
+                            r'(?i)Vulnerabilit(?:y|ies)\s*:|Certipy\s+v\d|certipy-ad|certify\.exe|'
+                            r'\[\s*[!+*]\s*\]\s*ESC\d|Template\s+Name\s*:|EnableTemplate|'
+                            r'Manage[CC]A\s*:|Manage[Cc]ertificates|ESC\d\s*\(|'
+                            r'Enrollee\s+Supplies\s+Subject|Client\s+Authentication\s*:\s*True|'
+                            r'Enrollment\s+Rights', line)
+                        if is_markdown_bullet or not ctx:
                             continue
                         esc = am.group(0).upper()
                         report.add("HIGH", "RECON", path, lineno,
@@ -330,6 +352,11 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     if name == "BloodHound ACL edge":
+                        # iter-7: even with a node-token after the arrow, lines
+                        # inside backticks ('reading `--[GenericAll]-->` style')
+                        # or wrapped in inline-code/quotes are explanatory prose.
+                        if re.search(r'`[^`]*--\[[^`]+\]-->[^`]*`', line):
+                            continue
                         edge = am.group(1)
                         report.add("HIGH", "RECON", path, lineno,
                                    f"BloodHound ACL edge: {edge} (privilege-escalation path)",
@@ -351,12 +378,21 @@ def analyze(path, report, store=None):
                     # ADO.NET connectionString: parse User ID / Password out cleanly
                     if name == "ADO connectionString":
                         cs = am.group(1)
+                        # Iter-7: skip Integrated Security / Trusted_Connection strings
+                        # (no password to leak), and skip __VAR__/${VAR}/<TOKEN> templates.
+                        cs_low = cs.lower()
+                        if ("integrated security" in cs_low
+                                or "trusted_connection=yes" in cs_low
+                                or "trusted_connection=true" in cs_low):
+                            continue
                         pm = re.search(r'(?i)\b(?:password|pwd)\s*=\s*([^;"\'\r\n]{3,})', cs)
                         um = re.search(r'(?i)\b(?:user\s*id|uid|user)\s*=\s*([^;"\'\r\n]{1,60})', cs)
                         if not pm:
                             continue
                         pw = pm.group(1).strip()
-                        if filters.is_placeholder(pw) or "integrated security" in cs.lower() and not pm:
+                        if (filters.is_placeholder(pw)
+                                or pw.startswith('__') and pw.endswith('__')
+                                or pw.startswith('${') or pw.startswith('<')):
                             continue
                         u = (um.group(1).strip() if um else "")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
