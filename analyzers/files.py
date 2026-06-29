@@ -65,6 +65,30 @@ INTERESTING = [
     (re.compile(r'(?i)^(?:portable_)?connections\.json$'),
      "DBeaver / HeidiSQL conn store → hex(...) XOR-reversible passwords", "HIGH"),
     (re.compile(r'(?i)^login data$|^cookies$'), "Chrome creds → DPAPI decrypt", "HIGH"),
+    # iter-22 (corpus mine wwzwk72m3): Chrome/Edge 'Local State' JSON contains
+    # the os_crypt.encrypted_key (b64 of DPAPI-wrapped AES key) needed to
+    # decrypt Login Data/Cookies. Required step on every modern Chromium box.
+    (re.compile(r'(?i)^local state$'),
+     "Chrome/Edge Local State → b64-decode os_crypt.encrypted_key, strip 'DPAPI' prefix, "
+     "impacket-dpapi masterkey to unwrap AES key for Login Data/Cookies decryption", "HIGH"),
+    # iter-22: Chrome 127+ app_bound_encrypted_key (additional SYSTEM-DPAPI layer)
+    (re.compile(r'(?i)^app[\s_-]?bound[\s_-]?encrypted[\s_-]?key.*$'),
+     "Chrome 127+ app_bound_encrypted_key → needs SYSTEM DPAPI + IElevator COM", "HIGH"),
+    # iter-22: Login Data / Cookies WAL+SHM sidecars (often hold un-merged rows)
+    (re.compile(r'(?i)^(?:login\s*data|cookies)-(?:journal|wal|shm)$'),
+     "Chrome WAL/SHM sidecar - merge BEFORE extraction: cp 'Login Data*' /tmp; sqlite3 .databases", "MEDIUM"),
+    # iter-22: Firefox legacy (pre-58) credential stores
+    (re.compile(r'(?i)^(?:signons|signedInUser)\.sqlite$|^key3\.db$'),
+     "Firefox legacy creds (pre-58) → key3.db (Berkeley DB) + signons.sqlite; firepwd.py", "HIGH"),
+    # iter-22: HackBrowserData per-browser output filenames
+    (re.compile(r'(?i)^(?:chrome|edge|brave|firefox|opera|vivaldi)_(?:password|cookie|history|bookmark|downloads?)\.(?:csv|json)$'),
+     "HackBrowserData export → cat <file>; passwords are PLAINTEXT in this output", "CRITICAL"),
+    # iter-22: DonPAPI decrypted loot directory layout
+    (re.compile(r'(?i)/donpapi/.*/(?:chrome|firefox|vaults|credentials)/decrypted/'),
+     "DonPAPI decrypted creds → cat *.txt; plaintext DPAPI-recovered creds", "CRITICAL"),
+    # iter-22: hashcat $mozilla$ hash file marker
+    (re.compile(r'(?i)^.*mozilla.*\.(hash|txt|hashes)$|^firefox_hash\.txt$'),
+     "Firefox $mozilla$ hash file → hashcat -m 26000 (3DES) or -m 26100 (AES); recovers primary pw", "HIGH"),
     # ── web app configs ────────────────────────────────────────────────────
     # iter-17 (corpus mine wkl2kkzn5): known PHP webshell artifacts (HTB Bashed)
     (re.compile(r'(?i)^(phpbash|c99|c100|r57|wso|b374k|simple[_-]?backdoor|'
