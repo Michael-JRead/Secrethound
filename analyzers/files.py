@@ -66,6 +66,11 @@ INTERESTING = [
      "DBeaver / HeidiSQL conn store → hex(...) XOR-reversible passwords", "HIGH"),
     (re.compile(r'(?i)^login data$|^cookies$'), "Chrome creds → DPAPI decrypt", "HIGH"),
     # ── web app configs ────────────────────────────────────────────────────
+    # iter-17 (corpus mine wkl2kkzn5): known PHP webshell artifacts (HTB Bashed)
+    (re.compile(r'(?i)^(phpbash|c99|c100|r57|wso|b374k|simple[_-]?backdoor|'
+                r'0byt3m1n1|p0wny|alfa(?:sh3ll|v\d+)?|mini[_-]?shell|webshell|'
+                r'indoxploit|fenix)\.php$|^cmd\.php$|^shell\.php$|^backdoor\.php$'),
+     "PHP webshell artifact → curl <url> -d 'cmd=id' or visit + run cmds", "CRITICAL"),
     (re.compile(r'(?i)^wp-config\.php$'), "WordPress config → DB creds + keys", "HIGH"),
     (re.compile(r'(?i)^\.htpasswd$'), "Apache basic-auth → hashcat -m 1600 (apr1)", "HIGH"),
     (re.compile(r'(?i)^(config|configuration|settings|database|db|storage)\.(php|inc|yml|yaml)$'), "app config → DB/service creds", "HIGH"),

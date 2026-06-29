@@ -26,23 +26,36 @@ def _strip_ns(tag):
 
 
 def _decode_value(b64, parent_name):
-    """Decode an unattend <Value>. Returns (password, source) or None."""
+    """Decode an unattend <Value>. Returns (password, source) or None.
+    iter-17 (corpus mine wkl2kkzn5): also try ASCII / UTF-8 fallback because
+    some THM rooms / winPEAS output / third-party unattend generators store
+    the password as plain base64-of-ASCII rather than the MS-canonical
+    base64-of-UTF16LE form. We attempt UTF-16LE first (canonical), then
+    fall through to UTF-8 / latin-1 for the THM-style shape."""
     try:
         raw = base64.b64decode(b64, validate=True)
     except Exception:
         return None
+    suffix = parent_name or ""
+    # canonical Microsoft path: UTF-16LE
     try:
         text = raw.decode("utf-16-le")
+        if text:
+            if suffix and text.endswith(suffix) and len(text) > len(suffix):
+                return text[:-len(suffix)], "b64-utf16le, parent-suffix stripped"
+            if text.isprintable():
+                return text, "b64-utf16le, no suffix"
     except Exception:
-        return None
-    if not text:
-        return None
-    suffix = parent_name or ""
-    if suffix and text.endswith(suffix) and len(text) > len(suffix):
-        return text[:-len(suffix)], "b64-utf16le, parent-suffix stripped"
-    # third-party path: no suffix appended
-    if text.isprintable():
-        return text, "b64-utf16le, no suffix"
+        pass
+    # iter-17 ASCII / UTF-8 fallback (THM 'Windows PrivEsc' / winPEAS shape)
+    for enc, note in (("utf-8", "b64-ascii (THM/winPEAS shape)"),
+                       ("latin-1", "b64-latin1 fallback")):
+        try:
+            text = raw.decode(enc)
+            if (text and text.isprintable() and 3 <= len(text) <= 80):
+                return text, note
+        except Exception:
+            continue
     return None
 
 
