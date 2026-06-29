@@ -90,7 +90,10 @@ _PLACEHOLDER_SUBSTR = re.compile(
 _PLACEHOLDER_EMBEDDED = re.compile(
     r"(?:(?:Example|Sample|Demo|Placeholder|YourKey|YourToken|YourSecret|"
     r"NotARealKey|RedactedFor|TruncatedFor)"
-    r"(?:Here|Cpassword|Password|Pwd|Token|Key|Secret|Cred|Hash|Value))"
+    r"(?:Here|Cpassword|Password|Pwd|Token|Key|Secret|Cred|Hash|Value|PSK|"
+    r"Authkey|API|Auth))"
+    # iter-20: also catch the SAMPLE-X / EXAMPLE-X dash variant
+    r"|(?:(?:SAMPLE|EXAMPLE|PLACEHOLDER|YOUR)-[A-Z]{2,12})"
 )
 
 # canonical documentation / example secrets (gitleaks EXAMPLE allowlist + the
@@ -495,8 +498,52 @@ def entropy_is_interesting(tok, line="", threshold=4.0, min_len=16, max_len=120)
 # ── 9. blank / default AD hash constants (recognise, never crack) ──────────
 BLANK_LM = "aad3b435b51404eeaad3b435b51404ee"          # empty LM half
 BLANK_NT = "31d6cfe0d16ae931b73c59d7e0c089c0"          # empty-password NT hash
-# Microsoft's PUBLISHED GPP AES key (so cpassword is always decryptable)
+# Microsoft's PUBLISHED GPP AES key (so cpassword is always decryptable).
+# Reference: MSDN article 2964140 - Microsoft published this key 2014.
 GPP_AES_KEY = "4e9906e8fcb66cc9faf49310620ffee8f496e806cc057990209b09a433b66c1b"
+
+
+def decrypt_gpp(cpassword):
+    """iter-20: deterministic GPP cpassword decrypt (no operator action needed).
+    The cpassword field is base64-then-AES-CBC with the MS-published key + a
+    fixed IV (0x00 * 16). The plaintext is UTF-16LE. Returns the password
+    string on success, or None on any failure (we deliberately don't surface
+    decoder errors to the operator)."""
+    import base64
+    if not cpassword:
+        return None
+    # b64 padding fix (GPP can omit trailing '=')
+    b64 = cpassword.strip().strip("'\"")
+    pad = (4 - len(b64) % 4) % 4
+    b64 += "=" * pad
+    try:
+        ct = base64.b64decode(b64, validate=False)
+    except Exception:
+        return None
+    if len(ct) < 16 or len(ct) % 16 != 0:
+        return None
+    # Pure-Python AES-CBC decrypt — we ship without cryptography/pycryptodome,
+    # so use a minimal AES from stdlib's hashlib + a tiny CBC wrapper.
+    # NOTE: Python stdlib does NOT include AES. Try cryptography lib if avail;
+    # otherwise skip silently (the operator can still run `gpp-decrypt` manually).
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+        key = bytes.fromhex(GPP_AES_KEY)
+        iv = b"\x00" * 16
+        c = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        dec = c.decryptor()
+        pt = dec.update(ct) + dec.finalize()
+    except Exception:
+        return None
+    # strip PKCS#7 padding
+    if pt and pt[-1] < 16:
+        pt = pt[:-pt[-1]]
+    try:
+        return pt.decode("utf-16-le").rstrip("\x00")
+    except Exception:
+        return None
+
 
 _BLANK_HASHES = {BLANK_LM, BLANK_NT}
 

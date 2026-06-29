@@ -507,6 +507,46 @@ _AD = [
     ("Consul ACL token", re.compile(
         r'(?i)\b(?:CONSUL_HTTP_TOKEN|consul_token|acl\.tokens\.\w+)\s*[:=]\s*["\']?'
         r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\']?')),
+    # ---- iter-20: Tier-1 from corpus mine wwzwk72m3 ----
+    # Elastix / FreePBX amportal.conf AMPDBPASS / AMPMGRPASS / AMPMYSQL_PASS
+    # (HTB Beep / lab-style PBX boxes - typical foothold → root reuse pattern)
+    ("Elastix AMPDBPASS", re.compile(
+        r'(?im)^\s*AMP(?:DBPASS|MGRPASS|MYSQL_PASS)\s*=\s*([^\s#\r\n]{3,80})')),
+    # PHP bracketed-array secret: $cfg['db_password'] = 'X'  /
+    # $cfg['DB_PASSWORD']="X"  (vtigercrm / Roundcube / Sentinel-style).
+    # Different from the existing 'PHP array secret' rule (fat-arrow '=>').
+    ("PHP bracketed array secret", re.compile(
+        r"(?i)\[\s*['\"](?:db_)?(?:password|passwd|pwd|secret|salt|smtppass|api_?key|token)['\"]\s*\]"
+        r"\s*=\s*['\"]([^'\"\r\n]{3,200})['\"]")),
+    # Tomcat context.xml Resource auth (Catalina DataSource with inline pw).
+    # `<Resource name="..." username="X" password="Y" .../>` - whitespace flexible.
+    ("Tomcat context Resource", re.compile(
+        r'(?is)<Resource\b[^>]*?\busername\s*=\s*["\']([^"\']{1,40})["\']'
+        r'[^>]*?\bpassword\s*=\s*["\']([^"\']{3,200})["\']')),
+    # Tomcat server.xml Connector keystorePass / truststorePass (cert key pw)
+    ("Tomcat keystorePass", re.compile(
+        r'(?i)\b(?:keystorePass|truststorePass|SSLPassword)\s*=\s*["\']([^"\'\r\n]{3,80})["\']')),
+    # IPSec pre-shared key XML element (pfSense config.xml / strongSwan dump)
+    ("IPSec pre-shared-key", re.compile(
+        r'(?is)<pre-shared-key>([^<\r\n]{6,200})</pre-shared-key>')),
+    # NFS showmount -e export listing (TryHackMe Linux PrivEsc / KIOPTRIX-style).
+    # `/srv/nfs  *` or `/opt/share  10.0.0.0/24` - no_root_squash on its own line.
+    ("showmount -e export", re.compile(
+        r'(?m)^(/[\w./\-]+)\s+(\*|[\d./]+(?:[,\s][\d./]+)*)\s*$')),
+    # AccessChk -uwcqv service block per-service header (Windows PrivEsc)
+    # `RW SERVICE_NAME` indented under "<service>" group line.
+    ("accesschk service block", re.compile(
+        r'(?im)^[ \t]*RW\s+[A-Z][A-Za-z0-9_$.]{2,40}\s*$')),
+    # Web.config encrypted connectionStrings + machineKey (machineKey already
+    # caught; here we also flag the encrypted-block marker so the operator
+    # knows to grab aspnet_regiis -pdf for offline decrypt).
+    ("ASP.NET encrypted config", re.compile(
+        r'(?is)<EncryptedData\s+[^>]*\bType\s*=\s*["\']https?://www\.w3\.org/2001/04/xmlenc#Element["\']')),
+    # AutoLogon DefaultUserName + DefaultDomainName (binds with existing
+    # AutoLogon password rule via filename - emits separately so the operator
+    # gets domain/user as Evidence too).
+    ("AutoLogon DefaultUser", re.compile(
+        r'(?i)(?:"?Default(?:UserName|DomainName)"?)\s*(?:["=:]+|\s+REG_SZ\s+)\s*["\']?([^"\'\r\n]{1,80})')),
     # ---- iter-18: pypykatz / impacket / Snaffler / NXC blocks (corpus mine wkl2kkzn5) ----
     # Kerberos AES key (gMSA/secretsdump aes256/aes128/des-cbc-md5).
     # Pass-the-Key primitive: getTGT.py -aesKey <key>.
@@ -2310,13 +2350,157 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     # GPP cpassword inline (32-byte AES-CBC blob)
+                    # ---- iter-20 dispatch branches ----
+                    if name == "Elastix AMPDBPASS":
+                        val = am.group(1).strip()
+                        if filters.is_placeholder(val):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Elastix AMP* secret: {val}",
+                                   hint=("PBX/FreePBX MySQL password - reuse on the box's root pw "
+                                         "(HTB Beep pattern); mysql -u root -p'" + val + "'"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "PHP bracketed array secret":
+                        val = am.group(1)
+                        if filters.is_placeholder(val) or filters.is_code_not_literal(val, line):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"PHP $cfg[..] secret: {val}",
+                                   hint="PHP bracketed-array literal - reuse against the DB / service the config talks to")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "Tomcat context Resource":
+                        u, p = am.group(1), am.group(2)
+                        if filters.is_placeholder(p) or p.lower() in ("changeit", "tomcat", "manager"):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"Tomcat Resource {u}:{p}",
+                                   hint=("DataSource cred from context.xml - DB login: "
+                                         "mysql/psql -u '" + u + "' -p'" + p + "'  (also try tomcat manager-gui)"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "Tomcat keystorePass":
+                        pw = am.group(1)
+                        if filters.is_placeholder(pw) or pw.lower() in ("changeit", "tomcat"):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Tomcat keystore/truststore password: {pw}",
+                                   hint=("keytool -list -v -keystore <file> -storepass '" + pw + "'  "
+                                         "- extract certs; also try same pw on the Tomcat manager"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "IPSec pre-shared-key":
+                        psk = am.group(1).strip()
+                        if filters.is_placeholder(psk) or filters.is_doc_file(path):
+                            continue
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"IPSec PSK: {psk}",
+                                   hint=("PSK from pfSense/strongSwan/Cisco config - establish VPN tunnel: "
+                                         "ipsec.conf + ipsec.secrets with this PSK then route to internal LAN"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=psk,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "showmount -e export":
+                        # Only fire on plausibly-showmount-shaped files (not arbitrary
+                        # logs that happen to have /path lines)
+                        base = os.path.basename(path).lower()
+                        plow = path.lower()
+                        if not ("showmount" in plow or "nfs" in base or "nmap" in plow
+                                or path.lower().endswith((".txt", ".log", ".nmap"))):
+                            continue
+                        if filters.is_doc_file(path):
+                            continue
+                        export_path, hosts = am.group(1), am.group(2)
+                        # skip noisy fs paths
+                        if export_path.startswith(("/proc/", "/sys/", "/dev/", "/run/", "/tmp/")):
+                            continue
+                        sev = "HIGH" if hosts.strip() == "*" else "MEDIUM"
+                        report.add(sev, "RECON", path, lineno,
+                                   f"NFS export: {export_path}  allowed-from: {hosts}",
+                                   hint=("if no_root_squash present: mount -t nfs <ip>:" + export_path +
+                                         " /mnt; drop a SUID-shell binary as local root -> SUID-root on target; "
+                                         "else try mount + browse for sensitive files"))
+                        hit = True
+                        break
+                    if name == "accesschk service block":
+                        plow = path.lower()
+                        if not ("accesschk" in plow or "winpeas" in plow
+                                or path.lower().endswith((".txt", ".log", ".md"))):
+                            continue
+                        if filters.is_doc_file(path):
+                            continue
+                        # capture the service name (the regex matches only the line;
+                        # service name is everything after the indented RW)
+                        m = re.match(r'\s*RW\s+([A-Z][A-Za-z0-9_$.]{2,40})\s*$', line)
+                        if not m:
+                            continue
+                        svc = m.group(1)
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"AccessChk RW on service: {svc}",
+                                   hint=("writable service permissions - sc config " + svc +
+                                         " binPath= <evil>; sc start " + svc +
+                                         "  (SYSTEM via service replacement)"))
+                        hit = True
+                        break
+                    if name == "ASP.NET encrypted config":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "ASP.NET <EncryptedData> in web.config (RsaProtectedConfigurationProvider)",
+                                   hint=("offline decrypt: aspnet_regiis -pdf 'connectionStrings' <site-path>  "
+                                         "(needs the RSA key container - either on box or extract from "
+                                         "%SystemRoot%\\Microsoft.NET\\v*\\Config\\RsaProtectedConfigurationProvider)"))
+                        hit = True
+                        break
+                    if name == "AutoLogon DefaultUser":
+                        val = am.group(1).strip()
+                        if filters.is_placeholder(val):
+                            continue
+                        report.add("MEDIUM", "RECON", path, lineno,
+                                   f"AutoLogon default principal: {val}",
+                                   hint="pair with adjacent DefaultPassword finding; that's the AutoLogon principal+pw")
+                        hit = True
+                        break
                     if name == "GPP cpassword inline":
                         blob = am.group(1)
                         if filters.is_placeholder(blob) or filters.is_canonical_sample(blob):
                             continue
-                        report.add("CRITICAL", "GPP cpassword", path, lineno,
-                                   f"GPP cpassword blob: {blob[:30]}...",
-                                   hint="gpp-decrypt '" + blob + "'   (fixed AES key MS published - cleartext on stdout)")
+                        # iter-20: attempt deterministic decrypt via the MS-
+                        # published AES key. If `cryptography` lib is installed
+                        # the operator gets the plaintext directly; else we
+                        # fall back to the gpp-decrypt CLI hint.
+                        plain = filters.decrypt_gpp(blob)
+                        if plain and not filters.is_placeholder(plain):
+                            report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                       f"GPP cpassword DECRYPTED: {plain}",
+                                       hint=(f"plaintext recovered via published MS AES key; reuse: "
+                                             f"netexec smb <DC-IP> -u '<user>' -p '{plain}' --local-auth"))
+                            if store is not None:
+                                from analyzers.ingest.evidence import Evidence
+                                store.add(Evidence(kind="plaintext", plaintext=plain,
+                                                   source=path, line=lineno))
+                        else:
+                            report.add("CRITICAL", "GPP cpassword", path, lineno,
+                                       f"GPP cpassword blob: {blob[:30]}...",
+                                       hint="gpp-decrypt '" + blob + "'   (fixed AES key MS published - cleartext on stdout)")
                         hit = True
                         break
                     # Splunk authentication.conf hashed admin password
