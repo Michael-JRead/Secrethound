@@ -507,6 +507,39 @@ _AD = [
     ("Consul ACL token", re.compile(
         r'(?i)\b(?:CONSUL_HTTP_TOKEN|consul_token|acl\.tokens\.\w+)\s*[:=]\s*["\']?'
         r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\']?')),
+    # ---- iter-18: pypykatz / impacket / Snaffler / NXC blocks (corpus mine wkl2kkzn5) ----
+    # Kerberos AES key (gMSA/secretsdump aes256/aes128/des-cbc-md5).
+    # Pass-the-Key primitive: getTGT.py -aesKey <key>.
+    ("Kerberos AES key", re.compile(
+        r'(?im)^(?P<who>[A-Za-z0-9._$\-]{1,64})\$?:'
+        r'(?P<etype>aes(?P<bits>128|256)-cts-hmac-sha1-96|des-cbc-md5):'
+        r'(?P<key>[a-f0-9]{16,128})\s*$')),
+    # secretsdump $MACHINE.ACC computer NT hash (silver-ticket primitive)
+    ("$MACHINE.ACC NT hash", re.compile(
+        r'(?im)^(?P<dom>[A-Za-z0-9._\-]+)\\(?P<host>[A-Za-z0-9._\-]{1,40}\$):'
+        r'(?P<lm>aad3b435b51404eeaad3b435b51404ee):(?P<nt>[a-f0-9]{32}):::\s*$')),
+    # pypykatz Kerberos AES key line (etype + 32/64 hex)
+    ("pypykatz Kerberos AES key", re.compile(
+        r'(?im)^[ \t]*(aes(?:128|256))-cts-hmac-sha1-96\s*:\s*([a-f0-9]{32,64})\s*$')),
+    # NetExec --rid-brute SidTypeUser output (single-line)
+    ("nxc rid-brute user", re.compile(
+        r'^(?:SMB|LSARPC|WINRM|LDAP)\s+\d{1,3}(?:\.\d{1,3}){3}\s+\d{1,5}\s+\S+\s+'
+        r'(\d{3,7}):\s*([^\\\s]+)\\([^\s()]+)\s+\(SidType(User|Group|Alias|WellKnownGroup|Domain)\)')),
+    # Rubeus dump 'Base64EncodedTicket :' label (header-only; b64 follows)
+    ("Rubeus dump ticket", re.compile(
+        r'(?im)^\s*Base64EncodedTicket\s*:\s*$')),
+    # Snaffler annotated (FileResult)[File] {Color}<rule|R|kB|mtime|path> format
+    ("Snaffler annotated", re.compile(
+        r'\((?:FileResult|RwStatusResult|ShareResult|DirResult)\)'
+        r'\[(?:File|Share|Dir|RwStatus)\]\s+'
+        r'\{(Black|Red|Yellow|Green)\}'
+        r'<([A-Za-z][A-Za-z0-9]+)\|[^|]*\|[^|]*\|[^|]*\|'
+        r'(\\\\[^>|]+|[A-Za-z]:\\[^>|]+|/[^>|]+)>'
+        r'(?:\(([^\r\n]{0,400})\))?')),
+    # Snaffler (ShareResult)[Share] simpler form
+    ("Snaffler share", re.compile(
+        r'\(ShareResult\)\[Share\]\s*\{(?:Red|Black|Yellow|Green)\}<[A-Z]\|'
+        r'(\\\\[^\s>\\]+\\[^\s>]+)>')),
     # ---- iter-17: deep-corpus-mine gaps (workflow wkl2kkzn5) ----
     # sudo -l output line (distinct from /etc/sudoers - no user/host prefix):
     #     (root) NOPASSWD: /usr/bin/find
@@ -1061,6 +1094,157 @@ def _multiline_passes(path, report, store):
                 store.add(Evidence(kind="plaintext", plaintext=val,
                                    source=path, line=_ln(m)))
 
+    # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
+    # (impacket secretsdump.py LSASecrets output)
+    _LSA_SC = re.compile(
+        r'(?im)^\s*\[\*\]\s*_SC_(\S+)\s*\r?\n'
+        r'\s*(?:\(Unknown User\)|([^\s:\\]+(?:\\[^\s:\\]+)?)):([^\r\n]{3,200})\s*$')
+    for m in _LSA_SC.finditer(text):
+        if filters.is_doc_file(path):
+            continue
+        svc = m.group(1).strip()
+        user = (m.group(2) or "").strip()
+        pw = m.group(3).strip()
+        if filters.is_placeholder(pw):
+            continue
+        principal = user or f"({svc} service)"
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"LSA _SC_{svc} service account: {principal}:{pw}",
+                   hint=(f"impacket LSA secret - PLAINTEXT password of the {svc} service account; "
+                         f"silver-ticket/lateral primitive: "
+                         f"nxc smb <host> -u '{user or svc}' -p '{pw}'"))
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=user, plaintext=pw,
+                               source=path, line=_ln(m)))
+
+    # iter-18: pypykatz MSV block (Linux/cross-platform mimikatz alternative)
+    _PYPYKATZ_MSV = re.compile(
+        r'(?i)==\s*MSV\s*==[\s\S]{0,400}?Username\s*:\s*(\S{1,40})\s*\n'
+        r'[\s\S]{0,200}?Domain\s*:\s*(\S{1,40})\s*\n[\s\S]{0,400}?'
+        r'\bNT\s*:\s*([a-f0-9]{32})\b'
+        r'(?:[\s\S]{0,300}?\bDPAPI\s*:\s*([a-f0-9]{32})\b)?')
+    _PYPYKATZ_BLEED = re.compile(r'(?i)==\s*(?:MSV|WDIGEST|Kerberos|SSP|LiveSSP|TsPkg|DPAPI|CredentialKeys)\s*[=\[]')
+    for m in _PYPYKATZ_MSV.finditer(text):
+        if not _no_bleed(m, 1, 3, _PYPYKATZ_BLEED):
+            continue
+        u, dom, nt = m.group(1), m.group(2), m.group(3)
+        dpapi = m.group(4)
+        if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
+            continue
+        report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
+                   f"pypykatz NT {dom}\\{u}: {nt}",
+                   hint=f"PtH: nxc smb <host> -d {dom} -u {u} -H {nt} | crack: hashcat -m 1000 <nt> rockyou.txt")
+        HASHES.append(("1000", "NTLM", nt, path, _ln(m)))
+        if store is not None:
+            store.add(Evidence(kind="hash", user=u, hash=nt, hash_mode="1000",
+                               domain=dom, source=path, line=_ln(m)))
+        if dpapi and not filters.is_canonical_sample(dpapi):
+            report.add("HIGH", "ASSIGNED SECRETS", path, _ln(m),
+                       f"pypykatz DPAPI user-key {dom}\\{u}: {dpapi}",
+                       hint=f"impacket-dpapi credential -key {dpapi} <CredFile>  - skips masterkey cracking")
+            if store is not None:
+                store.add(Evidence(kind="dpapi_key", user=u, plaintext=dpapi,
+                                   domain=dom, source=path, line=_ln(m)))
+
+    # iter-18: pypykatz WDIGEST cleartext block
+    _PYPYKATZ_WDIGEST = re.compile(
+        r'(?i)==\s*WDIGEST\s*\[[0-9a-f]{4,}\]==\s*\n'
+        r'\s*username\s+(\S{1,40})\s*\n'
+        r'\s*domainname\s+(\S{1,40})\s*\n'
+        r'\s*password\s+(?!\(null\)|None\b)([^\r\n]{3,80})\s*\n'
+        r'\s*password\s*\(hex\)')
+    for m in _PYPYKATZ_WDIGEST.finditer(text):
+        u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
+        if filters.is_placeholder(pw):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"pypykatz wdigest cleartext: {dom}\\{u}:{pw}",
+                   hint=f"reuse: nxc smb <host> -d {dom} -u {u} -p '{pw}'")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=pw, domain=dom,
+                               source=path, line=_ln(m)))
+
+    # iter-18: pypykatz Kerberos cleartext block (separate from the aes-key
+    # single-line rule which is dispatched in _AD).
+    _PYPYKATZ_KERB = re.compile(
+        r'(?is)==\s*Kerberos\s*==[\s\S]{0,400}?Username\s*:\s*(\S{1,40})'
+        r'[\s\S]{0,200}?Domain\s*:\s*(\S{1,80})'
+        r'[\s\S]{0,200}?Password\s*:\s*(?!\(null\)|None|n/a|\s*$)([^\r\n]{3,80})')
+    for m in _PYPYKATZ_KERB.finditer(text):
+        if not _no_bleed(m, 1, 3, _PYPYKATZ_BLEED):
+            continue
+        u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
+        if filters.is_placeholder(pw):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"pypykatz Kerberos cleartext: {dom}\\{u}:{pw}",
+                   hint=f"reuse: nxc smb <host> -d {dom} -u {u} -p '{pw}'")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=pw, domain=dom,
+                               source=path, line=_ln(m)))
+
+    # iter-18: pypykatz DPAPI masterkey block (sha1_masterkey for impacket-dpapi)
+    _PYPYKATZ_DPAPI_MK = re.compile(
+        r'(?im)^[ \t]*key_guid[ \t]+\{([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-'
+        r'[0-9a-f]{4}-[0-9a-f]{12})\}[\s\S]{0,400}?'
+        r'^[ \t]*sha1_masterkey[ \t]+([0-9a-f]{40})\b')
+    for m in _PYPYKATZ_DPAPI_MK.finditer(text):
+        if filters.is_doc_file(path):
+            continue
+        guid, sha1 = m.group(1), m.group(2)
+        if filters.is_canonical_sample(sha1):
+            continue
+        report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                   f"DPAPI masterkey (pypykatz): {{{guid}}} sha1={sha1}",
+                   hint=f"dpapi.py credential -key 0x{sha1} <blob>  - decrypts Chrome/RDP/Vault/PFX bound to this GUID")
+
+    # iter-18: pypykatz SSP / LiveSSP / TsPkg / CredentialKeys block
+    _PYPYKATZ_SSP = re.compile(
+        r'(?im)^==\s*(?:SSP|LiveSSP|TsPkg|CredentialKeys|MSV|WDIGEST|Kerberos)\s*'
+        r'(?:\[[0-9a-f]+\])?\s*==\s*$'
+        r'[\s\S]{0,400}?^\s*username\s+(\S{1,80})\s*$'
+        r'[\s\S]{0,400}?^\s*domainname\s+(\S{1,80})\s*$'
+        r'[\s\S]{0,400}?^\s*password\s+(?!\(hex\))(?!\(null\))([^\r\n]{3,200})\s*$')
+    for m in _PYPYKATZ_SSP.finditer(text):
+        if not _no_bleed(m, 1, 3, _PYPYKATZ_BLEED):
+            continue
+        u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
+        if filters.is_placeholder(pw):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"pypykatz SSP cleartext: {dom}\\{u}:{pw}",
+                   hint=f"reuse: nxc smb <host> -d {dom} -u {u} -p '{pw}'")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=pw, domain=dom,
+                               source=path, line=_ln(m)))
+
+    # iter-18: impacket dpapi.py [CREDENTIAL] block (cleartext under "Unknown:" field)
+    _IMPACKET_DPAPI_CRED = re.compile(
+        r'(?is)\[CREDENTIAL\][\s\S]{0,400}?'
+        r'Target\s*:\s*([^\r\n]{3,120})[\s\S]{0,400}?'
+        r'Username\s*:\s*([^\r\n]{1,80})[\s\S]{0,200}?'
+        r'Unknown\s*:\s*(?!\s*$)([^\r\n]{3,200})')
+    _IMP_CRED_BLEED = re.compile(r'\[CREDENTIAL\]')
+    for m in _IMPACKET_DPAPI_CRED.finditer(text):
+        if filters.is_doc_file(path):
+            continue
+        if not _no_bleed(m, 1, 3, _IMP_CRED_BLEED):
+            continue
+        target, u, pw = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+        if filters.is_placeholder(pw):
+            continue
+        # strip 'Domain:target=' / 'LegacyGeneric:target=' prefix
+        target = re.sub(r'^(?:Domain|LegacyGeneric):target=', '', target)
+        # reject when pw is pure hex (blob, not cleartext)
+        if re.match(r'^[0-9a-fA-F]{16,}$', pw):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"DPAPI Credential Manager {target}: {u}:{pw}",
+                   hint=f"plaintext from impacket-dpapi; reuse: nxc smb/mssql/winrm -u '{u}' -p '{pw}'")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                               source=path, line=_ln(m)))
+
     # iter-17 (corpus mine wkl2kkzn5): nmap NSE smb-vuln-* output block
     # (HTB Blue / TryHackMe Blue EternalBlue). The script header + multi-line
     # body + State:VULNERABLE need file-scope context.
@@ -1550,6 +1734,125 @@ def analyze(path, report, store=None):
                                    f"Flask session: {tok[:30]}...",
                                    hint=("flask-unsign --decode --cookie '<value>'; "
                                          "if SECRET_KEY known: flask-unsign --sign --cookie \"{'user':'admin'}\" --secret '<key>'"))
+                        hit = True
+                        break
+                    # ---- iter-18 dispatch branches ----
+                    # Kerberos AES key (Pass-the-Key primitive)
+                    if name == "Kerberos AES key":
+                        who = am.group('who')
+                        etype = am.group('etype')
+                        key = am.group('key').lower()
+                        if filters.is_canonical_sample(key):
+                            continue
+                        # Pass-the-Key requires the exact key length:
+                        # aes256-cts-hmac-sha1-96 → 64 hex (32 bytes)
+                        # aes128-cts-hmac-sha1-96 → 32 hex (16 bytes)
+                        # des-cbc-md5             → 16 hex (8 bytes)
+                        expected = {"aes256": 64, "aes128": 32}.get(etype[:6], 16)
+                        if len(key) != expected:
+                            continue
+                        report.add("HIGH", "PASSWORD HASHES", path, lineno,
+                                   f"Kerberos {etype} key {who}: {key}",
+                                   hint=(f"Pass-the-Key: impacket-getTGT '<dom>/{who}' -aesKey {key} -dc-ip <dc>; "
+                                         f"silver ticket: ticketer.py -aesKey {key} -nthash <nt> "
+                                         f"-domain-sid <SID> -domain <dom> -spn <spn> Administrator"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="kerberos_key", user=who,
+                                               hash=key, source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "$MACHINE.ACC NT hash":
+                        dom = am.group('dom')
+                        host = am.group('host')
+                        nt = am.group('nt')
+                        if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
+                            continue
+                        report.add("HIGH", "PASSWORD HASHES", path, lineno,
+                                   f"$MACHINE.ACC NTLM (NT) {dom}\\{host}: {nt}",
+                                   hint=(f"machine account hash - silver-ticket primitive: "
+                                         f"nxc smb <dc> -u '{host}' -H {nt} --local-auth; or "
+                                         f"impacket-ticketer -nthash {nt} -domain-sid <SID> "
+                                         f"-domain {dom} -spn cifs/{host[:-1]} Administrator"))
+                        from analyzers.patterns import HASHES
+                        HASHES.append(("1000", "NTLM", nt, path, lineno))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="hash", user=host, hash=nt,
+                                               hash_mode="1000", domain=dom,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "pypykatz Kerberos AES key":
+                        etype, key = am.group(1), am.group(2)
+                        if filters.is_canonical_sample(key):
+                            continue
+                        if etype == "aes256" and len(key) != 64:
+                            continue
+                        if etype == "aes128" and len(key) != 32:
+                            continue
+                        if filters.is_doc_file(path):
+                            continue
+                        report.add("HIGH", "PASSWORD HASHES", path, lineno,
+                                   f"pypykatz Kerberos {etype} key: {key}",
+                                   hint=(f"Pass-the-Key: impacket-getTGT '<dom>/<user>' -aesKey {key}; "
+                                         "mimikatz: kerberos::ptt + sekurlsa::ekeys"))
+                        hit = True
+                        break
+                    if name == "nxc rid-brute user":
+                        if filters.is_doc_file(path):
+                            continue
+                        rid_str, dom, user, sidtype = am.group(1), am.group(2), am.group(3), am.group(4)
+                        if sidtype != "User":
+                            continue   # we already learn computers via _NXC_SVC
+                        try:
+                            rid_n = int(rid_str)
+                        except ValueError:
+                            continue
+                        if user in seen_svc:
+                            continue
+                        seen_svc.add(user)
+                        sev = "HIGH" if rid_n in (500, 512, 519, 518, 520) else "MEDIUM"
+                        report.add(sev, "RECON", path, lineno,
+                                   f"nxc rid-brute user: {dom}\\{user} (RID {rid_n})",
+                                   hint=("add to users.txt; AS-REPRoast (impacket-GetNPUsers ... -no-pass) "
+                                         "+ password-spray; RID 500/512/519 = high-value targets"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="user", user=user, domain=dom,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "Rubeus dump ticket":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "Rubeus dump: Base64EncodedTicket blob follows",
+                                   hint=("extract next b64 block: awk '/Base64EncodedTicket/,/^[[:space:]]*$/' "
+                                         "<file> | base64 -d > t.kirbi; ticketConverter.py t.kirbi t.ccache; "
+                                         "export KRB5CCNAME=t.ccache; klist"))
+                        hit = True
+                        break
+                    if name == "Snaffler annotated":
+                        if filters.is_doc_file(path):
+                            continue
+                        color, rule_n, target_p, snippet = (am.group(1), am.group(2),
+                                                            am.group(3), am.group(4) or "")
+                        sev_map = {"Black": "CRITICAL", "Red": "HIGH",
+                                   "Yellow": "MEDIUM", "Green": "INFO"}
+                        sev = sev_map.get(color, "MEDIUM")
+                        snippet_short = snippet[:80].replace("\n", " ")
+                        report.add(sev, "INTERESTING FILES", path, lineno,
+                                   f"Snaffler {color} ({rule_n}): {target_p}",
+                                   hint=f"smbclient copy / read: {target_p}  -  rule {rule_n}"
+                                        + (f"  snippet: {snippet_short}" if snippet_short else ""))
+                        hit = True
+                        break
+                    if name == "Snaffler share":
+                        if filters.is_doc_file(path):
+                            continue
+                        share = am.group(1)
+                        report.add("MEDIUM", "RECON", path, lineno,
+                                   f"Snaffler readable share: {share}",
+                                   hint="smbclient.py <user>@<host> -no-pass; cd <share-name> -> enumerate")
                         hit = True
                         break
                     # iter-17: nmap NSE smb-vuln + ProFTPd CPFR/CPTO are
