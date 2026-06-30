@@ -161,6 +161,42 @@ INTERESTING = [
     # Maven / Gradle / Pipenv credentials caches:
     (re.compile(r'(?i)^settings\.xml$|^gradle\.properties$|^\.npmrc$|^\.gem/credentials$|^\.pypirc$'),
      "build-tool cred cache → repo auth tokens", "MEDIUM"),
+    # ── iter-25 Tier-3 from corpus mine wwzwk72m3 ─────────────────────────
+    # MSSQL Reporting Services rsreportserver.config: holds DSN with
+    # symmetric-encrypted creds (DPAPI on machine key). Operator can
+    # decrypt offline once they have the SQL server's machine key.
+    (re.compile(r'(?i)^rsreportserver\.config$|^rssvrpolicy\.config$|'
+                r'^rsreportdesigner\.config$'),
+     "SSRS Reporting Services config → encrypted DSN; "
+     "needs machine key from same host", "HIGH"),
+    # VHD / VHDX virtual disk - mount + grep for SAM/SYSTEM/passwords.
+    # Operator-collected backup loot, very common in pre-built lab images.
+    (re.compile(r'(?i)\.(vhd|vhdx|vmdk|vdi|qcow2?)$'),
+     "virtual disk image → 7z l <f>; mount loop + grep SAM/Users/notes", "HIGH"),
+    # TightVNC / RealVNC registry export (.reg) with encrypted Password
+    # value (DES with the public TightVNC key - vncpwd / vncdec).
+    (re.compile(r'(?i)^tightvnc.*\.reg$|^realvnc.*\.reg$|^vnc-?server.*\.reg$'),
+     "VNC server registry export → vncpwd on the Password value", "HIGH"),
+    # MSSQL backup .bak file - holds NTLM hashes if the box's SQL was
+    # AD-integrated, or app DB credentials at minimum.
+    (re.compile(r'(?i)\.bak$'),
+     "backup file (potentially MSSQL .bak) → mdf-tool / RESTORE FILELISTONLY", "INFO"),
+    # PCAP - protocol captures with cleartext Basic / FTP / Telnet creds.
+    # We can't parse pcap fully without libpcap, but strings-grep often
+    # surfaces the obvious wins; operator can also run with pcredz / NetworkMiner.
+    (re.compile(r'(?i)\.(pcap|pcapng|cap)$'),
+     "packet capture → strings <f> | grep -iE 'authorization|user|pass|"
+     "magic|user:'; pcredz / NetworkMiner", "MEDIUM"),
+    # OpenSSH ssh-agent socket forwarded into a directory or .ssh/agent.*
+    (re.compile(r'(?i)\.ssh/(?:agent\.|known_hosts)|^authorized_keys$|^known_hosts$'),
+     "SSH agent / known_hosts → host inventory + key trust path", "INFO"),
+    # Apache mod_jk worker properties (Tomcat AJP creds)
+    (re.compile(r'(?i)^workers\.properties$|^mod_jk\.conf$'),
+     "Apache mod_jk → Tomcat AJP backend creds / target inventory", "MEDIUM"),
+    # Vagrant / Packer build artifact (frequently contains image build creds)
+    (re.compile(r'(?i)^Vagrantfile$|^packer.*\.json$'),
+     "Vagrant/Packer build script → embedded ssh_password / winrm_password", "MEDIUM"),
+
     # ── generic / catch-all (lowest priority) ──────────────────────────────
     (re.compile(r'(?i)\.(ini|conf|cnf|cfg|properties|toml)$'), "config file → read for creds", "INFO"),
     (re.compile(r'(?i)\.(yml|yaml|json|xml)$'), "structured config → read for creds", "INFO"),
