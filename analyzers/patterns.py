@@ -176,7 +176,7 @@ def _disp(val):
     return val if len(val) <= 70 else val[:70] + "..."
 
 
-def analyze(path, report):
+def analyze(path, report, store=None):
     # iter-7: lock files are content-addressed dep manifests - thousands of
     # 32/40/64-hex integrity hashes per file. Skip the hash-shaped detectors
     # entirely. Real cred leaks in lock files are extraordinarily rare; the
@@ -396,6 +396,27 @@ def analyze(path, report):
                             continue
                         hint = f"hashcat -m {mode} '{val[:40]}{'...' if len(val) > 40 else ''}' rockyou.txt   (mode {mode})"
                         HASHES.append((mode, name, val, path, lineno))
+                        # iter-24: AS-REP / Kerberoast hashes embed the user in
+                        # their canonical form. Extract and emit an Evidence
+                        # binding so correlate.py R-CRACK chains can name the
+                        # user in their command (and the user shows up in
+                        # users.txt for sprays once cracked).
+                        if store is not None and name.startswith(
+                                ("AS-REP roast", "Kerberoast TGS")):
+                            urx = re.search(
+                                r'\$krb5(?:asrep|tgs)\$\d+\$(?:\*)?'
+                                r'([A-Za-z0-9_.\-]{1,50})'
+                                r'(?:[@:$*])', val)
+                            if urx:
+                                u_ = urx.group(1)
+                                if u_ and not u_.lower().startswith(
+                                        ("dom", "domain", "realm")):
+                                    from analyzers.ingest.evidence import Evidence as _Ev
+                                    store.add(_Ev(kind="user", user=u_,
+                                                  fact=("kerberoastable" if
+                                                        name.startswith("Kerberoast") else
+                                                        "asreproastable"),
+                                                  source=path, line=lineno))
 
                     if name == "Private key":
                         enc = _ENCRYPTED_KEY.search(line)

@@ -143,3 +143,17 @@ class Store:
 
     def hosts(self):
         return sorted({e.host for e in self.items if e.host})
+
+    # iter-23/24: propagate domain context into chain commands so the
+    # operator doesn't paste literal '<DOMAIN>' into impacket calls. Picks
+    # the most-common non-empty Evidence.domain across the store (so a
+    # single DC name from BloodHound / netexec_db / NTDS dump becomes the
+    # default DOMAIN substitution). Returns '' if nothing learned.
+    def dominant_domain(self):
+        from collections import Counter
+        c = Counter(
+            (e.domain or "").strip().lower()
+            for e in self.items if e.domain
+        )
+        c.pop("", None)
+        return c.most_common(1)[0][0] if c else ""

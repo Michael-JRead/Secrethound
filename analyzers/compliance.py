@@ -37,6 +37,12 @@ ALLOWLIST_BINARIES = frozenset({
     "impacket-atexec", "impacket-dcomexec", "impacket-ticketConverter",
     "ticketConverter.py", "impacket-getTGT", "getTGT.py", "impacket-rpcdump",
     "klist", "kinit",
+    # iter-24: lowercased aliases - _primary_binaries() lowercases before
+    # lookup, so the original CamelCase entries above are dead. Keeping
+    # both for clarity and any future case-sensitive use.
+    "impacket-getuserspns", "getuserspns.py", "impacket-getnpusers",
+    "getnpusers.py", "impacket-gettgt", "gettgt.py",
+    "impacket-ticketconverter", "ticketconverter.py", "impacket-machine_role",
     # iter-23: ACL-edge / shadow-cred / RBCD chain tooling. All manual,
     # operator-driven, OSCP-legal (no spoofing, no auto-exploit).
     # NB: _primary_binaries() lowercases before lookup -> entries MUST be
@@ -76,6 +82,7 @@ ALLOWLIST_BINARIES = frozenset({
     # benign shell builtins/utils used inside multi-step hints
     "chmod", "echo", "cat", "cut", "export", "cd", "grep", "strings", "file",
     "head", "tail", "sort", "uniq", "tr", "awk", "sed", "python3", "for",
+    "tee", "wc", "rev", "tac", "xxd",
 })
 
 # may be SHOWN only with the [LAB-ONLY] tag; never a top/green action (spoofing)

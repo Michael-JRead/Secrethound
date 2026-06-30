@@ -190,7 +190,11 @@ def analyze_tree(root, report, skip_paths=None):
                 continue
             if name.lower().endswith(".json") and filters.is_secrethound_output(full):
                 continue
+            # iter-24: also match against the FULL path so patterns that
+            # require directory context (e.g. /Credentials/<hex>, AppData
+            # paths, /Cookies/... browser-store layouts) actually fire.
+            # Previously these were dead code - matched .name only.
             for rx, label, sev in INTERESTING:
-                if rx.search(name):
+                if rx.search(name) or rx.search(full):
                     report.add(sev, "INTERESTING FILES", full, None, label)
                     break

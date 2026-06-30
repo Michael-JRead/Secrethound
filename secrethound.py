@@ -309,7 +309,7 @@ def main():
         credpairs.analyze(scan_path, report)
         encoded.analyze(scan_path, report)
         keyword.analyze(scan_path, report, store)
-        patterns.analyze(scan_path, report)
+        patterns.analyze(scan_path, report, store)
         configs.analyze(scan_path, report, store)
         if run_entropy and ext in ENTROPY_EXT:
             entropy.analyze(scan_path, report, threshold=thr)
