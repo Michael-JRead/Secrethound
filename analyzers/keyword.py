@@ -186,6 +186,39 @@ _AD = [
     # plaintext password=... (.my.cnf, /etc/mysql/debian.cnf).
     ("mysql client opt", re.compile(
         r'(?im)^\s*password\s*=\s*["\']?([^"\'#\r\n]{3,80})["\']?\s*$')),
+    # iter-26: .bash_history / .zsh_history / .fish_history typed creds.
+    # Common shapes (per HTB/THM walkthroughs):
+    #   mysql -u root -pP@ss123
+    #   mysql -u root --password=P@ss123
+    #   curl -u admin:P@ss123 http://...
+    #   curl -H "Authorization: Basic <b64>" ...   (handled by encoded.py)
+    #   sshpass -p 'P@ss123' ssh user@host
+    #   ftp -u user:pass ftp://...
+    #   psql 'host=db user=postgres password=P@ss'
+    # Capture each common form once per line. Per-rule dispatch parses out
+    # the user/pw and emits CRED PAIRS.
+    ("bash history mysql -p", re.compile(
+        r'(?i)\b(?:mysql|mariadb|mysqldump)\s+[^\r\n]*?(?:-u|--user[= ])\s*'
+        r'["\']?(\S{1,40})["\']?[^\r\n]*?(?:-p|--password[= ])\s*'
+        r'["\']?([^"\'\s][^"\'\s\r\n]{1,79})["\']?')),
+    ("bash history sshpass -p", re.compile(
+        r'(?i)\bsshpass\s+-p\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?\s+'
+        r'(?:ssh|scp|rsync)\s+[^\r\n]*?(\S+@\S+)')),
+    ("bash history curl -u", re.compile(
+        r'(?i)\bcurl\s+[^\r\n]*?(?:-u|--user)\s+'
+        r'["\']?(\S{1,40}):([^"\'\s][^"\'\s\r\n]{1,79})["\']?')),
+    ("bash history wget --user", re.compile(
+        r'(?i)\bwget\s+[^\r\n]*?--user[= ]\s*["\']?(\S{1,40})["\']?\s+'
+        r'[^\r\n]*?--password[= ]\s*["\']?([^"\'\s][^"\'\s\r\n]{1,79})["\']?')),
+    # iter-26: /etc/passwd GECOS field with embedded plaintext password.
+    # Shape: user:x:UID:GID:GECOS:home:shell  - the GECOS can carry an
+    # admin's reminder like 'svc-web - default pwd: WinterIsCold2024!'.
+    # Only fire when the GECOS contains a 'pass/pwd/cred/default' marker,
+    # and reuse filters.extract_pw_from_desc() to find the actual token.
+    ("etc passwd GECOS hint", re.compile(
+        r'(?m)^([a-z_][a-z0-9_-]{0,31}):[x*!\$][^:]*:\d+:\d+:'
+        r'([^:\r\n]*(?:pass|pwd|cred|default)[^:\r\n]*):'
+        r'/[^:\r\n]*:/[^:\r\n]*$')),
     # Redis requirepass / masterauth in conf - already partially handled by KEY,
     # but here as a dedicated rule with a service-bound hint.
     ("redis requirepass", re.compile(
@@ -1921,6 +1954,105 @@ def analyze(path, report, store=None):
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", plaintext=val, source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-26: shell history typed-cred dispatchers.
+                    if name == "bash history mysql -p":
+                        u, pw = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw) or pw.startswith("$"):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history MySQL: {u}:{pw}",
+                                   hint=f"mysql -h <host> -u '{u}' -p'{pw}'")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "bash history sshpass -p":
+                        pw, target = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw) or pw.startswith("$"):
+                            continue
+                        u = target.split("@", 1)[0] if "@" in target else ""
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history sshpass: {u}:{pw} -> {target}",
+                                   hint=f"sshpass -p '{pw}' ssh {target}")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "bash history curl -u":
+                        u, pw = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw) or pw.startswith("$") or u == "user":
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history curl basic-auth: {u}:{pw}",
+                                   hint=f"curl -u '{u}:{pw}' <url>")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    if name == "bash history wget --user":
+                        u, pw = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw) or pw.startswith("$"):
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history wget: {u}:{pw}",
+                                   hint=f"wget --user='{u}' --password='{pw}' <url>")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-26: /etc/passwd GECOS field with embedded pw hint.
+                    if name == "etc passwd GECOS hint":
+                        usr_, gecos = am.group(1), am.group(2)
+                        tok = filters.extract_pw_from_desc(gecos)
+                        if not tok or filters.is_placeholder(tok) \
+                                or filters.is_code_not_literal(tok, gecos):
+                            continue
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"/etc/passwd GECOS hints cred for {usr_}: {gecos[:60]}",
+                                   hint=f"try: ssh '{usr_}@<host>'  password '{tok}'")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=usr_, plaintext=tok,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-26: ~/.my.cnf / /etc/mysql/debian.cnf [client] block.
+                    # The 'mysql client opt' regex captures `password = X`; pair
+                    # it with the nearest preceding `user = X` to bind. Falling
+                    # back to a generic record when user isn't in the same file.
+                    if name == "mysql client opt":
+                        pw = am.group(1).strip()
+                        if filters.is_placeholder(pw) or filters.is_code_not_literal(pw, line):
+                            continue
+                        # look back up to 5 lines for a user= in same section
+                        usr = "root"
+                        try:
+                            with open(path, "r", errors="ignore") as _fh:
+                                _lines = _fh.readlines()
+                            for back in range(max(0, lineno - 6), lineno - 1):
+                                um = re.match(r'\s*user\s*=\s*["\']?([^"\'#\r\n]{1,40})',
+                                              _lines[back])
+                                if um:
+                                    usr = um.group(1).strip()
+                        except OSError:
+                            pass
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"MySQL .my.cnf cred: {usr}:{pw}",
+                                   hint=f"mysql -h <host> -u '{usr}' -p'{pw}'  (or auto: mysql --defaults-extra-file=<f>)")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=usr, plaintext=pw,
+                                               source=path, line=lineno))
                         hit = True
                         break
                     if name == "sudoers NOPASSWD":
