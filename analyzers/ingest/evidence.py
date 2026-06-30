@@ -14,7 +14,8 @@ _IP = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
 @dataclass
 class Evidence:
     kind: str                       # host|service|user|cred|hash|plaintext|share|
-                                    # bh_fact|nxc_result|ldap_attr|cert_template|web
+                                    # bh_fact|nxc_result|ldap_attr|cert_template|web|
+                                    # acl_edge
     host: str = ""                  # canonicalised IP or name
     port: int = 0
     service: str = ""               # smb|winrm|mssql|ssh|mysql|ldap|kerberos|http

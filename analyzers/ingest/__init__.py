@@ -10,13 +10,17 @@ import os
 
 from analyzers.ingest.evidence import Evidence, Store
 from analyzers.ingest import (ext_secretsdump, ext_nmap, netexec_db, bloodhound,
-                              ldapdomaindump, enum4linux, webdirs, potfile)
+                              ldapdomaindump, enum4linux, webdirs, potfile,
+                              certipy)
 
 # order matters: most specific sniffers first
 # iter-15: register potfile so in-tree john.pot / hashcat.potfile / *.potfile
 # files are loaded into _POT_INDEX during the ingest pass (previously the
 # detect()/parse() pair was dead code - never reached the dispatcher).
-ADAPTERS = [ext_secretsdump, ext_nmap, netexec_db, bloodhound,
+# iter-23: certipy goes BEFORE bloodhound because certipy_find.json can sniff
+# as bloodhound JSON (both have AD-shaped top-level keys); certipy.detect()
+# requires both 'Certificate Authorities' + 'Certificate Templates'.
+ADAPTERS = [ext_secretsdump, ext_nmap, netexec_db, certipy, bloodhound,
             ldapdomaindump, enum4linux, webdirs, potfile]
 
 

@@ -333,6 +333,48 @@ def is_code_not_literal(value, line=""):
     return False
 
 
+# ── 2b. password-bearing description-attribute extraction ────────────────
+# iter-23: HTB Forest pattern is "info: Created by John for testing. Password
+# is s3rvice" - the FIRST token isn't the password; the token after a
+# 'password is' / 'pwd:' / 'cred =' marker is. Earlier code picked first-
+# viable-token which was wrong on this exact corpus.
+_PW_MARKER = re.compile(
+    r"(?i)\b(?:password|passwd|pwd|cred|credentials?|secret|token|"
+    r"login\s+is|pass(?:word)?\s+is|temp(?:orary)?\s+(?:pw|pass(?:word)?))"
+    r"\s*(?:[:=]|is\s+|->\s*|->\s*|->\s*)\s*"
+    r"['\"`]?([A-Za-z0-9!@#$%^&*+_.\-/\\,~?]{4,80})['\"`]?")
+_PW_MARKER_LOOSE = re.compile(
+    r"(?i)\b(?:password|passwd|pwd)\s+(?:is|=|:)\s+"
+    r"['\"`]?([A-Za-z0-9!@#$%^&*+_.\-/\\,~?]{4,80})['\"`]?")
+
+
+def extract_pw_from_desc(text):
+    """Pull a candidate password from a prose description / LDAP info field.
+    Returns the token, or None. Prefers tokens that follow an explicit
+    'password is X' / 'pwd: X' marker; falls back to first-non-noise
+    4-60 char token only if a hint word is present elsewhere in the text.
+    Caller is responsible for downstream placeholder / code filtering."""
+    if not text:
+        return None
+    for rx in (_PW_MARKER, _PW_MARKER_LOOSE):
+        m = rx.search(text)
+        if m:
+            tok = m.group(1).strip("'\"`,;.()[]{}<>")
+            if tok and len(tok) >= 4:
+                return tok
+    # fallback: any token after stripping common prose punctuation
+    hint = ("pass" in text.lower() or "pwd" in text.lower() or
+            "cred" in text.lower() or "default" in text.lower())
+    if not hint:
+        return None
+    for tok in text.split():
+        tok = tok.strip(":,;'\"()[]{}<>")
+        if 4 <= len(tok) <= 60 and not is_placeholder(tok) \
+                and not is_code_not_literal(tok, text):
+            return tok
+    return None
+
+
 # ── 3. sequential / repeated strings & keyboard walks ──────────────────────
 _SEQS = (
     string.ascii_uppercase * 2 + string.digits + "+/",
@@ -526,15 +568,32 @@ def decrypt_gpp(cpassword):
     # so use a minimal AES from stdlib's hashlib + a tiny CBC wrapper.
     # NOTE: Python stdlib does NOT include AES. Try cryptography lib if avail;
     # otherwise skip silently (the operator can still run `gpp-decrypt` manually).
+    # iter-23: silence pyo3 panic prints (broken cryptography install raises
+    # PanicException AND prints to stderr from Rust). Redirect fd 2 around
+    # the import attempt so the scan output stays clean.
+    import os as _os, sys as _sys, contextlib as _ctx
+    @_ctx.contextmanager
+    def _silence_stderr():
+        old_fd = _os.dup(2)
+        devnull = _os.open(_os.devnull, _os.O_WRONLY)
+        try:
+            _os.dup2(devnull, 2); _sys.stderr.flush()
+            yield
+        finally:
+            _os.dup2(old_fd, 2); _os.close(devnull); _os.close(old_fd)
     try:
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.backends import default_backend
-        key = bytes.fromhex(GPP_AES_KEY)
-        iv = b"\x00" * 16
-        c = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-        dec = c.decryptor()
-        pt = dec.update(ct) + dec.finalize()
-    except Exception:
+        with _silence_stderr():
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+            key = bytes.fromhex(GPP_AES_KEY)
+            iv = b"\x00" * 16
+            c = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+            dec = c.decryptor()
+            pt = dec.update(ct) + dec.finalize()
+    except BaseException:
+        # iter-23: pyo3_runtime.PanicException from broken rust bindings
+        # does NOT inherit from Exception. Use BaseException so a broken
+        # cryptography install never crashes the scan.
         return None
     # strip PKCS#7 padding
     if pt and pt[-1] < 16:

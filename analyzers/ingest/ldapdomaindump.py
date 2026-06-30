@@ -51,17 +51,16 @@ def parse(path, store, report):
         n += 1
         store.add(Evidence(kind="user", user=user, source=path))
         desc = (_first(a, "description") + " " + _first(a, "info")).strip()
-        if desc and any(h in desc.lower() for h in _PWD_PASSWORD_HINT):
-            # gate the candidate token(s)
-            for tok in desc.split():
-                tok = tok.strip(":,;'\"")
-                if 4 <= len(tok) <= 60 and not filters.is_placeholder(tok) \
-                        and not filters.is_code_not_literal(tok, desc):
-                    report.add("HIGH", "CRED PAIRS", path, None,
-                               f"description hints cred for {user}: {desc[:80]}",
-                               f"try: netexec smb <DC-IP> -u '{user}' -p '{tok}' -k")
-                    store.add(Evidence(kind="plaintext", user=user, plaintext=tok, source=path))
-                    break
+        if desc:
+            # iter-23: prefer 'password is X' marker over first-token-wins.
+            # Shared with bloodhound.py via filters.extract_pw_from_desc().
+            tok = filters.extract_pw_from_desc(desc)
+            if tok and not filters.is_placeholder(tok) \
+                    and not filters.is_code_not_literal(tok, desc):
+                report.add("HIGH", "CRED PAIRS", path, None,
+                           f"description hints cred for {user}: {desc[:80]}",
+                           f"try: netexec smb <DC-IP> -u '{user}' -p '{tok}' -k")
+                store.add(Evidence(kind="plaintext", user=user, plaintext=tok, source=path))
         try:
             uac = int(_first(a, "useraccountcontrol") or 0)
         except ValueError:

@@ -37,6 +37,19 @@ ALLOWLIST_BINARIES = frozenset({
     "impacket-atexec", "impacket-dcomexec", "impacket-ticketConverter",
     "ticketConverter.py", "impacket-getTGT", "getTGT.py", "impacket-rpcdump",
     "klist", "kinit",
+    # iter-23: ACL-edge / shadow-cred / RBCD chain tooling. All manual,
+    # operator-driven, OSCP-legal (no spoofing, no auto-exploit).
+    # NB: _primary_binaries() lowercases before lookup -> entries MUST be
+    # lowercase or the allowlist miss falls through to "not on allowlist".
+    "impacket-rbcd", "rbcd.py", "impacket-addcomputer", "addcomputer.py",
+    "impacket-getst", "getst.py", "impacket-net", "net.py",
+    "impacket-dacledit", "dacledit.py", "impacket-owneredit", "owneredit.py",
+    "impacket-changepasswd", "changepasswd.py", "impacket-gmsadumper",
+    "gmsadumper.py", "impacket-dpapi", "dpapi.py", "impacket-getpac",
+    "getpac.py", "impacket-finddelegation", "finddelegation.py",
+    "impacket-lookupsid", "lookupsid.py", "impacket-machine_role",
+    # samba 'net' tool for net rpc password (ForceChangePassword path)
+    "net",
     # AD enumeration / abuse (manual)
     "certipy", "certipy-ad", "gpp-decrypt", "ldapsearch", "windapsearch",
     "windapsearch.py", "bloodhound-python", "bloodhound.py", "SharpHound.exe",

