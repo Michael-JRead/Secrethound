@@ -694,10 +694,12 @@ def run(report, store, ui=None):
     # KDC_ERR_PREAUTH_REQUIRED. Exam-legal (unauthenticated Kerberos AS_REQ,
     # no relay, no spray). Score is moderate - conf 0.5 because most domains
     # have zero AS-REPRoastable users.
+    # iter-145: dropped the `-= e.asreproastable` set-diff. The outer gate
+    # `not e.asreproastable` already means the set is empty in the only
+    # branch that emits, so the diff was dead code.
     _users_for_asrep = {u for u in e.users
                         if u and not u.endswith("$") and "_history" not in u.lower()
                         and u.lower() not in ("krbtgt", "guest")}
-    _users_for_asrep -= {u.lower() for u in e.asreproastable}   # dedup with R11 loop
     if _users_for_asrep and not e.asreproastable:
         chains.append(Chain("R11-BLIND", "AS-REP roast (all users)",
             f"try AS-REP against every discovered user ({len(_users_for_asrep)})",
