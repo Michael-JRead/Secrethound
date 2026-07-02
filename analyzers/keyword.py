@@ -368,6 +368,16 @@ _AD = [
         r"['\"]([A-Z][A-Z0-9_]{2,50}(?:PASSWORD|PASS|PW|PWD|"
         r"SECRET|TOKEN|KEY|CRED))['\"]\s*,\s*"
         r"['\"]([^'\"\r\n]{3,200})['\"]")),
+    # iter-57: Kubernetes ServiceAccount JWT. K8s SA tokens have the
+    # '/serviceaccount' string in the payload's iss + claim keys, whose
+    # base64url encoding always contains 'L3NlcnZpY2VhY2NvdW50' regardless
+    # of byte alignment (verified empirically). Distinct from generic
+    # JWTs because K8s SAs grant API access to cluster secrets on the
+    # pod's behalf.
+    ("k8s serviceaccount token", re.compile(
+        r'(eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]*'
+        r'L3NlcnZpY2VhY2NvdW50'
+        r'[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{20,})')),
     # iter-28: PostgreSQL .pgpass row where credline may have already
     # caught it, but a keyword pass emits it into ASSIGNED SECRETS too
     # so the operator sees the host + db context inline.
@@ -2765,6 +2775,16 @@ def analyze(path, report, store=None):
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", plaintext=pw,
                                                source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-57: K8s ServiceAccount JWT
+                    if name == "k8s serviceaccount token":
+                        tok = am.group(1)
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"K8s SA token: {tok[:60]}...",
+                                   hint=("kubectl --token='<tok>' --server "
+                                         "https://<apiserver>:6443 "
+                                         "--insecure-skip-tls-verify get pods -A"))
                         hit = True
                         break
                     # iter-33: PowerShell $env:VARNAME = 'X' + Set-Item env:
