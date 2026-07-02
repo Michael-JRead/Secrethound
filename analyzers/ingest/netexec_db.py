@@ -80,13 +80,15 @@ def parse(path, store, report):
             if not user or not secret or filters.is_placeholder(secret):
                 continue
             n += 1
+            # iter-156: shell-escape user for parity with secret escape (iter-140).
+            _user_sh = user.replace("'", "'\\''")
             if "hash" in ctype or (len(secret) == 32 and all(c in "0123456789abcdef" for c in secret.lower())):
                 store.add(Evidence(kind="hash", user=user, domain=dom, hash=secret.lower(),
                                    hash_mode="1000", source=path, meta={"validated": True}))
                 patterns.HASHES.append(("1000", "NTLM", secret.lower(), path, None))
                 report.add("HIGH", "CRED PAIRS", path, None,
                            f"[netexec-validated] {dom}\\{user} NT={secret[:12]}…",
-                           f"PtH: netexec smb <host> -u '{user}' -H {secret}")
+                           f"PtH: netexec smb <host> -u '{_user_sh}' -H {secret}")
             else:
                 store.add(Evidence(kind="plaintext", user=user, domain=dom,
                                    plaintext=secret, cred=secret, source=path,
@@ -95,18 +97,56 @@ def parse(path, store, report):
                 _secret_sh = secret.replace("'", "'\\''")
                 report.add("CRITICAL", "CRED PAIRS", path, None,
                            f"[netexec-validated] {dom}\\{user}:{secret}",
-                           f"reuse: netexec smb <host> -u '{user}' -p '{_secret_sh}' --continue-on-success")
-    # admin relations -> pwned hosts
+                           f"reuse: netexec smb <host> -u '{_user_sh}' -p '{_secret_sh}' --continue-on-success")
+    # admin relations -> pwned hosts. iter-156: instead of a bare "check
+    # (Pwn3d!) hosts" note, join admin_relations with users + hosts and
+    # emit one CRITICAL finding per (user, host) pair. That's Pwn3d!
+    # confirmed by netexec: the operator has SMB LOCAL ADMIN on that
+    # target using that cred - a direct R7 / R-ADMIN-CRED signal.
     for t in tables:
         if "admin" not in t.lower():
             continue
-        try:
-            cur.execute(f'SELECT * FROM "{t}"')
-            if cur.fetchone():
+        _rcols = _cols(cur, t)
+        # Schema is admin_relations(id, userid, hostid) on modern NXC;
+        # older CME used the same shape. Bail if the join columns aren't
+        # present - we don't want to blindly emit a generic note if the
+        # table shape is unrecognised.
+        if not ({"userid", "hostid"} <= set(_rcols)):
+            try:
+                cur.execute(f'SELECT COUNT(*) FROM "{t}"')
+                _cnt = cur.fetchone()[0] or 0
+            except sqlite3.Error:
+                _cnt = 0
+            if _cnt:
                 report.add("HIGH", "RECON", path, None,
-                           f"netexec recorded admin access (table {t}) - check (Pwn3d!) hosts")
+                           f"netexec recorded admin access (table {t}, "
+                           f"{_cnt} rows) - schema unknown, check (Pwn3d!) hosts manually")
+            continue
+        try:
+            cur.execute(
+                f'SELECT u.username, u.domain, h.ip, h.hostname '
+                f'FROM "{t}" ar '
+                f'LEFT JOIN users u ON u.id = ar.userid '
+                f'LEFT JOIN hosts h ON h.id = ar.hostid')
+            rels = cur.fetchall()
         except sqlite3.Error:
-            pass
+            rels = []
+        _seen_pair = set()
+        for _u, _ud, _hip, _hname in rels:
+            _u = (_u or "").strip()
+            _hip = (_hip or "").strip()
+            _hname = (_hname or "").strip()
+            _tgt = _hip or _hname or "?"
+            _key = (_u.lower(), _tgt.lower())
+            if _key in _seen_pair:
+                continue
+            _seen_pair.add(_key)
+            _u_sh = _u.replace("'", "'\\''")
+            _dom_disp = f"{_ud}\\" if _ud else ""
+            report.add("CRITICAL", "CRED PAIRS", path, None,
+                       f"[netexec Pwn3d!] {_dom_disp}{_u} is LOCAL ADMIN on {_tgt}",
+                       f"secretsdump: impacket-secretsdump -u '{_u_sh}' "
+                       f"-p '<pw>' '{_tgt}'   # or PtH/-hashes; also try nxc smb {_tgt} --sam")
     con.close()
     if n:
         report.add("INFO", "RECON", path, None, f"netexec DB parsed: {n} stored creds")
