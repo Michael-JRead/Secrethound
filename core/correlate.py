@@ -349,7 +349,14 @@ def run(report, store, ui=None):
             disp, src, ln = best
             mach = _machine(src, root)
             smb = svc_on(mach, "smb") or dc_for(mach)
-            utoken = ul or f"'{disp}'"
+            # iter-157: shell-escape disp before splicing into utoken. When
+            # ul returns None (single-user corpus) we fall through to the
+            # inline '{disp}' form; a user like O'Brien would otherwise
+            # collapse the -u arg into 'O' + Brien + '' at bash lex time.
+            # _disp_sh below (line 375+) covers other splices - hoist the
+            # escape here so utoken can use it too.
+            _disp_sh = _sh_sq(disp)
+            utoken = ul or f"'{_disp_sh}'"
             # iter-16: spray safety gating
             #   - lockout-threshold guardrail when known
             #   - -k flag only when user-cred carries kerberos context (FQDN
@@ -372,7 +379,7 @@ def run(report, store, ui=None):
             # literal.
             # iter-128: escape ' inside pw / disp so a paste survives bash
             # lexing (GPP / notes creds routinely carry apostrophes).
-            _disp_sh = _sh_sq(disp)
+            # iter-157: _disp_sh is now hoisted above (utoken uses it too).
             _r1_uri = f"'{_disp_sh}:{_pw_sh}@{smb}'"
             if _r1_tgt_dc:
                 _r1_dump = f"impacket-secretsdump {_r1_uri} -just-dc"
