@@ -1262,6 +1262,21 @@ _HTPASSWD_LINE = re.compile(
     r'\$\d\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{22,})\s*$'
 )
 
+# iter-198: Windows systeminfo output - `OS Name:` + `OS Version:` header.
+# Multi-line: OS Name row + a few info rows + OS Version row.
+_WINDOWS_SYSTEMINFO = re.compile(
+    r'(?im)^\s*OS Name\s*:\s*(Microsoft[^\r\n]{5,80})\s*\r?\n'
+    r'(?:[^\r\n]*\r?\n){0,4}'
+    r'^\s*OS Version\s*:\s*(\d+\.\d+\.\d+)([^\r\n]{0,80})'
+)
+
+# iter-198: Sudo version banner (`sudo --version` / `sudo -V` output).
+# Vulnerable to CVE-2021-3156 (Baron Samedit): 1.8.2 through 1.9.5p1
+# inclusive - a decade of sudo builds. Also 1.9.5p2 fixed it.
+_SUDO_VERSION = re.compile(
+    r'(?im)^\s*Sudo\s+version\s+(\d+)\.(\d+)\.(\d+)(?:p(\d+))?\b'
+)
+
 # iter-197: Linux kernel version extraction. Covers:
 #   `Linux <host> 5.4.0-42-generic #46-Ubuntu SMP ...`  (uname -a)
 #   `Linux version 5.4.0-42-generic (gcc ...) #46 SMP ...`  (/proc/version)
@@ -1708,6 +1723,67 @@ def _multiline_passes(path, report, store):
             if store is not None:
                 store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                    source=path, line=_ln(m)))
+
+    # iter-198: Sudo version detection + Baron Samedit range flag. Runs
+    # BEFORE the kernel block because both blocks are cheap and independent.
+    if not filters.is_doc_file(path):
+        for m in _SUDO_VERSION.finditer(text):
+            try:
+                maj = int(m.group(1))
+                minn = int(m.group(2))
+                patch = int(m.group(3))
+                pnum = int(m.group(4)) if m.group(4) else 0
+            except (TypeError, ValueError):
+                continue
+            vsz = (f"{maj}.{minn}.{patch}"
+                   + (f"p{pnum}" if m.group(4) else ""))
+            # sudo 1.8.2 .. 1.9.5p1 inclusive
+            _key = (maj, minn, patch, pnum)
+            # Vulnerable if (1,8,2,0) <= v <= (1,9,5,1)
+            _vuln = ((1, 8, 2, 0) <= _key <= (1, 9, 5, 1))
+            report.add("INFO", "RECON", path, _ln(m),
+                       f"sudo version: {vsz}",
+                       hint=(f"sudo -V; sudo -l  |  cross-ref CVE-YYYY on "
+                             f"searchsploit"))
+            if _vuln:
+                report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                           f"sudo {vsz} vulnerable to CVE-2021-3156 "
+                           f"(Baron Samedit)",
+                           hint=("PoC: gcc -o baron $(searchsploit -m 49521 "
+                                 "-r).c; ./baron - triggers heap overflow "
+                                 "via sudoedit -s '\\' -> root shell. "
+                                 "Works on default sudo install; no NOPASSWD "
+                                 "needed. May need per-distro offsets."))
+            break  # only need first match (dedup)
+
+    # iter-198: Windows systeminfo output - OS Name + OS Version rows.
+    if not filters.is_doc_file(path):
+        for m in _WINDOWS_SYSTEMINFO.finditer(text):
+            os_name = m.group(1).strip()
+            os_ver = m.group(2).strip()
+            os_extra = (m.group(3) or "").strip()
+            report.add("INFO", "RECON", path, _ln(m),
+                       f"Windows: {os_name}  ({os_ver}{' ' + os_extra if os_extra else ''})",
+                       hint=("cross-ref build/KB against MSRC / "
+                             "searchsploit windows <build> for priv-esc "
+                             "PoCs; check 'systeminfo | findstr KB' for "
+                             "installed patches"))
+            # Legacy OS heuristic: 6.0/6.1 = Vista/7/2008, 6.2/6.3 = 8/2012
+            try:
+                vparts = os_ver.split(".")
+                osmaj = int(vparts[0]) if vparts else 0
+                osmin = int(vparts[1]) if len(vparts) > 1 else 0
+            except ValueError:
+                osmaj, osmin = 0, 0
+            if (osmaj, osmin) < (6, 2):
+                report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                           f"Windows {os_ver} is Vista / 7 / Server 2008 - "
+                           f"very likely EoS with many public CVEs",
+                           hint=("EternalBlue MS17-010, EternalRomance MS17-010, "
+                                 "SMB1 forced (nxc smb --shares), MS16-135 "
+                                 "(win32k), MS16-032 (secondary logon) - all "
+                                 "searchsploit-able"))
+            break  # only need first systeminfo header per file
 
     # iter-197: Linux kernel version detection + vulnerable-CVE range flag.
     # File-gated to uname / /proc/version / hostnamectl / /etc/issue -shaped
