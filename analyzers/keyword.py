@@ -1157,6 +1157,12 @@ def _multiline_passes(path, report, store):
     # pair Title[N]/CVE[N] with VulnStatus[N+1], falsely marking block N as
     # "Appears Vulnerable".
     _WESNG_BLEED = re.compile(r'(?im)^\s*Title\s*:')
+    # iter-171: same cross-block failure mode in PowerShell transcript
+    # blocks (2+ transcripts logged sequentially) and PrivescCheck JSON
+    # (vuln objects with no CVE field). Anchors are the block-starting
+    # marker in each case.
+    _PS_TRANSCRIPT_BLEED = re.compile(r'Windows PowerShell transcript start')
+    _PE_VULN_BLEED = re.compile(r'"(?:VulnerabilityName|Vulnerability)"\s*:')
 
     # SCCM NAA
     for m in _SCCM_NAA_MULTI.finditer(text):
@@ -1459,7 +1465,12 @@ def _multiline_passes(path, report, store):
                              "== decoded[4:]"))
 
     # PowerShell transcript header - flag the file for deeper inspection
+    # iter-171: bleed guard - transcript block missing its Machine line
+    # would grab the next transcript's Machine, falsely attributing the
+    # user to that host.
     for m in _PS_TRANSCRIPT.finditer(text):
+        if not _no_bleed(m, 1, 2, _PS_TRANSCRIPT_BLEED):
+            continue
         u, machine = m.group(1).strip(), m.group(2).strip()
         report.add("HIGH", "INTERESTING FILES", path, _ln(m),
                    f"PowerShell transcript: {u} on {machine}",
@@ -1553,6 +1564,11 @@ def _multiline_passes(path, report, store):
                    hint=("verify on host: systeminfo | findstr KB ; "
                          f"local public PoC search by CVE id (manual on Kali): searchsploit {cve}"))
     for m in _PE_JSON_VULN.finditer(text):
+        # iter-171: bleed guard - PrivescCheck vuln object missing its CVE
+        # field would grab the next object's CVE, misattributing a KB to
+        # the wrong CVE.
+        if not _no_bleed(m, 1, 2, _PE_VULN_BLEED):
+            continue
         kb, cve = m.group(1).strip(), m.group(2).strip()
         key = (kb, cve)
         if key in vuln_seen:
