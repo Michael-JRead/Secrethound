@@ -200,7 +200,15 @@ def classify(line):
         nt = m.group(5).lower()
         if filters.is_blank_hash(nt):
             return None
-        return Cred("pwdump", user=m.group(2), nt_hash=nt, domain=m.group(1) or "")
+        # iter-123: impacket-secretsdump -history emits pwdump rows for
+        # previous passwords with usernames like 'svc_backup_history0' /
+        # 'svc_backup_history1'. Strip the suffix so the hash binds to
+        # the actual account (svc_backup) - operator can PtH with this
+        # against the real user; a matching entry in DPAPI blobs or
+        # cached service creds might still accept the old hash.
+        _user = m.group(2)
+        _user_stripped = re.sub(r'_history\d+$', '', _user, flags=re.IGNORECASE)
+        return Cred("pwdump", user=_user_stripped, nt_hash=nt, domain=m.group(1) or "")
 
     # ---- templates / brute bodies / code reject ----
     if _TEMPLATE.search(s) or _BRUTE_BODY.search(s) or _CODE.search(s):
@@ -254,4 +262,6 @@ def is_pwdump_row(line):
     nt = m.group(5).lower()
     if filters.is_blank_hash(nt):
         return None
-    return (m.group(2), nt, m.group(1) or "")     # (user, nt_hash, domain)
+    # iter-123: strip -history suffix (see classify() pwdump branch).
+    _user = re.sub(r'_history\d+$', '', m.group(2), flags=re.IGNORECASE)
+    return (_user, nt, m.group(1) or "")     # (user, nt_hash, domain)
