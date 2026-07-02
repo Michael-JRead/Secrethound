@@ -141,6 +141,22 @@ def parse(path, store, report):
     # CAs - learn host + emit RECON
     cas = doc.get("Certificate Authorities") or doc.get("certificate_authorities") or {}
     ca_names = []
+    # iter-69: derive real domain from the CA DNS name so the ESC hint
+    # emits 'user@htb.local' instead of 'user@<dom>'. Certipy JSON's DNS
+    # Name is FQDN 'ca01.htb.local' - everything past the first dot is
+    # the domain. Fallback to store.dominant_domain() (may be empty at
+    # ingest time since certipy runs before bloodhound) then '<dom>'.
+    _dom = ""
+    if isinstance(cas, dict):
+        for ca_entry in cas.values():
+            if not isinstance(ca_entry, dict):
+                continue
+            dns = (ca_entry.get("DNS Name") or ca_entry.get("dns_name") or "").strip()
+            if "." in dns:
+                _dom = dns.split(".", 1)[1].lower()
+                break
+    if not _dom:
+        _dom = store.dominant_domain() or "<dom>"
     if isinstance(cas, dict):
         for ca_key, ca_entry in cas.items():
             if not isinstance(ca_entry, dict):
@@ -154,11 +170,11 @@ def parse(path, store, report):
                                source=path, meta={"ca": ca_name}))
             report.add("INFO", "RECON", path, None,
                        f"ADCS CA: {ca_name} ({dns})",
-                       "certipy-ad find -u <u>@<dom> -p '<p>' -dc-ip <DC> -vulnerable")
+                       f"certipy-ad find -u <u>@{_dom} -p '<p>' -dc-ip <DC> -vulnerable")
             # surface CA-wide ESCs (ESC6, ESC8, ESC11) reported per-CA
             for esc in _esc_tags(ca_entry):
                 desc, hint_t = _ESC_HINTS.get(esc, ("ADCS CA vulnerability", ""))
-                hint = hint_t.format(user="<u>", pw="<p>", dom="<dom>",
+                hint = hint_t.format(user="<u>", pw="<p>", dom=_dom,
                                      ca=ca_name, template="<template>")
                 lab_only = esc in ("ESC8", "ESC11")
                 sev = "HIGH" if lab_only else "CRITICAL"
@@ -191,7 +207,7 @@ def parse(path, store, report):
                                      "enroll": principals}))
             for esc in escs:
                 desc, hint_t = _ESC_HINTS.get(esc, ("ADCS template vulnerability", ""))
-                hint = hint_t.format(user="<u>", pw="<p>", dom="<dom>",
+                hint = hint_t.format(user="<u>", pw="<p>", dom=_dom,
                                      ca=ca_tag, template=name)
                 lab_only = esc in ("ESC8", "ESC11")
                 sev = "HIGH" if lab_only else "CRITICAL"

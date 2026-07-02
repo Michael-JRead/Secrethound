@@ -685,7 +685,8 @@ def run(report, store, ui=None):
                 f"{ulc} has AllowedToDelegateTo: {_spn_summary}",
                 crit=8, conf=0.9, ready=1.4, prox=0.95,           # score 9.58
                 commands=[
-                    f"# {ulc} is trusted to delegate to {len(spns)} SPN(s)",
+                    f"# {ulc} is trusted to delegate to {len(spns)} "
+                    f"SPN{'s' if len(spns) != 1 else ''}",
                     # iter-60: -dc-ip anchors KDC discovery on lab boxes
                     # without functional DNS resolution.
                     f"impacket-getST -spn '{first_spn}' -impersonate administrator "
