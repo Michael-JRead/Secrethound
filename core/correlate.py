@@ -81,13 +81,25 @@ def _add_cred(e, user, pw, src, line):
     pw = (pw or "").strip().strip("'\"")
     if not pw or len(pw) < 3:
         return
+    # iter-136: strip @domain from user - credpairs captured from notes /
+    # netexec_db paste-ins routinely carry UPN form ('bob@htb.local'). If
+    # we keep it, chains that build impacket URIs of shape
+    # 'dom/user:pw@target' emit 'dom/user@dom:pw@target' - impacket sees
+    # the LAST '@' and mistakes the domain suffix for the target. Store
+    # the sam-only user in e.creds; display uses the full form via disp.
+    _user_key = (user or "").lower()
+    if "@" in _user_key:
+        _user_key = _user_key.split("@", 1)[0]
+    _user_disp = user or "<user>"
+    if "@" in _user_disp:
+        _user_disp = _user_disp.split("@", 1)[0]
     # iter-14: append (don't overwrite) so multiple sources for the same
     # cred accumulate evidence. The R1 spray chain only needs ONE
     # (src,line) anchor, but losing the others poisons attribution.
-    key = ((user or "").lower(), pw)
-    e.creds.setdefault(key, []).append((user or "<user>", src, line))
+    key = (_user_key, pw)
+    e.creds.setdefault(key, []).append((_user_disp, src, line))
     if user:
-        e.users.add(user)
+        e.users.add(_user_disp if _user_disp != "<user>" else user)
 
 
 def _add_default(e, label, src, line=None):
