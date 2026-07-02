@@ -1210,6 +1210,48 @@ _JBOSS_MGMT_USER = re.compile(
     r'(?m)^([a-zA-Z][a-zA-Z0-9._$-]{1,40})=([a-fA-F0-9]{32})\s*$'
 )
 
+# iter-190: .htpasswd - Apache basic-auth user:hash file. Hash flavors:
+#   $apr1$salt$md5(md5crypt)     -> hashcat -m 1600
+#   $2[aby]$rounds$saltandhash   -> bcrypt, -m 3200
+#   {SHA}base64                  -> SHA-1, -m 100
+#   {SSHA}base64                 -> salted SHA-1, -m 111
+#   $y$/$5$/$6$                  -> yescrypt/sha256crypt/sha512crypt
+# Bare plaintext form (some cheatsheets) is `user:cleartext` - we do NOT
+# match that here because it would drown legit configs; that shape's
+# already caught by the credline classifier when it appears in a real
+# .htpasswd file (filename gate at dispatch).
+_HTPASSWD_LINE = re.compile(
+    r'(?m)^([A-Za-z_][A-Za-z0-9._-]{1,64}):'
+    r'(\$apr1\$[./A-Za-z0-9]{1,8}\$[./A-Za-z0-9]{22}|'
+    r'\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}|'
+    r'\{SHA\}[A-Za-z0-9+/=]{28}|'
+    r'\{SSHA\}[A-Za-z0-9+/=]{32,}|'
+    r'\$[y56]\$[^\s:]{20,}|'
+    r'\$\d\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{22,})\s*$'
+)
+
+# iter-190: AWS credentials INI block. Standard file ~/.aws/credentials or
+# ~/.aws/config; also fires in `[default]` / `[profile <name>]` embedded
+# in .env dumps, gitleaks findings, etc. Multi-line - the profile header,
+# key ID and secret key can be spread across 3 lines with blank lines and
+# comments between them.
+#   [staging]
+#   aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+#   aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+#   aws_session_token = FQoGZXIvYXdzEJ...      (optional)
+# Groups: 1 = profile, 2 = access key ID, 3 = secret key. The middle-span
+# lookahead `(?:(?!\n\s*\[)[\s\S])` prevents bleed across profiles - a
+# fresh `[header]` between the profile row and the secret means we walked
+# past a sibling profile (whose secret is malformed) and are pairing this
+# profile's header with the NEXT profile's secret.
+_AWS_CREDS_INI = re.compile(
+    r'(?im)^\s*\[(?:profile\s+)?([\w.-]{1,60})\]\s*\r?\n'
+    r'(?:(?!\n\s*\[)[\s\S]){0,400}?'
+    r'^\s*aws_access_key_id\s*[:=]\s*(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16})\s*\r?\n'
+    r'(?:(?!\n\s*\[)[\s\S]){0,400}?'
+    r'^\s*aws_secret_access_key\s*[:=]\s*([A-Za-z0-9/+=]{40})\s*(?:\r?\n|$)'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -1504,6 +1546,81 @@ def _multiline_passes(path, report, store):
             if store is not None:
                 store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                    source=path, line=_ln(m)))
+
+    # iter-190: .htpasswd file. Filename-gated to .htpasswd / .htdigest and
+    # any file named like it (backups: .htpasswd.bak, htpasswd.old). Very
+    # common on Apache/nginx-hosted lab web boxes with basic-auth realms.
+    _base_lc_htp = os.path.basename(path).lower()
+    _htp_gate = (_base_lc_htp.startswith(".htpasswd")
+                 or _base_lc_htp.startswith("htpasswd")
+                 or _base_lc_htp.startswith(".htdigest")
+                 or _base_lc_htp.endswith((".htpasswd", ".htdigest")))
+    if _htp_gate and not filters.is_doc_file(path):
+        # hash-type → hashcat mode + label
+        for m in _HTPASSWD_LINE.finditer(text):
+            u, h = m.group(1), m.group(2)
+            if _is_cli_placeholder(u) or filters.is_canonical_sample(h):
+                continue
+            if h.startswith("$apr1$"):
+                mode, algo = "1600", "apr1 (htpasswd)"
+            elif h.startswith(("$2a$", "$2b$", "$2y$")):
+                mode, algo = "3200", "bcrypt"
+            elif h.startswith("{SHA}"):
+                mode, algo = "100", "SHA-1"
+            elif h.startswith("{SSHA}"):
+                mode, algo = "111", "salted-SHA-1 (SSHA)"
+            elif h.startswith("$5$"):
+                mode, algo = "7400", "sha256crypt"
+            elif h.startswith("$6$"):
+                mode, algo = "1800", "sha512crypt"
+            elif h.startswith("$y$"):
+                mode, algo = "yescrypt", "yescrypt"
+            else:
+                mode, algo = "", "unknown"
+            report.add("CRITICAL", "PASSWORD HASHES", path, _ln(m),
+                       f".htpasswd {algo} user '{u}': {h[:60]}"
+                       f"{'...' if len(h) > 60 else ''}",
+                       hint=(f"hashcat -m {mode} <hash.txt> rockyou.txt  |  "
+                             f"basic-auth realm: curl -u '{u}:<pw>' <url>"
+                             if mode else
+                             f"identify hash format then crack; format "
+                             f"unclear from prefix"))
+            HASHES.append((mode, algo, h, path, _ln(m)))
+
+    # iter-190: AWS credentials INI block. Filename gate: ~/.aws/credentials
+    # or ~/.aws/config, OR file contains multiple `[profile]` headers AND
+    # `aws_access_key_id` markers. The block dispatcher captures profile +
+    # key ID + secret so downstream can reuse both halves.
+    _aws_gate = (_base_lc_htp in ("credentials", "config") and "/.aws/" in _plow_cf.replace("\\", "/")
+                 or _plow_cf.endswith((".aws/credentials", ".aws/config"))
+                 or ("aws_access_key_id" in text[:8000] and "aws_secret_access_key" in text[:8000]))
+    _aws_seen = set()
+    if _aws_gate and not filters.is_doc_file(path):
+        for m in _AWS_CREDS_INI.finditer(text):
+            profile, akid, secret = m.group(1), m.group(2), m.group(3)
+            key = (profile, akid)
+            if key in _aws_seen:
+                continue
+            _aws_seen.add(key)
+            if _is_cli_placeholder(profile) or filters.is_canonical_sample(secret):
+                continue
+            _tmp = akid.startswith("ASIA")
+            report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
+                       f"AWS creds [{profile}]: {akid} / secret {secret[:20]}"
+                       f"{'...' if len(secret) > 20 else ''}"
+                       + ("  (STS temporary)" if _tmp else ""),
+                       hint=(f"aws configure set aws_access_key_id "
+                             f"{akid} --profile {profile}; "
+                             f"aws configure set aws_secret_access_key "
+                             f"'{secret}' --profile {profile}; "
+                             f"aws sts get-caller-identity --profile "
+                             f"{profile}"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", plaintext=secret,
+                                   source=path, line=_ln(m),
+                                   meta={"aws_profile": profile,
+                                         "aws_access_key_id": akid,
+                                         "temporary": _tmp}))
 
     # iter-188: JBoss/WildFly mgmt-users.properties + application-users.properties.
     # Very common on Java-heavy lab boxes. The file lives in
