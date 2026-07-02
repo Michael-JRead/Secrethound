@@ -1262,6 +1262,41 @@ _HTPASSWD_LINE = re.compile(
     r'\$\d\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{22,})\s*$'
 )
 
+# iter-196: pfSense / OPNsense config.xml <user> blocks. The router config
+# contains admin creds as bcrypt hashes:
+#   <user>
+#     <name>admin</name>
+#     <descr><![CDATA[System Administrator]]></descr>
+#     <scope>system</scope>
+#     <bcrypt-hash>$2y$10$AbCd...</bcrypt-hash>
+#     <password>$2y$10$AbCd...</password>
+#     <uid>0</uid>
+#   </user>
+# We capture <name> + <bcrypt-hash> (or <password>) and feed the hash to
+# HASHES with hashcat mode 3200 (bcrypt). Bleed-guarded so multiple <user>
+# blocks don't cross-pair.
+_PFSENSE_USER = re.compile(
+    r'(?i)<user>\s*(?:<[^>]+>[^<]*</[^>]+>\s*)*?'
+    r'<name>([^<>\r\n]{1,40})</name>'
+    r'(?:(?!<user>)[\s\S]){0,600}?'
+    r'<(?:bcrypt-hash|password)>(\$2[aby]\$\d\d\$[./A-Za-z0-9]{53})'
+    r'</(?:bcrypt-hash|password)>'
+)
+
+# iter-196: .pypirc INI file - PyPI/TestPyPI upload credentials. Modern
+# Twine uploads use API tokens (username=__token__, password=pypi-<token>).
+# Multi-line: [section] header + username/password lines.
+#   [pypi]
+#   username = __token__
+#   password = pypi-AgENdGVzdC5weXBpLm9yZ...
+_PYPIRC_BLOCK = re.compile(
+    r'(?im)^\s*\[(pypi|testpypi|[a-zA-Z0-9._-]{1,40})\]\s*\r?\n'
+    r'(?:(?!\n\s*\[)[\s\S]){0,300}?'
+    r'^\s*username\s*[:=]\s*([^\s#\r\n]{1,60})\s*\r?\n'
+    r'(?:(?!\n\s*\[)[\s\S]){0,300}?'
+    r'^\s*password\s*[:=]\s*([^\s#\r\n]{3,200})\s*(?:\r?\n|$)'
+)
+
 # iter-195: iSCSI initiator config (/etc/iscsi/iscsid.conf) and per-node
 # config files under /etc/iscsi/nodes/. Format is INI-like:
 #   node.session.auth.authmethod = CHAP
@@ -1734,6 +1769,62 @@ def _multiline_passes(path, report, store):
                                    meta={"aws_profile": profile,
                                          "aws_access_key_id": akid,
                                          "temporary": _tmp}))
+
+    # iter-196: pfSense / OPNsense config.xml admin user blocks. File-gated
+    # to XML paths OR text containing '<pfsense>' / '<opnsense>' root marker.
+    _plow_pf = path.lower().replace("\\", "/")
+    _pfsense_gate = (_plow_pf.endswith((".xml", ".conf"))
+                     and ("<pfsense>" in text[:2000]
+                          or "<opnsense>" in text[:2000]
+                          or "config.xml" in _plow_pf
+                          or "pfsense" in _plow_pf or "opnsense" in _plow_pf))
+    if _pfsense_gate and not filters.is_doc_file(path):
+        _pf_seen = set()
+        for m in _PFSENSE_USER.finditer(text):
+            u, h = m.group(1).strip(), m.group(2)
+            key = (u, h)
+            if key in _pf_seen:
+                continue
+            _pf_seen.add(key)
+            if _is_cli_placeholder(u) or filters.is_canonical_sample(h):
+                continue
+            _u_sh_pf = u.replace("'", "'\\''")
+            report.add("CRITICAL", "PASSWORD HASHES", path, _ln(m),
+                       f"pfSense admin user '{u}' bcrypt: {h[:40]}"
+                       f"{'...' if len(h) > 40 else ''}",
+                       hint=(f"hashcat -m 3200 <hash.txt> rockyou.txt  |  "
+                             f"pfSense WebGUI login: "
+                             f"https://<fw>/index.php  as '{_u_sh_pf}'"))
+            HASHES.append(("3200", "bcrypt (pfSense)", h, path, _ln(m)))
+
+    # iter-196: .pypirc INI file - PyPI upload credentials. Filename-gated to
+    # .pypirc / pypirc / pypi.ini or paths under .config/pip/.
+    _pypirc_gate = (os.path.basename(_plow_pf) in (".pypirc", "pypirc", "pypi.ini")
+                    or "/.pypirc" in _plow_pf
+                    or _plow_pf.endswith(".pypirc"))
+    if _pypirc_gate and not filters.is_doc_file(path):
+        _pyp_seen = set()
+        for m in _PYPIRC_BLOCK.finditer(text):
+            section, u, pw = m.group(1), m.group(2).strip(), m.group(3).strip()
+            if (section, u) in _pyp_seen:
+                continue
+            _pyp_seen.add((section, u))
+            if filters.is_placeholder(pw):
+                continue
+            _u_sh_py = u.replace("'", "'\\''")
+            _pw_sh_py = pw.replace("'", "'\\''")
+            _is_token = (u == "__token__" or pw.startswith(("pypi-", "testpypi-")))
+            _label = "PyPI API token" if _is_token else "PyPI cred"
+            report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
+                       f".pypirc [{section}] {_label}: {u}:{pw[:40]}"
+                       f"{'...' if len(pw) > 40 else ''}",
+                       hint=(f"twine upload -u '{_u_sh_py}' -p '{_pw_sh_py}' "
+                             f"dist/*  |  or pip install --index-url "
+                             f"https://{_u_sh_py}:{_pw_sh_py}@pypi.org/simple/ "
+                             f"<pkg>  (private index authenticated pull)"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
+                                   source=path, line=_ln(m)))
 
     # iter-195: iSCSI iscsid.conf and per-node config. File-gated to
     # /etc/iscsi/ paths OR filenames containing 'iscsid'/'iscsi'.
