@@ -439,6 +439,37 @@ _AD = [
     # impersonate. Intel-only.
     ("token impersonation", re.compile(
         r'(?i)SeImpersonatePrivilege|SeAssignPrimaryToken|JuicyPotato\.exe|PrintSpoofer\.exe|GodPotato\.exe|RoguePotato\.exe')),
+    # iter-163: SeBackupPrivilege - Backup Operators / hive-save primitive.
+    # Direct DA path when captured on a DC (reg save HKLM\SAM / SYSTEM /
+    # SECURITY on a domain-joined host = local hashes; on the DC itself =
+    # NTDS.dit backup which yields DCSync via impacket-secretsdump LOCAL).
+    # Wildly under-detected in OSCP+ walkthroughs where the operator gets
+    # a Backup Operators shell and doesn't realise it's game over.
+    ("SeBackupPrivilege", re.compile(r'(?i)\bSeBackupPrivilege\b')),
+    # iter-163: SeRestorePrivilege - counterpart of Backup, allows arbitrary
+    # DACL rewrite + service registry write. Chain: modify HKLM\SYSTEM\
+    # CurrentControlSet\Services\* to swap ImagePath -> SYSTEM shell.
+    ("SeRestorePrivilege", re.compile(r'(?i)\bSeRestorePrivilege\b')),
+    # iter-163: SeTakeOwnershipPrivilege - grant self ownership of any
+    # SD-protected object then WriteDacl. Chain: takeown /F -> icacls /grant.
+    ("SeTakeOwnershipPrivilege", re.compile(r'(?i)\bSeTakeOwnershipPrivilege\b')),
+    # iter-163: SeLoadDriverPrivilege - load unsigned kernel driver (Capcom /
+    # dbutil / vulnerable-driver EoP path).
+    ("SeLoadDriverPrivilege", re.compile(r'(?i)\bSeLoadDriverPrivilege\b')),
+    # iter-163: SeManageVolumePrivilege - file-system permissions bypass.
+    # Chain: SeManageVolume exploit -> arbitrary DACL flip -> SYSTEM.
+    ("SeManageVolumePrivilege", re.compile(r'(?i)\bSeManageVolumePrivilege\b')),
+    # iter-163: SeDebugPrivilege - dump lsass memory (mimikatz sekurlsa /
+    # comsvcs.dll MiniDump). Standard admin priv but noise on desktops;
+    # relevance is when it appears on a *non-admin* service account.
+    ("SeDebugPrivilege", re.compile(r'(?i)\bSeDebugPrivilege\b')),
+    # iter-163: SeCreateTokenPrivilege - rare privilege that lets the holder
+    # forge a SYSTEM token directly. Almost always a mis-configured service
+    # account. Instant SYSTEM if present.
+    ("SeCreateTokenPrivilege", re.compile(r'(?i)\bSeCreateTokenPrivilege\b')),
+    # iter-163: SeTcbPrivilege - "Act as part of the operating system" -
+    # tier-0 privilege; if a non-SYSTEM account has it, straight SYSTEM.
+    ("SeTcbPrivilege", re.compile(r'(?i)\bSeTcbPrivilege\b')),
     # ---- iter-8 round-2: operator-tool TYPED output parsers ----
     # NOTE: Mimikatz / Rubeus / PowerView / Lazagne / cmdkey-saved / DPAPI-cred
     # are MULTI-LINE blocks - they live in _multiline_passes() at file scope,
@@ -3108,6 +3139,69 @@ def analyze(path, report, store=None):
                         report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    "SeImpersonate / token-impersonation tooling reference",
                                    hint="if running as a service account: PrintSpoofer / GodPotato / JuicyPotato -> SYSTEM")
+                        hit = True
+                        break
+                    # iter-163: high-value Windows privileges. Each maps to a
+                    # distinct EoP path exam-legal for OSCP+ (no vulnerable-
+                    # driver farming / no automated commercial tools).
+                    if name == "SeBackupPrivilege":
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "SeBackupPrivilege - hive-save primitive available",
+                                   hint="reg save HKLM\\SAM sam.hive; reg save HKLM\\SYSTEM system.hive; "
+                                        "reg save HKLM\\SECURITY security.hive; "
+                                        "impacket-secretsdump -sam sam.hive -system system.hive -security security.hive LOCAL. "
+                                        "On a DC: reg save NTDS.dit via ntdsutil / diskshadow -> R3D chain")
+                        hit = True
+                        break
+                    if name == "SeRestorePrivilege":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "SeRestorePrivilege - registry write primitive",
+                                   hint="paired w/ SeBackup for DA-track hive extract; standalone: "
+                                        "modify HKLM\\SYSTEM\\CurrentControlSet\\Services\\<svc>\\ImagePath -> SYSTEM shell on restart")
+                        hit = True
+                        break
+                    if name == "SeTakeOwnershipPrivilege":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "SeTakeOwnershipPrivilege - own any object then WriteDacl",
+                                   hint="takeown /F <path>; icacls <path> /grant %USERNAME%:F. "
+                                        "Target: services registry key, sethc.exe (sticky-keys), or admin homedir")
+                        hit = True
+                        break
+                    if name == "SeLoadDriverPrivilege":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "SeLoadDriverPrivilege - unsigned driver load",
+                                   hint="EDR/lab-only; OSCP+ exam-legal path is limited (BYOVD is grey-area). "
+                                        "Note the priv; use only if the box docs it as intended path")
+                        hit = True
+                        break
+                    if name == "SeManageVolumePrivilege":
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   "SeManageVolumePrivilege - filesystem DACL bypass",
+                                   hint="run SeManageVolumeExploit to grant Full Control to C:\\ -> "
+                                        "write payload to Windows\\System32\\ shim; boot -> SYSTEM")
+                        hit = True
+                        break
+                    if name == "SeDebugPrivilege":
+                        report.add("MEDIUM", "INTERESTING FILES", path, lineno,
+                                   "SeDebugPrivilege - LSASS memory read",
+                                   hint="rundll32 comsvcs.dll MiniDump <lsass-pid> lsass.dmp full; "
+                                        "then pypykatz lsa minidump lsass.dmp. Standard on admin; "
+                                        "surface flags a non-admin having it")
+                        hit = True
+                        break
+                    if name == "SeCreateTokenPrivilege":
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "SeCreateTokenPrivilege - direct SYSTEM token forge (rare)",
+                                   hint="use NtCreateToken to forge a SYSTEM primary token then "
+                                        "CreateProcessWithToken. Vanishingly rare privilege; when "
+                                        "present, instant SYSTEM without exploit")
+                        hit = True
+                        break
+                    if name == "SeTcbPrivilege":
+                        report.add("CRITICAL", "INTERESTING FILES", path, lineno,
+                                   "SeTcbPrivilege - Act as Part of the OS (tier-0)",
+                                   hint="LSA-tier privilege. If a non-SYSTEM account has this, "
+                                        "any LogonUser call yields a SYSTEM token")
                         hit = True
                         break
                     # ---- iter-8 round-2: operator-tool typed output ----
