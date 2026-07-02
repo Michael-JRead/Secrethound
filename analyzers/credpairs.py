@@ -90,21 +90,31 @@ def analyze(path, report):
                         passes.append((lineno, line.strip(), v))
     except Exception:
         return
+    # iter-158: shell-escape user + pw in the netexec hints so a paste
+    # survives bash lexing (creds routinely carry apostrophes from GPP
+    # decryption or manual notes).
+    def _sh_sq(s):
+        return str(s).replace("'", "'\\''")
     if ftp_user and ftp_pass and not filters.is_placeholder(ftp_pass):
+        _fu_sh = _sh_sq(ftp_user)
+        _fp_sh = _sh_sq(ftp_pass)
         report.add("CRITICAL", "CRED PAIRS", path, ftp_ln,
                    f"cleartext protocol login: {ftp_user}:{ftp_pass}",
-                   hint=f"captured FTP/POP/IMAP creds - reuse: ssh {ftp_user}@<ip>  /  "
-                        f"netexec smb <ip> -u '{ftp_user}' -p '{ftp_pass}'")
+                   hint=f"captured FTP/POP/IMAP creds - reuse: ssh '{_fu_sh}'@<ip>  /  "
+                        f"netexec smb <ip> -u '{_fu_sh}' -p '{_fp_sh}'")
     if users and passes:
         u_val = users[0][2]
         p_val = passes[0][2]
         detail = f"USER={u_val}  PASS={p_val}"
+        _u_sh = _sh_sq(u_val)
+        _p_sh = _sh_sq(p_val)
         if _B64ISH.fullmatch(p_val) and filters.decodes_to_text(p_val):
             dec = filters.decodes_to_text(p_val)
+            _dec_sh = _sh_sq(dec)
             hint = (f"PASS looks base64 -> '{dec}'.  validate: "
-                    f"netexec smb <dc> -u '{u_val}' -p '{dec}' -k")
+                    f"netexec smb <dc> -u '{_u_sh}' -p '{_dec_sh}' -k")
         else:
-            hint = f"netexec smb <dc> -u '{u_val}' -p '{p_val}' -k   (spray: add users.txt --continue-on-success)"
+            hint = f"netexec smb <dc> -u '{_u_sh}' -p '{_p_sh}' -k   (spray: add users.txt --continue-on-success)"
         report.add("CRITICAL", "CRED PAIRS", path, None, detail, hint)
         for ln, txt, val in users[1:3]:
             report.add("HIGH", "CRED PAIRS", path, ln, f"extra USER: {val}")
