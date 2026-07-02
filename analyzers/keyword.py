@@ -1814,8 +1814,10 @@ def analyze(path, report, store=None):
                     sev = "HIGH" if c.kind == "failed" else "CRITICAL"
                     label = (f"{c.note}: {c.password}" if c.note == "PowerShell SecureString"
                              else f"{who}:{c.password}{tag}")
+                    # iter-141: shell-safe escape for pw hint (may carry ')
+                    _pw_sh = (c.password or "").replace("'", "'\\''")
                     report.add(sev, "CRED PAIRS", path, lineno, label,
-                               f"netexec smb <DC-IP> -u '{who}' -p '{c.password}' -k")
+                               f"netexec smb <DC-IP> -u '{who}' -p '{_pw_sh}' -k")
                     if store is not None:
                         from analyzers.ingest.evidence import Evidence
                         store.add(Evidence(kind="plaintext", user=c.user,
@@ -3271,9 +3273,11 @@ def analyze(path, report, store=None):
                         u, p = am.group(1), am.group(2)
                         if filters.is_placeholder(p) or filters.is_placeholder(u):
                             continue
+                        # iter-141: shell-safe escape for pw hint.
+                        _p_sh = (p or "").replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"PowerShell PSCredential: {u}:{p}",
-                                   hint=f"reuse: netexec smb <DC-IP> -u '{u}' -p '{p}'")
+                                   hint=f"reuse: netexec smb <DC-IP> -u '{u}' -p '{_p_sh}'")
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u, plaintext=p,
@@ -3671,10 +3675,12 @@ def analyze(path, report, store=None):
                         # fall back to the gpp-decrypt CLI hint.
                         plain = filters.decrypt_gpp(blob)
                         if plain and not filters.is_placeholder(plain):
+                            # iter-141: shell-safe escape for the hint's -p value.
+                            _plain_sh = plain.replace("'", "'\\''")
                             report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                        f"GPP cpassword DECRYPTED: {plain}",
                                        hint=(f"plaintext recovered via published MS AES key; reuse: "
-                                             f"netexec smb <DC-IP> -u '<user>' -p '{plain}' --local-auth"))
+                                             f"netexec smb <DC-IP> -u '<user>' -p '{_plain_sh}' --local-auth"))
                             if store is not None:
                                 from analyzers.ingest.evidence import Evidence
                                 store.add(Evidence(kind="plaintext", plaintext=plain,
