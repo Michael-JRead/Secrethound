@@ -811,10 +811,12 @@ def run(report, store, ui=None):
             _cand = os.path.join(_dir, "passwd")
             if os.path.isfile(_cand):
                 _pwd_sibling = _cand
+        # iter-149: shell-escape shadow/passwd paths for parity with
+        # iter-146-148 (loot dirs like /loot/Fred's Docs/etc/shadow).
         if _pwd_sibling and s:
-            _unshadow_cmd = f"unshadow '{_pwd_sibling}' '{s}' > u.txt"
+            _unshadow_cmd = f"unshadow '{_sh_sq(_pwd_sibling)}' '{_sh_sq(s)}' > u.txt"
         else:
-            _unshadow_cmd = f"unshadow passwd '{s or 'shadow'}' > u.txt"
+            _unshadow_cmd = f"unshadow passwd '{_sh_sq(s) if s else 'shadow'}' > u.txt"
         chains.append(Chain("R21", "crack shadow", "Linux shadow hash present",
             crit=5, conf=0.8, ready=0.7, prox=0.6,
             commands=[f"{_unshadow_cmd}; hashcat -m 1800 u.txt rockyou.txt"], src=s, line=l))
