@@ -2689,13 +2689,27 @@ def analyze(path, report, store=None):
                         break
                     # iter-28: RabbitMQ password_hash moved to _multiline_passes
                     # iter-29: APT auth.conf machine entry
+                    # iter-94: same regex fires on .netrc / .authinfo / _netrc
+                    # (Windows curl / git) too - relabel finding based on the
+                    # filename so it says 'netrc cred' (the more common form).
                     if name == "apt auth machine":
                         host, u, pw = am.group(1), am.group(2), am.group(3)
                         if filters.is_placeholder(pw):
                             continue
+                        _plow = path.lower().replace("\\", "/")
+                        _base = os.path.basename(_plow)
+                        if (_base in (".netrc", "_netrc", ".authinfo")
+                                or "netrc" in _base):
+                            _label = f"netrc cred for {host}: {u}:{pw}"
+                            _hint = f"connect via '{host}' with {u}:{pw} (curl/ftp/git use this)"
+                        elif "auth.conf" in _plow or "/apt/" in _plow:
+                            _label = f"APT auth {host}: {u}:{pw}"
+                            _hint = f"apt update via '{host}' with {u}:{pw}"
+                        else:
+                            _label = f"machine-auth {host}: {u}:{pw}"
+                            _hint = f"'{host}' auth: {u}:{pw}  (netrc / apt-format cred)"
                         report.add("HIGH", "CRED PAIRS", path, lineno,
-                                   f"APT auth {host}: {u}:{pw}",
-                                   hint=f"apt update via '{host}' with {u}:{pw}")
+                                   _label, hint=_hint)
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u,
