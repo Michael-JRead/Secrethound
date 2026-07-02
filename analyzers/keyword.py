@@ -22,6 +22,33 @@ KEY = re.compile(
     r'\s*[:=]\s*(.+)', re.IGNORECASE)
 SKIP_LINE = re.compile(r'^\s*(#|//|\*|/\*|--\s|;)')
 
+# iter-187: bash-history CLI dispatchers need a NARROW placeholder check for
+# the user argument. `filters.is_placeholder` was designed for config VALUES,
+# so it lists common legit CLI usernames (admin, root, user, guest, postgres,
+# cassandra, default, anonymous) as placeholders - which caused iter-182/183/
+# 187 dispatchers to silently drop real creds like `mongo -u admin -p Real123`.
+# This check only rejects OBVIOUS placeholder shapes:
+#   <user> / <username>              angle-bracket template
+#   {{ user }} / ${USER}             brace / dollar template
+#   USER / YOUR_USER / CHANGE_ME     all-uppercase (3+ chars, letters/_ only)
+# Keeps legit lowercase usernames intact.
+_CLI_USER_PLACEHOLDER = re.compile(
+    r'^(?:<[^>]+>|\{\{[^}]+\}\}|\$\{[^}]+\}|\$[A-Z][A-Z0-9_]{2,}|'
+    r'[A-Z][A-Z0-9_]{2,}|CHANGE[_-]?ME|YOUR[_-]\w+|xxx+)$', re.IGNORECASE)
+
+def _is_cli_placeholder(value):
+    """True if `value` is an OBVIOUS template placeholder (used in bash-history
+    dispatchers where common lowercase usernames like 'admin' are legit)."""
+    if not value:
+        return True
+    v = value.strip("'\"")
+    if _CLI_USER_PLACEHOLDER.match(v):
+        # ...but keep valid lowercase words even if match succeeds via
+        # case-insensitive alternation. Only reject uppercase-heavy shapes.
+        if v.startswith(("<", "{{", "${", "$")) or v.upper() == v:
+            return True
+    return False
+
 # code filetypes: require the value to be QUOTED (detect-secrets lesson).
 _CODE_EXT = {".js", ".ts", ".py", ".rb", ".php", ".pl", ".ps1", ".java", ".go",
              ".c", ".cpp", ".cs", ".sh", ".tf", ".groovy"}
@@ -268,6 +295,32 @@ _AD = [
         r'(?:smb|ldap|ssh|mssql|winrm|rdp|vnc|wmi|nfs|ftp)\s+'
         r'[^\r\n]*?\s-u\s+["\']?([^"\'\s]{1,40})["\']?'
         r'\s+[^\r\n]*?-p\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-187: redis-cli -h host -p 6379 -a 'pw'. Redis is a common
+    # HTB/THM foothold (open-port 6379). The -a flag inlines the pw and
+    # its use in scripted enum tooling means it lands in bash history.
+    # Captures pw (group 1); user is 'default' on Redis 6+.
+    ("bash history redis-cli", re.compile(
+        r'(?i)\bredis-cli\b[^\r\n]*?\s-a\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-187: mongo / mongosh -u X -p Y. Legacy mongo shell + modern
+    # mongosh both accept -u/--username + -p/--password. Also allow the
+    # long forms `--username=X --password=Y`. Note the `\b(mongo|mongosh)\b`
+    # engineering: alternation tries mongo first, but \b after 'mongo' in
+    # 'mongosh' fails (s is word char), engine backtracks to try mongosh,
+    # so both match cleanly.
+    ("bash history mongo -u", re.compile(
+        r'(?i)\b(?:mongo|mongosh)\b[^\r\n]*?(?:-u|--username)[= ]\s*'
+        r'["\']?([^"\'\s]{1,40})["\']?'
+        r'\s+[^\r\n]*?(?:-p|--password)[= ]\s*'
+        r'["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-187: cqlsh <host> <port> -u X -p Y. Cassandra shell.
+    ("bash history cqlsh", re.compile(
+        r'(?i)\bcqlsh\b[^\r\n]*?-u\s+["\']?([^"\'\s]{1,40})["\']?'
+        r'\s+[^\r\n]*?-p\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-187: influx (1.x) -username X -password Y. Influx 2.x uses
+    # tokens (which land as `-t <token>`), covered by other rules.
+    ("bash history influx", re.compile(
+        r'(?i)\binflux(?:v?1)?\b[^\r\n]*?-username\s+["\']?([^"\'\s]{1,40})["\']?'
+        r'\s+[^\r\n]*?-password\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
     # iter-184: schtasks /create /RU X /RP Y - Windows scheduled task with
     # cleartext user + pw. When operators script periodic exec with a service
     # account this pattern lives in .bat / .ps1 / cmd history. Also handles
@@ -2477,6 +2530,12 @@ def analyze(path, report, store=None):
                                 "bash history schtasks",
                                 "bash history kubectl set-cred token",
                                 "bash history kubectl set-cred pw",
+                                # iter-187 additions (same FP class -
+                                # DB CLI shapes appear in every tutorial).
+                                "bash history redis-cli",
+                                "bash history mongo -u",
+                                "bash history cqlsh",
+                                "bash history influx",
                                 ) and filters.is_doc_file(path):
                         continue
                     # AD CS ESC#: must look like ACTUAL certipy / certify output
@@ -2774,7 +2833,7 @@ def analyze(path, report, store=None):
                                            am.group(2), am.group(3),
                                            am.group(4))
                         if (filters.is_placeholder(pw) or pw.startswith("$")
-                                or filters.is_placeholder(u)):
+                                or _is_cli_placeholder(u)):
                             continue
                         _u_sh_ik = u.replace("'", "'\\''")
                         _pw_sh_ik = pw.replace("'", "'\\''")
@@ -2847,7 +2906,7 @@ def analyze(path, report, store=None):
                     if name == "bash history nxc/cme":
                         u, pw = am.group(1), am.group(2)
                         if (filters.is_placeholder(pw) or pw.startswith("$")
-                                or filters.is_placeholder(u)):
+                                or _is_cli_placeholder(u)):
                             continue
                         _u_sh_nx = u.replace("'", "'\\''")
                         _pw_sh_nx = pw.replace("'", "'\\''")
@@ -2862,11 +2921,93 @@ def analyze(path, report, store=None):
                                                line=lineno))
                         hit = True
                         break
+                    # iter-187: redis-cli -a 'pw'. Redis default user is
+                    # 'default' on Redis 6+; hint mentions ACL check.
+                    if name == "bash history redis-cli":
+                        pw = am.group(1)
+                        if filters.is_placeholder(pw) or pw.startswith("$"):
+                            continue
+                        _pw_sh_rc = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history redis-cli: default:{pw}",
+                                   hint=(f"redis-cli -h <host> -a '{_pw_sh_rc}' "
+                                         f"info  |  ACL USER LIST (Redis 6+); "
+                                         f"CONFIG GET dir + slaveof / SET dir "
+                                         f"/root/.ssh for auth-bypass write-file"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext",
+                                               user="default", plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-187: mongo/mongosh -u X -p Y.
+                    if name == "bash history mongo -u":
+                        u, pw = am.group(1), am.group(2)
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or _is_cli_placeholder(u)):
+                            continue
+                        _u_sh_mg = u.replace("'", "'\\''")
+                        _pw_sh_mg = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history mongo: {u}:{pw}",
+                                   hint=(f"mongosh 'mongodb://{_u_sh_mg}:"
+                                         f"{_pw_sh_mg}@<host>:27017/?"
+                                         f"authSource=admin'  |  role admin -> "
+                                         f"db.adminCommand({{listDatabases:1}})"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-187: cqlsh -u X -p Y (Cassandra shell).
+                    if name == "bash history cqlsh":
+                        u, pw = am.group(1), am.group(2)
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or _is_cli_placeholder(u)):
+                            continue
+                        _u_sh_cq = u.replace("'", "'\\''")
+                        _pw_sh_cq = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history cqlsh: {u}:{pw}",
+                                   hint=(f"cqlsh <host> 9042 -u '{_u_sh_cq}' "
+                                         f"-p '{_pw_sh_cq}'  |  SELECT * FROM "
+                                         f"system_auth.roles; check role "
+                                         f"'cassandra' for is_superuser=true"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-187: influx -username X -password Y (InfluxDB 1.x).
+                    if name == "bash history influx":
+                        u, pw = am.group(1), am.group(2)
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or _is_cli_placeholder(u)):
+                            continue
+                        _u_sh_in = u.replace("'", "'\\''")
+                        _pw_sh_in = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history influx: {u}:{pw}",
+                                   hint=(f"influx -host <host> -username "
+                                         f"'{_u_sh_in}' -password '{_pw_sh_in}' "
+                                         f" |  SHOW DATABASES; SHOW USERS"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
                     # iter-184: schtasks /create /RU X /RP Y.
                     if name == "bash history schtasks":
                         u, pw = am.group(1), am.group(2)
                         if (filters.is_placeholder(pw) or pw.startswith("$")
-                                or filters.is_placeholder(u)):
+                                or _is_cli_placeholder(u)):
                             continue
                         _u_sh_st = u.replace("'", "'\\''")
                         _pw_sh_st = pw.replace("'", "'\\''")
@@ -2907,7 +3048,7 @@ def analyze(path, report, store=None):
                     if name == "bash history kubectl set-cred pw":
                         cred_name, u, pw = am.group(1), am.group(2), am.group(3)
                         if (filters.is_placeholder(pw) or pw.startswith("$")
-                                or filters.is_placeholder(u)):
+                                or _is_cli_placeholder(u)):
                             continue
                         _u_sh_kc = u.replace("'", "'\\''")
                         _pw_sh_kc = pw.replace("'", "'\\''")
@@ -2929,7 +3070,7 @@ def analyze(path, report, store=None):
                         pw, u = am.group(1), am.group(2)
                         if (filters.is_placeholder(pw) or pw == "*"
                                 or pw.startswith("$")
-                                or filters.is_placeholder(u)):
+                                or _is_cli_placeholder(u)):
                             continue
                         _u_sh_nu = u.replace("'", "'\\''")
                         _pw_sh_nu = pw.replace("'", "'\\''")
@@ -2948,7 +3089,7 @@ def analyze(path, report, store=None):
                     if name == "bash history az login":
                         u, pw = am.group(1), am.group(2)
                         if (filters.is_placeholder(pw) or pw.startswith("$")
-                                or filters.is_placeholder(u)):
+                                or _is_cli_placeholder(u)):
                             continue
                         _u_sh_az = u.replace("'", "'\\''")
                         _pw_sh_az = pw.replace("'", "'\\''")
@@ -2970,7 +3111,7 @@ def analyze(path, report, store=None):
                         u, pw = am.group(1), am.group(2)
                         registry = am.group(3) or "docker.io"
                         if (filters.is_placeholder(pw) or pw.startswith("$")
-                                or filters.is_placeholder(u)):
+                                or _is_cli_placeholder(u)):
                             continue
                         _u_sh_dl2 = u.replace("'", "'\\''")
                         _pw_sh_dl2 = pw.replace("'", "'\\''")
@@ -3011,7 +3152,7 @@ def analyze(path, report, store=None):
                     if name == "bash history evil-winrm":
                         u, pw = am.group(1), am.group(2)
                         if (filters.is_placeholder(pw) or pw.startswith("$")
-                                or filters.is_placeholder(u)):
+                                or _is_cli_placeholder(u)):
                             continue
                         _u_sh_ew = u.replace("'", "'\\''")
                         _pw_sh_ew = pw.replace("'", "'\\''")
