@@ -834,9 +834,13 @@ def run(report, store, ui=None):
             _dom_sv = store.dominant_domain() or "<dom>"
             _sid_sv = store.domain_sid() or "<S-1-5-21-...>"
             _dc_sv = store.dc_ip() or "<DC-IP>"
+            # iter-143: impacket-lookupsid URI is 'DOMAIN/user:pw@target';
+            # previous emission had DC-IP in the DOMAIN slot which impacket
+            # then treated as the domain name and failed. Use the learned
+            # dom (or <dom> placeholder) so the domain slot is right.
             _sid_note_sv = "" if _sid_sv.startswith("S-") else (
                 f"   # look up domain SID: impacket-lookupsid "
-                f"{_dc_sv}/<u>:<p>@{_dc_sv}")
+                f"'{_dom_sv}/<u>:<p>@{_dc_sv}'")
             # iter-55: substitute learned domain into the SPN FQDN so the
             # silver ticket targets the real service. Falls back to '<dom>'
             # placeholder when unknown.
