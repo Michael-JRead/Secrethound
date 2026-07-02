@@ -1188,9 +1188,12 @@ def _multiline_passes(path, report, store):
         u, dom, nt = m.group(1), m.group(2), m.group(3)
         if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
             continue
+        # iter-174: shell-escape u for hint splice (mimikatz output can
+        # carry SAM names with apostrophes on international deployments).
+        _u_sh = u.replace("'", "'\\''")
         report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
                    f"NTLM (NT) {dom}\\{u}: {nt}",
-                   hint=f"PtH: nxc smb <host> -d {dom} -u {u} -H {nt}  |  crack: hashcat -m 1000 <nt> rockyou.txt")
+                   hint=f"PtH: nxc smb <host> -d {dom} -u '{_u_sh}' -H {nt}  |  crack: hashcat -m 1000 <nt> rockyou.txt")
         HASHES.append(("1000", "NTLM", nt, path, _ln(m)))
 
     # Mimikatz wdigest cleartext
@@ -1200,9 +1203,12 @@ def _multiline_passes(path, report, store):
         u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
         if filters.is_placeholder(pw) or pw.lower() in ("(null)", "n/a"):
             continue
+        # iter-174: shell-escape u + pw for hint splice.
+        _u_sh = u.replace("'", "'\\''")
+        _pw_sh = pw.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"wdigest cleartext: {dom}\\{u}:{pw}",
-                   hint=f"reuse: nxc smb <host> -d {dom} -u {u} -p '{pw}'")
+                   hint=f"reuse: nxc smb <host> -d {dom} -u '{_u_sh}' -p '{_pw_sh}'")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=pw, domain=dom, source=path, line=_ln(m)))
 
@@ -1213,9 +1219,11 @@ def _multiline_passes(path, report, store):
         u, nt = m.group(1), m.group(2)
         if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
             continue
+        # iter-174: shell-escape u for hint splice.
+        _u_sh = u.replace("'", "'\\''")
         report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
                    f"SAM NTLM {u}: {nt}",
-                   hint=f"PtH local: nxc smb <host> -u {u} -H {nt} --local-auth")
+                   hint=f"PtH local: nxc smb <host> -u '{_u_sh}' -H {nt} --local-auth")
         HASHES.append(("1000", "NTLM", nt, path, _ln(m)))
 
     # Mimikatz dpapi::cred typed
@@ -1345,9 +1353,12 @@ def _multiline_passes(path, report, store):
         u, p = u.strip(), p.strip()
         if not p or filters.is_placeholder(p) or len(p) < 3:
             continue
+        # iter-174: shell-escape u + p for hint splice.
+        _u_sh_d = u.replace("'", "'\\''")
+        _p_sh_d = p.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"Docker registry {registry} : {u}:{p}",
-                   hint=f"docker login {registry} -u {u} -p '{p}'  - registry push/pull; sometimes reused for SSH/SMB")
+                   hint=f"docker login {registry} -u '{_u_sh_d}' -p '{_p_sh_d}'  - registry push/pull; sometimes reused for SSH/SMB")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                source=path, line=_ln(m)))
@@ -1535,9 +1546,12 @@ def _multiline_passes(path, report, store):
         if (not u or not p or filters.is_placeholder(p) or len(p) < 3
                 or not raw.isprintable()):
             continue
+        # iter-174: shell-escape u + p for hint splice.
+        _u_sh_b = u.replace("'", "'\\''")
+        _p_sh_b = p.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"HTTP Basic captured: {u}:{p}",
-                   hint=f"reuse: nxc smb <host> -u {u} -p '{p}' ; also try app SSO / webmail / VPN")
+                   hint=f"reuse: nxc smb <host> -u '{_u_sh_b}' -p '{_p_sh_b}' ; also try app SSO / webmail / VPN")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=_ln(m)))
 
@@ -1760,9 +1774,11 @@ def _multiline_passes(path, report, store):
         dpapi = m.group(4)
         if filters.is_blank_hash(nt) or filters.is_canonical_sample(nt):
             continue
+        # iter-174: shell-escape u for hint splice.
+        _u_sh_pk = u.replace("'", "'\\''")
         report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
                    f"pypykatz NT {dom}\\{u}: {nt}",
-                   hint=f"PtH: nxc smb <host> -d {dom} -u {u} -H {nt} | crack: hashcat -m 1000 <nt> rockyou.txt")
+                   hint=f"PtH: nxc smb <host> -d {dom} -u '{_u_sh_pk}' -H {nt} | crack: hashcat -m 1000 <nt> rockyou.txt")
         HASHES.append(("1000", "NTLM", nt, path, _ln(m)))
         if store is not None:
             store.add(Evidence(kind="hash", user=u, hash=nt, hash_mode="1000",
@@ -1786,9 +1802,12 @@ def _multiline_passes(path, report, store):
         u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
         if filters.is_placeholder(pw):
             continue
+        # iter-174: shell-escape u + pw.
+        _u_sh_pw = u.replace("'", "'\\''")
+        _pw_sh_pw = pw.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"pypykatz wdigest cleartext: {dom}\\{u}:{pw}",
-                   hint=f"reuse: nxc smb <host> -d {dom} -u {u} -p '{pw}'")
+                   hint=f"reuse: nxc smb <host> -d {dom} -u '{_u_sh_pw}' -p '{_pw_sh_pw}'")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=pw, domain=dom,
                                source=path, line=_ln(m)))
@@ -1805,9 +1824,12 @@ def _multiline_passes(path, report, store):
         u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
         if filters.is_placeholder(pw):
             continue
+        # iter-174: shell-escape u + pw.
+        _u_sh_pkk = u.replace("'", "'\\''")
+        _pw_sh_pkk = pw.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"pypykatz Kerberos cleartext: {dom}\\{u}:{pw}",
-                   hint=f"reuse: nxc smb <host> -d {dom} -u {u} -p '{pw}'")
+                   hint=f"reuse: nxc smb <host> -d {dom} -u '{_u_sh_pkk}' -p '{_pw_sh_pkk}'")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=pw, domain=dom,
                                source=path, line=_ln(m)))
