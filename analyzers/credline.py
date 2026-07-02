@@ -135,8 +135,12 @@ _PGPASS = re.compile(
 #   "the password is X"     (generic ops notes)
 #   "default password is X" / "Your default password is: X"  (HR notices)
 #   "gets password X"       (jeffersonian notes shorthand)
+# iter-178: "temp password: X" / "temporary password: X" / "initial password: X"
+# common OSCP+ note pattern (welcome/onboarding emails, HR resets).
 _GETS = re.compile(
-    r'(?i)\b(?:gets?\s+password|password\s+set\s+to|(?:my|the|default|your)\s+(?:default\s+)?password\s+is)\b'
+    r'(?i)\b(?:gets?\s+password|password\s+set\s+to|'
+    r'(?:my|the|default|your)\s+(?:default\s+)?password\s+is|'
+    r'(?:temp(?:orary)?|initial|new|reset|welcome)\s+password)\b'
     r'\s*[:=]?\s*["\']?([^\s"\',;]{3,})')
 # English words that *continue* a passive "password is ..." sentence in prose
 # (docs/READMEs/security writeups), so the captured token is NOT the secret.
@@ -148,6 +152,13 @@ _GETS_STOP = frozenset((
     "strong", "weak", "visible", "hidden", "shown", "displayed", "saved", "kept",
     "generated", "created", "changed", "reset", "expired", "disabled", "enabled",
     "important", "secure", "safe", "protected", "transmitted", "sent", "checked",
+    # iter-178: policy-doc prose that follows "temp password", "reset password":
+    # "temp password requirements are strict", "reset password policy applies"
+    "requirements", "requirement", "policy", "policies", "length", "complexity",
+    "history", "rules", "rule", "will", "should", "must", "cannot",
+    "expires", "expiring", "expiration", "expiry", "aging",
+    "prohibits", "prohibited", "allows", "allowed", "supports",
+    "enforced", "enforces", "enforcement", "guidelines", "guideline",
 ))
 
 
