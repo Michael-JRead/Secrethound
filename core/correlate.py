@@ -401,7 +401,7 @@ def run(report, store, ui=None):
             cmd_pth = f"netexec smb {tgt} -u '{u}' -H {h0}{more}"
         # iter-24: drop literal '<DOMAIN>' when we've learned a real domain
         # from BloodHound / NTDS / netexec_db; otherwise keep the placeholder.
-        _dom_r7 = store.dominant_domain() or "<DOMAIN>"
+        _dom_r7 = store.dominant_domain() or "<dom>"
         chains.append(Chain("R7", "pass-the-hash", f"PtH -> {tgt}" + (f"  x{n} hashes" if n > 1 else f" ({u})"),
             crit=10, conf=0.85, ready=1.5, prox=best_prox,
             commands=[cmd_pth,
@@ -504,7 +504,7 @@ def run(report, store, ui=None):
 
     # iter-24: pick a concrete <DOMAIN> from the store so the operator
     # pastes a working command, not '<DOMAIN>/<user>:<pass>'.
-    dom = store.dominant_domain() or "<DOMAIN>"
+    dom = store.dominant_domain() or "<dom>"
     # kerberoast. iter-13: prox honors DC presence so a known DC lifts the score
     # iter-24: per-user '-request-user' form when we know the exact
     # kerberoastable SPN owner (BloodHound hasspn). One command per user
@@ -576,7 +576,7 @@ def run(report, store, ui=None):
     # to substitute - we cannot resolve IP -> FQDN passively.
     if e.has_ccache:
         s, l = e.ccache_src
-        _dom_r26 = store.dominant_domain() or "<DOMAIN>"
+        _dom_r26 = store.dominant_domain() or "<dom>"
         _dc_fqdn_r26 = store.dc_fqdn() or "<DC-FQDN>"
         chains.append(Chain("R26", "pass-the-ticket", "Kerberos ticket present",
             crit=6, conf=0.8, ready=1.4, prox=0.8,
@@ -607,7 +607,7 @@ def run(report, store, ui=None):
             if not host_short or host_short.lower() in silver_seen:
                 continue
             silver_seen.add(host_short.lower())
-            _dom_sv = store.dominant_domain() or "<DOM>"
+            _dom_sv = store.dominant_domain() or "<dom>"
             _sid_sv = store.domain_sid() or "<S-1-5-21-...>"
             _sid_note_sv = "" if _sid_sv.startswith("S-") else (
                 "   # look up domain SID: impacket-lookupsid "
@@ -724,7 +724,7 @@ def run(report, store, ui=None):
     # domain; no network re-auth needed. Highest-value chain when present.
     if getattr(e, "has_krbtgt", False):
         s_gt, l_gt = e.krbtgt_src or ("", None)
-        dom_gt = e.krbtgt_dom or "<DOM>"
+        dom_gt = e.krbtgt_dom or store.dominant_domain() or "<dom>"
         # iter-38: thread real domain SID when we've learned one.
         _sid_gt = store.domain_sid() or "<S-1-5-21-...>"
         _sid_note = "" if _sid_gt.startswith("S-") else (
@@ -815,7 +815,7 @@ def run(report, store, ui=None):
                 if dcsync_key in seen:
                     continue
                 seen.add(dcsync_key)
-                _dom_ds = store.dominant_domain() or "<DOM>"
+                _dom_ds = store.dominant_domain() or "<dom>"
                 _dc_ds = store.dc_ip() or "<DC-IP>"
                 # iter-39: use resolved principal name in owned-user slot
                 # when known, so the operator can paste directly.
