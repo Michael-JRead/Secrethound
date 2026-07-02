@@ -351,9 +351,11 @@ def run(report, store, ui=None):
                     commands=[f"evil-winrm -i {wh} -u '{disp}' -p '{pw}'"], src=src, line=ln))
             mh = svc_on(mach, "mssql")
             if mh:
+                # iter-111: whole-URI quoting parity with iter-110 (R1) and
+                # iter-109 (R7) - one 'user:pw@target' single-quoted unit.
                 chains.append(Chain("R4", "mssql", f"{disp} -> MSSQL {mh}",
                     crit=6, conf=0.7, ready=1.5, prox=_prox(store, mh),
-                    commands=[f"impacket-mssqlclient '{disp}':'{pw}'@{mh} -windows-auth"], src=src, line=ln))
+                    commands=[f"impacket-mssqlclient '{disp}:{pw}@{mh}' -windows-auth"], src=src, line=ln))
             sh = svc_on(mach, "ssh")
             if sh:
                 # iter-13: SSH password login is more reliable than MSSQL
