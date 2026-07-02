@@ -57,9 +57,11 @@ def parse(path, store, report):
             tok = filters.extract_pw_from_desc(desc)
             if tok and not filters.is_placeholder(tok) \
                     and not filters.is_code_not_literal(tok, desc):
+                # iter-140: shell-safe escape for the hint's -p value.
+                _tok_sh = tok.replace("'", "'\\''")
                 report.add("HIGH", "CRED PAIRS", path, None,
                            f"description hints cred for {user}: {desc[:80]}",
-                           f"try: netexec smb <DC-IP> -u '{user}' -p '{tok}' -k")
+                           f"try: netexec smb <DC-IP> -u '{user}' -p '{_tok_sh}' -k")
                 store.add(Evidence(kind="plaintext", user=user, plaintext=tok, source=path))
         try:
             uac = int(_first(a, "useraccountcontrol") or 0)

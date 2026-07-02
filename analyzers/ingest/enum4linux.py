@@ -68,9 +68,11 @@ def _parse_json(path, store, report):
             tok = filters.extract_pw_from_desc(desc)
             if tok and not filters.is_placeholder(tok) \
                     and not filters.is_code_not_literal(tok, desc):
+                # iter-140: shell-safe escape for the hint's -p value.
+                _tok_sh = tok.replace("'", "'\\''")
                 report.add("HIGH", "CRED PAIRS", path, None,
                            f"enum4linux-ng desc cred for {name}: {desc[:80]}",
-                           f"try: netexec smb <DC-IP> -u '{name}' -p '{tok}'")
+                           f"try: netexec smb <DC-IP> -u '{name}' -p '{_tok_sh}'")
                 store.add(Evidence(kind="plaintext", user=name, plaintext=tok,
                                    source=path))
     pol = doc.get("policy") or doc.get("password_policy") or {}

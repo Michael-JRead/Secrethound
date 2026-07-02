@@ -78,9 +78,11 @@ def _scan_desc_for_pw(text, user, store, report, src):
         return False
     if filters.is_placeholder(tok) or filters.is_code_not_literal(tok, text or ""):
         return False
+    # iter-140: escape ' in tok so a paste survives bash lexing.
+    _tok_sh = tok.replace("'", "'\\''")
     report.add("HIGH", "CRED PAIRS", src, None,
                f"BloodHound desc hints cred for {user}: {(text or '')[:80]}",
-               f"try: netexec smb <DC-IP> -u '{user}' -p '{tok}' -k")
+               f"try: netexec smb <DC-IP> -u '{user}' -p '{_tok_sh}' -k")
     store.add(Evidence(kind="plaintext", user=user, plaintext=tok, source=src))
     return True
 
@@ -99,9 +101,10 @@ def _scan_user_password_attr(text, user, store, report, src):
         return True
     if 4 <= len(text) <= 80 and not filters.is_placeholder(text) \
             and not filters.is_code_not_literal(text, text):
+        _text_sh = text.replace("'", "'\\''")
         report.add("HIGH", "CRED PAIRS", src, None,
                    f"LDAP userPassword for {user}: {text}",
-                   f"try: netexec smb <DC-IP> -u '{user}' -p '{text}' -k")
+                   f"try: netexec smb <DC-IP> -u '{user}' -p '{_text_sh}' -k")
         store.add(Evidence(kind="plaintext", user=user, plaintext=text, source=src))
         return True
     return False

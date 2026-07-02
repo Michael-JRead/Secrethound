@@ -91,9 +91,11 @@ def parse(path, store, report):
                 store.add(Evidence(kind="plaintext", user=user, domain=dom,
                                    plaintext=secret, cred=secret, source=path,
                                    meta={"validated": True}))
+                # iter-140: escape ' in secret so a paste survives bash lexing.
+                _secret_sh = secret.replace("'", "'\\''")
                 report.add("CRITICAL", "CRED PAIRS", path, None,
                            f"[netexec-validated] {dom}\\{user}:{secret}",
-                           f"reuse: netexec smb <host> -u '{user}' -p '{secret}' --continue-on-success")
+                           f"reuse: netexec smb <host> -u '{user}' -p '{_secret_sh}' --continue-on-success")
     # admin relations -> pwned hosts
     for t in tables:
         if "admin" not in t.lower():

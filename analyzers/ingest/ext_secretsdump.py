@@ -49,9 +49,11 @@ def parse(path, store, report):
                     n += 1
                     known = known_hashes.lookup(nt)
                     if known is not None:
+                        # iter-140: shell-safe escape for the hint's -p value.
+                        _known_sh = known.replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, ln,
                                    f"{user} NT=DEFAULT '{known}' ({nt[:12]}...)",
-                                   f"log in directly: netexec smb <DC-IP> -u '{user}' -p '{known}'")
+                                   f"log in directly: netexec smb <DC-IP> -u '{user}' -p '{_known_sh}'")
                         store.add(Evidence(kind="plaintext", user=user, domain=dom,
                                            plaintext=known, hash=nt, source=path, line=ln))
                     else:
@@ -80,9 +82,10 @@ def parse(path, store, report):
                     pw = mc.group("pw").strip()
                     if pw and not filters.is_placeholder(pw):
                         n += 1
+                        _pw_sh = pw.replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, ln,
                                    f"CLEARTEXT {user}={pw}",
-                                   f"reversible-encryption cred: netexec smb <DC-IP> -u '{user}' -p '{pw}'")
+                                   f"reversible-encryption cred: netexec smb <DC-IP> -u '{user}' -p '{_pw_sh}'")
                         store.add(Evidence(kind="plaintext", user=user, domain=dom,
                                            plaintext=pw, source=path, line=ln))
     except OSError:
