@@ -146,6 +146,11 @@ def _primary_binaries(cmd):
 
 
 def _all_tokens(cmd):
+    # iter-90: strip trailing shell comments before tokenising so a legitimate
+    # command with a '# do NOT run hydra' annotation isn't wrongly flagged as
+    # referencing the denylist. _primary_binaries() already does this; keep
+    # the two callers in sync.
+    cmd = cmd.split("#", 1)[0]
     return set(_re.split(r'[\s/;|]+', cmd.lower()))
 
 
