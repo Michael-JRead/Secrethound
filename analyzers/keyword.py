@@ -1751,9 +1751,18 @@ def _multiline_passes(path, report, store):
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=_ln(m)))
 
+    # iter-186 FP-audit gate: OSCP+ walkthrough markdown files and API-
+    # tutorial docs constantly show example `Authorization: Bearer ghp_...`
+    # and `X-Api-Key: abcdef...` shapes. Skip the entire HTTP-header
+    # dispatch block on doc files - real loot lives in Burp captures /
+    # .http request logs / actual response bodies, never in *.md prose.
+    _http_is_doc = filters.is_doc_file(path)
+
     # Burp captured Authorization: Bearer <JWT>
     jwt_seen = set()
     for m in _HTTP_AUTH_BEARER_JWT.finditer(text):
+        if _http_is_doc:
+            break
         tok = m.group(1)
         if tok in jwt_seen:
             continue
@@ -1793,6 +1802,8 @@ def _multiline_passes(path, report, store):
     }
     bearer_seen = set()
     for m in _HTTP_AUTH_BEARER_OPAQUE.finditer(text):
+        if _http_is_doc:
+            break
         tok = m.group(1)
         if tok in bearer_seen:
             continue
@@ -1818,6 +1829,8 @@ def _multiline_passes(path, report, store):
     # Invoke-WebRequest -Headers @{X-Api-Key='...'}).
     apikey_seen = set()
     for m in _HTTP_APIKEY_HEADER.finditer(text):
+        if _http_is_doc:
+            break
         header, tok = m.group(1), m.group(2)
         if tok in apikey_seen:
             continue
@@ -2443,7 +2456,28 @@ def analyze(path, report, store=None):
                                 "NFS no_root_squash", "smbmap rw share",
                                 "kerbrute valid user", "Helm values secret",
                                 "Vault unseal key", "Vault root token",
-                                "kubectl --token") and filters.is_doc_file(path):
+                                "kubectl --token",
+                                # iter-186 FP-audit additions: the 12
+                                # bash-history rules added in iter-182/183/184
+                                # all fire on walkthrough-style example
+                                # commands in tutorial markdown files. Every
+                                # HTB / THM / OSCP+ writeup showing sample
+                                # `nxc smb host -u alice -p pw` or
+                                # `psexec.py CORP/administrator:pw@10.10.10.10`
+                                # is a doc file, not real loot.
+                                "impacket inline",
+                                "bash history PGPASSWORD",
+                                "bash history MYSQL_PWD",
+                                "bash history nxc/cme",
+                                "bash history evil-winrm",
+                                "bash history net use",
+                                "bash history az login",
+                                "bash history docker login",
+                                "bash history piped sudo -S",
+                                "bash history schtasks",
+                                "bash history kubectl set-cred token",
+                                "bash history kubectl set-cred pw",
+                                ) and filters.is_doc_file(path):
                         continue
                     # AD CS ESC#: must look like ACTUAL certipy / certify output
                     # ('Vulnerabilities:', '[!] ESC1', 'Template Name :',
