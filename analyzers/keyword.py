@@ -1141,6 +1141,10 @@ def _multiline_passes(path, report, store):
     _MK_CRED_BLEED = re.compile(r'(?i)\*\*\*\s*CREDENTIAL\s*\*\*\*')
     _SAM_BLEED = re.compile(r'(?i)\bSamAccountName\s*:')
     _LAZAGNE_BLEED = re.compile(r'(?im)^\s*(?:URL|Login|Username)\s*:')
+    # iter-168: fresh `Target: Domain:target=` between our capture spans
+    # signals a cmdkey /list block with no User: line - the missing block
+    # made us pair Target[N] with User[N+1].
+    _CMDKEY_BLEED = re.compile(r'(?i)^\s*Target\s*:\s*Domain:target=', re.MULTILINE)
 
     # SCCM NAA
     for m in _SCCM_NAA_MULTI.finditer(text):
@@ -1236,7 +1240,11 @@ def _multiline_passes(path, report, store):
                                source=path, line=_ln(m)))
 
     # cmdkey /list saved
+    # iter-168: bleed guard - a cmdkey block missing its `User:` line
+    # would mispair Target[N] with User[N+1] (verified in audit).
     for m in _CMDKEY_LIST.finditer(text):
+        if not _no_bleed(m, 1, 2, _CMDKEY_BLEED):
+            continue
         target, u = m.group(1).strip(), m.group(2).strip()
         report.add("HIGH", "INTERESTING FILES", path, _ln(m),
                    f"cmdkey saved cred for {target} (user: {u})",
