@@ -100,14 +100,30 @@ _PLAIN = re.compile(r'^(?P<dom>[A-Za-z0-9.\-]+)\\(?P<user>[^\s:\\]{1,64}):(?P<pw
 #   `login with alice/pw`
 #   `log in with alice / pw`
 #   `login as alice / pw`
+# iter-205: allow optional quotes around user + pw for `"alice" / "Sunfl0wer!"`.
 # Anchor on the intent keyword so we don't FP on `10.10.10.10 / 24` etc.
 _SLASH_PAIR = re.compile(
     r'(?i)\b(?:credentials?|login|creds?|access|auth|account|'
     r'log\s+in|sign\s+in)'
     r'(?:\s+(?:with|as|using|to|into|via))?'
-    r'\s*[:=]?\s+'
-    r'([A-Za-z_][A-Za-z0-9._@\\-]{1,60})\s*/\s*'
-    r'([^\s"\',][^\s"\',\r\n]{2,79})'
+    r'\s*[:=]?\s+["\']?'
+    r'([A-Za-z_][A-Za-z0-9._@\\-]{1,60})["\']?\s*/\s*["\']?'
+    r'([^\s"\',][^\s"\',\r\n]{2,79}?)["\']?(?=$|\s|,|\.)'
+)
+
+# iter-205: imperative `Try X:Y`, `Use X:Y`, `Attempt with X:Y`,
+# `logged in with the credential X:Y` - user:pass IN the middle of a
+# sentence rather than a labeled note. Anchor on the imperative verb
+# so we don't FP on random `X:Y` mid-sentence. The optional connective
+# allows `with the credential(s)` / `with credentials` as multi-word
+# forms since they appear in walkthrough prose.
+_IMPERATIVE_PAIR = re.compile(
+    r'(?i)\b(?:try|use|attempt|logged\s+in|log\s+in|sign\s+in|reuse)'
+    r'(?:\s+(?:with\s+(?:the\s+)?credentials?|with|the\s+credentials?|using))?'
+    r'\s+["\']?'
+    r'([A-Za-z_][A-Za-z0-9._@\\-]{1,60})["\']?'
+    r'\s*[:=]\s*["\']?'
+    r'([^\s"\',][^\s"\',\r\n]{2,79}?)["\']?(?=$|\s|,|\.)'
 )
 # iter-203: Markdown table row `| user | pass |`. Restrict to rows with
 # 2 pipe-separated columns (allow trailing) so `| a | b | c | d |` doesn't
@@ -371,6 +387,15 @@ def classify(line):
             and m.group(1).lower() not in _NOT_USER):
         return Cred("cred", user=m.group(1), password=m.group(2),
                     note="slash-separated note")
+
+    # iter-205: imperative verb + user:pass shape (`Try alice:Sunfl0wer!`,
+    # `Use admin:R3alP@ss to log in`, `Attempt with alice:Sunfl0wer!`).
+    # Verb-anchored so random mid-sentence `X:Y` doesn't fire.
+    m = _IMPERATIVE_PAIR.search(s)
+    if (m and _ok_pw(m.group(2))
+            and m.group(1).lower() not in _NOT_USER):
+        return Cred("cred", user=m.group(1), password=m.group(2),
+                    note="imperative pair")
 
     # iter-203: Markdown bullet with `- alice: Sunfl0wer`. Bullet-anchored
     # so we don't clash with the bare-user:pass rule above (which needs
