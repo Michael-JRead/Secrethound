@@ -674,6 +674,10 @@ def run(report, store, ui=None):
             # tried to resolve as a hostname and failed.
             _spn_parts = first_spn.split("/")
             _spn_host = _spn_parts[1] if len(_spn_parts) >= 2 else first_spn
+            # iter-68: SPN 'host' may carry a :port or :instance suffix
+            # (mssqlsvc/sql01.htb.local:1433, mssqlsvc/sql:SQLEXPRESS).
+            # secretsdump needs just the hostname - strip anything past ':'.
+            _spn_host = _spn_host.split(":", 1)[0]
             _spn_summary = ", ".join(spns[:3])
             if len(spns) > 3:
                 _spn_summary += f" (+{len(spns) - 3} more)"
