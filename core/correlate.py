@@ -653,9 +653,23 @@ def run(report, store, ui=None):
     # shadow
     if e.has_shadow:
         s, l = e.shadow_src
+        # iter-79: use real paths for unshadow. unshadow needs BOTH the
+        # shadow and its sibling passwd file - guess passwd via same-dir
+        # sibling lookup. Falls back to bare 'passwd shadow' when the
+        # sibling isn't present (operator has to fix it up manually).
+        _pwd_sibling = ""
+        if s:
+            _dir = os.path.dirname(s)
+            _cand = os.path.join(_dir, "passwd")
+            if os.path.isfile(_cand):
+                _pwd_sibling = _cand
+        if _pwd_sibling and s:
+            _unshadow_cmd = f"unshadow '{_pwd_sibling}' '{s}' > u.txt"
+        else:
+            _unshadow_cmd = f"unshadow passwd '{s or 'shadow'}' > u.txt"
         chains.append(Chain("R21", "crack shadow", "Linux shadow hash present",
             crit=5, conf=0.8, ready=0.7, prox=0.6,
-            commands=["unshadow passwd shadow > u; hashcat -m 1800 u rockyou.txt"], src=s, line=l))
+            commands=[f"{_unshadow_cmd}; hashcat -m 1800 u.txt rockyou.txt"], src=s, line=l))
 
     # iter-36: R-SILVER - machine account NT hash (HOSTNAME$ user) can
     # forge a silver ticket for that computer's SPNs (cifs/host/http/
