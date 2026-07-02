@@ -57,6 +57,19 @@ _STATUS_FAIL = re.compile(r'STATUS_(LOGON_FAILURE|NO_SUCH_USER|WRONG_PASSWORD|AC
 _SECSTR = re.compile(r'(?i)ConvertTo-SecureString\s+(?:-(?:String|AsPlainText|Key|Force)\s+)*["\']([^"\']{3,})["\']')
 _NETUSER = re.compile(r'(?i)\bnet\s+user\s+(\S+)\s+(\S+)\s+/add')
 _UPLABEL = re.compile(r'(?i)\buser(?:name)?\s*[:=]\s*([^\s&="\':]{2,})\b.{0,40}?\bpass(?:word)?\s*[:=]\s*([^\s&="\':]{3,})')
+# iter-161: ADO.NET / JDBC / MSSQL connection strings surface constantly
+# in .config, appsettings.json, .aspx source, web.config, and Snaffler
+# 'connection string' hits. The "User Id"/"UID" and "Password"/"PWD"
+# separator words don't survive _UPLABEL's \buser\b anchor because AD
+# style is "User Id=sa;Password=xxx" (space between User and Id). Match
+# both idioms; support ' or " wrapping. Allow up to 120 chars between
+# because full connection strings may squeeze Data Source, Initial
+# Catalog, Integrated Security, MultipleActiveResultSets, etc. between
+# UID and PWD.
+_MSSQL_CS = re.compile(
+    r'(?i)(?:\bUser\s*(?:Id|ID)|\bUID)\s*=\s*[\'"]?([^;\'";\s]{2,64})[\'"]?'
+    r'\s*;.{0,120}?'
+    r'(?:\bPassword|\bPWD)\s*=\s*[\'"]?([^;\'";\s]{3,120})[\'"]?')
 _PLAIN = re.compile(r'^(?P<dom>[A-Za-z0-9.\-]+)\\(?P<user>[^\s:\\]{1,64}):(?P<pw>\S{3,})$')
 # bare note pair:  whole line is exactly  user:pass  (admin:nibbles)
 _PAIR = re.compile(r'^([A-Za-z0-9._@$-]{2,40}):([^\s:]{3,40})$')
@@ -218,6 +231,15 @@ def classify(line):
     m = _UPLABEL.search(s)
     if m and _ok_pw(m.group(2)):
         return Cred("cred", user=m.group(1), password=m.group(2), note="user/pass label")
+
+    # ---- ADO.NET / MSSQL connection string: User Id=X;...;Password=Y ----
+    # iter-161: matches web.config / appsettings.json / .aspx source lines
+    # that _UPLABEL missed because "User Id" (with space) doesn't fit
+    # \buser(?:name)?\s*[:=].
+    m = _MSSQL_CS.search(s)
+    if m and _ok_pw(m.group(2)):
+        return Cred("cred", user=m.group(1), password=m.group(2),
+                    note="MSSQL/ADO.NET connection string")
 
     # ---- plain domain\user:password note line ----
     m = _PLAIN.match(s)
