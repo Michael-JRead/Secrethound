@@ -895,9 +895,14 @@ _AD = [
     #     (root) NOPASSWD: /usr/bin/find
     # Triple-CRITICAL gap in the mine: missed every PEAS / linPEAS / sudo-l
     # cap in HTB Lame/Nibbles/THM Common-Linux-Privesc etc.
+    # iter-166: two fixes to prior sudo -l pattern:
+    #   1. leading whitespace optional (some sudo-l pastes are unindented).
+    #   2. accept sudoedit as command (no leading /) since sudoedit doesn't
+    #      require an absolute path in sudoers, and sudoedit /etc/shadow /
+    #      sudoedit /root/... is an instant root read primitive.
     ("sudo -l NOPASSWD", re.compile(
-        r'(?im)^\s+\(([^)\r\n]{1,80})\)\s+(?:NOPASSWD|SETENV)\s*:\s*'
-        r'(/\S[^\r\n]{0,200})')),
+        r'(?im)^\s*\(([^)\r\n]{1,80})\)\s+(?:NOPASSWD|SETENV)\s*:\s*'
+        r'((?:/\S|sudoedit\b)[^\r\n]{0,200})')),
     # HTB Lame / smbclient / enum4linux Samba banner (CVE-2007-2447 range):
     #     Server=[Samba 3.0.20-Debian]
     ("Samba vuln banner", re.compile(
