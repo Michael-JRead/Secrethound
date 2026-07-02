@@ -59,9 +59,20 @@ def parse(path, store, report):
                                    f"NTLM (NT) {user}: {nt}",
                                    f"PtH: netexec smb <DC-IP> -u '{user}' -H {nt}")
                         patterns.HASHES.append(("1000", "NTLM", nt, path, ln))
+                    # iter-78: RID 500 is the built-in local Administrator on
+                    # EVERY Windows host - only tier-0 when the source is a
+                    # domain dump (NTDS.dit / DCSync output) where the RID 500
+                    # is unambiguously the DOMAIN Administrator. A dumped local
+                    # SAM has RID 500 too but it's just the local admin of
+                    # that one workstation, and flagging it as admincount fires
+                    # bogus R-ADMIN-CRED against the DC.
+                    # Heuristic: dom (from DOMAIN\user) is set on domain dumps
+                    # (NTDS pwdump rows), absent on local SAM dumps.
+                    _is_domain_dump = bool(dom)
+                    _rid500_da = m.group("rid") == "500" and _is_domain_dump
                     store.add(Evidence(kind="hash", user=user, domain=dom, hash=nt,
                                        hash_mode="1000", source=path, line=ln,
-                                       fact="admincount" if m.group("rid") == "500" else ""))
+                                       fact="admincount" if _rid500_da else ""))
                     continue
                 mc = _CLEAR.match(line)
                 if mc:
