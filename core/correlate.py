@@ -648,7 +648,7 @@ def run(report, store, ui=None):
             silver_seen.add(host_short.lower())
             _dom_sv = store.dominant_domain() or "<dom>"
             _sid_sv = store.domain_sid() or "<S-1-5-21-...>"
-            _dc_sv = store.dc_ip() or "<DC>"
+            _dc_sv = store.dc_ip() or "<DC-IP>"
             _sid_note_sv = "" if _sid_sv.startswith("S-") else (
                 f"   # look up domain SID: impacket-lookupsid "
                 f"{_dc_sv}/<u>:<p>@{_dc_sv}")
@@ -692,7 +692,7 @@ def run(report, store, ui=None):
                     best_src, best_line = _s, _l
                     break
             _dom_c = store.dominant_domain() or "<dom>"
-            _dc_c = store.dc_ip() or "<DC>"
+            _dc_c = store.dc_ip() or "<DC-IP>"
             # First target SPN for the sample command
             first_spn = spns[0] if spns else "cifs/<target>.<dom>"
             # iter-49: SPN format is 'class/host[/port_or_path]' - grab the
@@ -869,7 +869,7 @@ def run(report, store, ui=None):
             _dom_e = store.dominant_domain() or "<dom>"
             # iter-52: substitute learned DC IP so command paste hits a real
             # target. Falls back to '<DC>' placeholder when unknown.
-            _dc_e = store.dc_ip() or "<DC>"
+            _dc_e = store.dc_ip() or "<DC-IP>"
             # iter-59: look up the actor's password so commands like
             # 'certipy-ad shadow auto -u HELPDESK -p <owned-password>' become
             # 'certipy-ad shadow auto -u HELPDESK -p ThePassword'. Falls
