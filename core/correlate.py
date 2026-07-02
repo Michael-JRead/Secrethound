@@ -674,9 +674,11 @@ def run(report, store, ui=None):
             # tried to resolve as a hostname and failed.
             _spn_parts = first_spn.split("/")
             _spn_host = _spn_parts[1] if len(_spn_parts) >= 2 else first_spn
+            _spn_summary = ", ".join(spns[:3])
+            if len(spns) > 3:
+                _spn_summary += f" (+{len(spns) - 3} more)"
             chains.append(Chain("R-CONSTRAINED", "constrained delegation",
-                f"{ulc} has AllowedToDelegateTo {spns[:3]}"
-                f"{'...' if len(spns) > 3 else ''}",
+                f"{ulc} has AllowedToDelegateTo: {_spn_summary}",
                 crit=8, conf=0.9, ready=1.4, prox=0.95,           # score 9.58
                 commands=[
                     f"# {ulc} is trusted to delegate to {len(spns)} SPN(s)",
