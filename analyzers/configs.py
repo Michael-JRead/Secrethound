@@ -64,9 +64,13 @@ def _emit_password(report, store, path, parent, pw, note):
         return
     label = parent or "unattend password"
     detail = f"unattend {label}: {pw}  ({note})"
+    # iter-159: shell-escape pw for parity with the rest of the ingest
+    # layer (iter-140/141/158). unattend passwords are frequently
+    # copy-pasted apostrophe-bearing values (P@ssw0rd's, etc.).
+    _pw_sh = pw.replace("'", "'\\''")
     report.add("CRITICAL", "CRED PAIRS", path, None, detail,
                hint=("Windows unattend password recovered - log in directly: "
-                     f"netexec smb <DC-IP> -u Administrator -p '{pw}'"))
+                     f"netexec smb <DC-IP> -u Administrator -p '{_pw_sh}'"))
     if store is not None:
         store.add(Evidence(kind="plaintext", user="Administrator", plaintext=pw,
                            source=path))

@@ -49,9 +49,15 @@ def analyze(path, report, store=None):
                 if (mt and _CREDWORD.search(line) and credline._ok_pw(mt.group(2))
                         and mt.group(1).lower() not in ("user", "username", "host", "ip", "name")):
                     u, p, host = mt.group(1), mt.group(2), (mt.group(3) or "")
+                    # iter-159: shell-escape user + pw for parity with the
+                    # rest of the ingest layer (iter-140/141/158). Notes
+                    # tables often carry weird chars in the pw column
+                    # (auto-generated pws, quoted domain\user forms).
+                    _u_sh = u.replace("'", "'\\''")
+                    _p_sh = p.replace("'", "'\\''")
                     report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                f"notes table: {u}:{p}" + (f" @{host}" if host else ""),
-                               f"netexec smb {host or '<DC-IP>'} -u '{u}' -p '{p}' -k")
+                               f"netexec smb {host or '<DC-IP>'} -u '{_u_sh}' -p '{_p_sh}' -k")
                     if store is not None:
                         store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                            host=host, source=path, line=lineno))
