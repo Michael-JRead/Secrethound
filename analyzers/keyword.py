@@ -1220,7 +1220,13 @@ def _multiline_passes(path, report, store):
                                source=path, line=_ln(m)))
 
     # PowerView Get-DomainUser kerberoastable
+    # iter-167: apply _SAM_BLEED guard so a two-user Get-DomainUser dump
+    # doesn't mismatch svc_web's samaccountname with svc_db's spn (very
+    # common with piped `Get-DomainUser -SPN | fl *`). Existing _SAM_BLEED
+    # anchor from iter-12 is defined above at line 1142.
     for m in _PV_KERB.finditer(text):
+        if not _no_bleed(m, 1, 2, _SAM_BLEED):
+            continue
         u, spn = m.group(1), m.group(2)
         report.add("HIGH", "RECON", path, _ln(m),
                    f"Kerberoastable: {u}  spn={spn[:50]}",
