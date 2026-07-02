@@ -284,16 +284,31 @@ def _ingest_objects(data, kind_hint, store, report, src):
         elif kind_hint == "certtemplates":
             # iter-23: BloodHound CE collects ADCS templates directly. Mirror
             # the certipy-find shape so correlate.py routes ESC chains.
+            # iter-88: dropped the dead 'for k, _esc in (...): pass' loop and
+            # added ESC2 / ESC13 / ESC15 detection so BH-CE-only ADCS data
+            # feeds R-ADCS-ESC1 chain as many templates as certipy find would.
             esc_list = []
-            for k, _esc in (("enrolleesuppliessubject", "ESC1"),
-                            ("requiresmanagerapproval", None),
-                            ("nosecurityextension", "ESC9"),
-                            ("schemaversion", None)):
-                pass
+            # ESC1: Enrollee supplies subject + Client Authentication EKU
             if p.get("enrolleesuppliessubject") and p.get("clientauthentication"):
                 esc_list.append("ESC1")
+            # ESC2: Any-purpose EKU (2.5.29.37.0) OR empty EKU list, and
+            # enrollee-supplies-subject. Any-purpose lets you use the cert
+            # for client auth even if Client Auth EKU isn't listed.
+            _ekus = [str(x).strip() for x in (p.get("effectiveekus") or []) if x]
+            if p.get("enrolleesuppliessubject") and (
+                    "2.5.29.37.0" in _ekus or "any purpose" in " ".join(_ekus).lower()):
+                esc_list.append("ESC2")
+            # ESC9: 'nosecurityextension' - subject alt name can be forged.
             if p.get("nosecurityextension"):
                 esc_list.append("ESC9")
+            # ESC13: OID group link - template has msDS-OIDToGroupLink set.
+            if p.get("oidgrouplink"):
+                esc_list.append("ESC13")
+            # ESC15: EKUwu / Schema v1 + Application Policies via SAN.
+            # v1 templates issue certs even with application-policies
+            # override the operator can craft via -application-policies.
+            if str(p.get("schemaversion", "")) == "1" and p.get("clientauthentication"):
+                esc_list.append("ESC15")
             if esc_list:
                 store.add(Evidence(kind="cert_template", source=src,
                                    meta={"template": short, "esc": esc_list}))

