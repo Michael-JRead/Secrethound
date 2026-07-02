@@ -87,10 +87,19 @@ def _add_cred(e, user, pw, src, line):
     # 'dom/user:pw@target' emit 'dom/user@dom:pw@target' - impacket sees
     # the LAST '@' and mistakes the domain suffix for the target. Store
     # the sam-only user in e.creds; display uses the full form via disp.
+    # iter-137: also strip DOMAIN\ prefix. The impacket URI grammar is
+    # 'DOMAIN/user' with forward slash; 'DOMAIN\user' is a Windows local
+    # form that some impacket tools tolerate but the standard URI parser
+    # doesn't split reliably. Normalise to bare user; dominant_domain()
+    # already surfaces the domain for URI prefixing.
     _user_key = (user or "").lower()
+    if "\\" in _user_key:
+        _user_key = _user_key.split("\\", 1)[1]
     if "@" in _user_key:
         _user_key = _user_key.split("@", 1)[0]
     _user_disp = user or "<user>"
+    if "\\" in _user_disp:
+        _user_disp = _user_disp.split("\\", 1)[1]
     if "@" in _user_disp:
         _user_disp = _user_disp.split("@", 1)[0]
     # iter-14: append (don't overwrite) so multiple sources for the same
