@@ -1619,9 +1619,15 @@ def run(report, store, ui=None):
         # NT hash for the authenticating principal (certipy-ad req accepts
         # -hashes ':NT'). Same pattern as R-CONSTRAINED / R-ADMIN-CRED.
         # iter-129: shell-escape ADCS auth args.
+        # iter-135: strip @domain from _disp_ac before we splice it into
+        # '{user}@{dom}'. credpairs from notes / netexec_db sometimes carry
+        # the UPN form ('bob@htb.local'); without stripping we'd emit
+        # -u 'bob@htb.local@htb.local' which certipy rejects.
         if e.creds:
             ((_ulc_ac, _pw_ac), _occs_ac) = next(iter(e.creds.items()))
             _disp_ac = _occs_ac[0][0] if _occs_ac[0][0] != "<user>" else _ulc_ac
+            if "@" in _disp_ac:
+                _disp_ac = _disp_ac.split("@", 1)[0]
             _disp_ac = _sh_sq(_disp_ac)
             _adcs_auth = f"-p '{_sh_sq(_pw_ac)}'"
         else:
