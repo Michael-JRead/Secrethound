@@ -508,9 +508,12 @@ def run(report, store, ui=None):
         if wh:
             # iter-16: was f-string-then-concat; the {wh} in the NOTE half
             # was a literal '{wh}' instead of the interpolated value.
+            # iter-155: use _u_sh (already _sh_sq'd for R7) so an apostrophe
+            # in the user name doesn't break the shell paste. Same rationale
+            # as R7 uses on line 468/471 above.
             note = (f"    # NOTE: local-SAM hash; ensure {wh} == originating host"
                     if local_origin else "")
-            cmd_wh = f"evil-winrm -i {wh} -u '{u}' -H {h0}{note}"
+            cmd_wh = f"evil-winrm -i {wh} -u '{_u_sh}' -H {h0}{note}"
             chains.append(Chain("R8", "PtH winrm", f"PtH -> WinRM {wh}",
                 crit=8, conf=0.8, ready=1.5, prox=_prox(store, wh),
                 commands=[cmd_wh], src=src0, line=ln0, count=n))
