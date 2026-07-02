@@ -557,13 +557,18 @@ _AD = [
         r'setfacl|getfacl|'
         r'view|vimdiff|ash))$')),
     # `getcap -r /` output - capability bits on binaries.
-    # `/usr/bin/python3 = cap_setuid+ep`
+    # `/usr/bin/python3 = cap_setuid+ep`   (old-style libcap output)
+    # `/usr/bin/python3 cap_setuid+ep`     (libcap 2.44+, no `=` separator)
     # iter-11 FP audit: LHS must be an absolute path (rejects Makefile
     # `MY_VAR = cap_setuid_helper`); RHS cap must be properly suffixed.
+    # iter-165: accept the modern separator-less form (` ` between path and
+    # cap instead of ` = `) and add cap_dac_override to the cap enum
+    # (bypasses file permission checks -> read /etc/shadow as non-root).
     ("Linux capability", re.compile(
-        r'^(/\S+)\s+=\s+(cap_(?:setuid|setgid|net_raw|dac_read_search|chown|'
-        r'fowner|kill|net_bind_service|sys_admin|sys_ptrace|net_admin|'
-        r'sys_module|sys_chroot|sys_time|audit_control)(?:[,+][\w+]+)?)(?:\s|,|$)',
+        r'^(/\S+)\s+(?:=\s+)?(cap_(?:setuid|setgid|net_raw|dac_read_search|'
+        r'dac_override|chown|fowner|kill|net_bind_service|sys_admin|'
+        r'sys_ptrace|net_admin|sys_module|sys_chroot|sys_time|audit_control)'
+        r'(?:[,+=][\w+]+)?)(?:\s|,|$)',
         re.MULTILINE)),
     # NFS export with no_root_squash - direct root via remote NFS mount + suid.
     ("NFS no_root_squash", re.compile(
