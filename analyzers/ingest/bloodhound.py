@@ -235,6 +235,23 @@ def _ingest_objects(data, kind_hint, store, report, src):
                 store.add(Evidence(kind="host", host=name, fact="unconstrained", source=src))
                 n += 1
             store.learn_host(names=[name])
+            # iter-83: scan computer object description/info for inline creds
+            # too - some HTB boxes drop local-admin creds in a computer's
+            # 'info' field ("Ryan Bertrand's account: temppass2020"). Use the
+            # same _scan_desc_for_pw helper as user objects. Computer 'short'
+            # from _ingest_objects is the FQDN (no '@' to split on); strip
+            # the domain suffix so the emitted netexec hint uses the samAcct
+            # form 'WORKSTATION01' rather than 'WORKSTATION01.HTB.LOCAL'.
+            _comp_short = short.split(".")[0] if "." in short else short
+            for k in ("description", "info", "comment"):
+                v = p.get(k)
+                if not v:
+                    continue
+                if isinstance(v, list):
+                    v = " ".join(str(x) for x in v if x)
+                v = str(v)
+                if _scan_desc_for_pw(v, _comp_short, store, report, src):
+                    n += 1
         elif kind_hint == "groups":
             # iter-46: parse tier-0 groups (Domain Admins / Enterprise Admins
             # / Schema Admins / Backup Operators / Account Operators / Server
