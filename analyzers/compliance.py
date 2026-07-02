@@ -54,6 +54,9 @@ ALLOWLIST_BINARIES = frozenset({
     "gmsadumper.py", "impacket-dpapi", "dpapi.py", "impacket-getpac",
     "getpac.py", "impacket-finddelegation", "finddelegation.py",
     "impacket-lookupsid", "lookupsid.py", "impacket-machine_role",
+    # iter-35: ticketer for silver/golden ticket forgery (offline; the
+    # KDC never sees a request).
+    "impacket-ticketer", "ticketer.py",
     # samba 'net' tool for net rpc password (ForceChangePassword path)
     "net",
     # AD enumeration / abuse (manual)

