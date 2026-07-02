@@ -157,3 +157,24 @@ class Store:
         )
         c.pop("", None)
         return c.most_common(1)[0][0] if c else ""
+
+    # iter-38: extract the S-1-5-21-a-b-c domain SID prefix from any
+    # BloodHound principal SID (Aces[].PrincipalSID or ObjectIdentifier).
+    # Threaded into R-GOLDEN / R-SILVER / R-DCSYNC ticketer commands so
+    # the operator gets a ready-to-paste `impacket-ticketer -domain-sid
+    # S-1-5-21-...` instead of a placeholder.
+    def domain_sid(self):
+        import re as _re
+        _SID_RX = _re.compile(r'^(S-1-5-21-\d+-\d+-\d+)')
+        from collections import Counter
+        c = Counter()
+        for e in self.items:
+            m = e.meta or {}
+            for sid in (m.get("principal_sid", ""),
+                        m.get("object_identifier", ""),
+                        m.get("dc_sid", "")):
+                if sid:
+                    mm = _SID_RX.match(str(sid))
+                    if mm:
+                        c[mm.group(1)] += 1
+        return c.most_common(1)[0][0] if c else ""
