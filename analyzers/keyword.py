@@ -1262,6 +1262,20 @@ _HTPASSWD_LINE = re.compile(
     r'\$\d\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{22,})\s*$'
 )
 
+# iter-197: Linux kernel version extraction. Covers:
+#   `Linux <host> 5.4.0-42-generic #46-Ubuntu SMP ...`  (uname -a)
+#   `Linux version 5.4.0-42-generic (gcc ...) #46 SMP ...`  (/proc/version)
+#   `Kernel: Linux 5.4.0-42-generic`                     (hostnamectl)
+#   `# Linux <ver>`                                       (/etc/issue)
+# We match on `Linux[ version]? <MAJOR>.<MINOR>.<PATCH>[-buildinfo]` and
+# capture MAJOR/MINOR/PATCH separately for range comparison.
+_KERNEL_VERSION = re.compile(
+    r'(?i)\bLinux(?:\s+version)?\s+'
+    r'(?:\S+\s+)?'                     # optional hostname (uname -a)
+    r'(\d{1,2})\.(\d{1,3})\.(\d{1,3})' # major.minor.patch
+    r'(?:-\S+)?'                       # optional build tag
+)
+
 # iter-196: pfSense / OPNsense config.xml <user> blocks. The router config
 # contains admin creds as bcrypt hashes:
 #   <user>
@@ -1694,6 +1708,63 @@ def _multiline_passes(path, report, store):
             if store is not None:
                 store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                    source=path, line=_ln(m)))
+
+    # iter-197: Linux kernel version detection + vulnerable-CVE range flag.
+    # File-gated to uname / /proc/version / hostnamectl / /etc/issue -shaped
+    # inputs (or any file containing 'Linux <ver>' shape - since operators
+    # dump `uname -a` output into all kinds of notes). Doc-file gate skips
+    # writeups that reproduce vulnerable kernel banners as examples.
+    if not filters.is_doc_file(path):
+        _kern_seen = set()
+        for m in _KERNEL_VERSION.finditer(text):
+            try:
+                maj, minn, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            except (TypeError, ValueError):
+                continue
+            # Sanity: reject silly numbers (Java "Linux 8.0.152" etc. from
+            # random logs) - real kernel majors are 2..7 for years covered
+            # here.
+            if maj < 2 or maj > 7:
+                continue
+            ver = (maj, minn, patch)
+            if ver in _kern_seen:
+                continue
+            _kern_seen.add(ver)
+            vsz = f"{maj}.{minn}.{patch}"
+            # RECON: log the kernel version regardless of CVE match
+            report.add("INFO", "RECON", path, _ln(m),
+                       f"Linux kernel: {vsz}",
+                       hint=(f"cross-ref against public PoCs by version; "
+                             f"searchsploit linux kernel {maj}.{minn}"))
+            # ---- CVE range checks ----
+            # DirtyPipe: 5.8.0 <= v < 5.16.11
+            if (5, 8, 0) <= ver < (5, 16, 11):
+                report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                           f"kernel {vsz} vulnerable to CVE-2022-0847 (DirtyPipe)",
+                           hint=("PoC: github.com/AlexisAhmed/CVE-2022-0847-DirtyPipe-Exploits "
+                                 "(offline copy on Kali /usr/share/exploitdb); "
+                                 "compile on target: gcc dirtypipe.c -o dp && ./dp"))
+            # DirtyCow: v < 4.8.3
+            if ver < (4, 8, 3):
+                report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                           f"kernel {vsz} vulnerable to CVE-2016-5195 (DirtyCow)",
+                           hint=("PoC: searchsploit -m 40611 (dirtycow); "
+                                 "beware CoW race - may crash sshd. Use "
+                                 "root-shell.c PoC (safer)."))
+            # Sequoia (fs layer): 3.16.0 <= v < 5.13.13 (roughly)
+            if (3, 16, 0) <= ver < (5, 13, 13):
+                report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                           f"kernel {vsz} vulnerable to CVE-2021-33909 (Sequoia)",
+                           hint=("searchsploit sequoia; requires local user + "
+                                 "empty tmpfs to mount. Reliability varies."))
+            # NF-tables: 5.13-6.4 (broad, several UAF over years)
+            if (5, 13, 0) <= ver < (6, 4, 0):
+                report.add("MEDIUM", "INTERESTING FILES", path, _ln(m),
+                           f"kernel {vsz} may be vulnerable to nf_tables UAF "
+                           f"family (CVE-2022-32250 / CVE-2023-32233 / etc.)",
+                           hint=("test each by CVE-year with `searchsploit "
+                                 "nf_tables`; requires CAP_NET_ADMIN or "
+                                 "unprivileged user_namespaces=1"))
 
     # iter-190: .htpasswd file. Filename-gated to .htpasswd / .htdigest and
     # any file named like it (backups: .htpasswd.bak, htpasswd.old). Very
