@@ -1270,6 +1270,37 @@ _WINDOWS_SYSTEMINFO = re.compile(
     r'^\s*OS Version\s*:\s*(\d+\.\d+\.\d+)([^\r\n]{0,80})'
 )
 
+# iter-201: Grafana INI config admin creds. Standard grafana.ini shape:
+#   [security]
+#   admin_user = grafana-admin
+#   admin_password = R3alP@ssw0rd
+#   secret_key = X
+# Detects the [security] section header + admin_user + admin_password rows.
+# `admin_password = admin` is the DEFAULT (never rotated on stock installs)
+# so we flag it CRITICAL even when it looks placeholder-ish.
+_GRAFANA_ADMIN = re.compile(
+    r'(?im)^\s*\[security\]\s*\r?\n'
+    r'(?:(?!\n\s*\[)[\s\S]){0,400}?'
+    r'^\s*admin_user\s*=\s*([^\s#\r\n]{1,60})\s*(?:#[^\r\n]*)?\s*\r?\n'
+    r'(?:(?!\n\s*\[)[\s\S]){0,400}?'
+    r'^\s*admin_password\s*=\s*([^\s#\r\n]{3,120})\s*(?:#[^\r\n]*)?\s*(?:\r?\n|$)'
+)
+
+# iter-201: Airflow airflow.cfg [core] sql_alchemy_conn - the metadata DB
+# connection string. Contains DB user + password in URI form so we
+# extract them:
+#   [core]
+#   sql_alchemy_conn = postgresql+psycopg2://airflow:R3alP@ss@postgres:5432/airflow
+# The URL-with-creds regex in patterns.py catches these but we want a
+# dedicated hit with the Airflow context for the report.
+_AIRFLOW_CONN = re.compile(
+    r'(?im)^\s*sql_alchemy_conn\s*=\s*'
+    r'([a-z][a-z0-9+.\-]{2,20})://'
+    r'([^:/@\s]+):([^@/\s]{3,80})@'
+    r'([^:/\s]+)(?::(\d+))?'
+    r'(?:/([^\s?#]+))?'
+)
+
 # iter-200: nmap NSE script VULNERABLE markers. Common shape from
 # `nmap --script=smb-vuln* -p 445 <target>`:
 #   | smb-vuln-ms17-010:
@@ -1760,6 +1791,76 @@ def _multiline_passes(path, report, store):
             if store is not None:
                 store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                    source=path, line=_ln(m)))
+
+    # iter-201: Grafana INI admin creds. Filename-gated to grafana.ini /
+    # defaults.ini or path segment 'grafana' or `[security]` header AND
+    # any of `admin_password=`/`secret_key=` markers in the file.
+    _plow_gf = path.lower().replace("\\", "/")
+    _grafana_gate = ("grafana" in _plow_gf
+                     or _plow_gf.endswith(("grafana.ini", "defaults.ini"))
+                     or ("[security]" in text[:8000]
+                         and "admin_password" in text[:8000]
+                         and "grafana" in text[:8000].lower()))
+    if _grafana_gate and not filters.is_doc_file(path):
+        _gf_seen = set()
+        for m in _GRAFANA_ADMIN.finditer(text):
+            u, p = m.group(1).strip(), m.group(2).strip()
+            key = (u, p)
+            if key in _gf_seen:
+                continue
+            _gf_seen.add(key)
+            if _is_cli_placeholder(u):
+                continue
+            # DON'T reject filters.is_placeholder(p) here - `admin` is the
+            # Grafana DEFAULT password. is_placeholder("admin") returns True
+            # but it's real loot on any stock install.
+            _is_default = p.lower() in ("admin", "grafana", "changeme")
+            _u_sh_gf = u.replace("'", "'\\''")
+            _p_sh_gf = p.replace("'", "'\\''")
+            _sev = "CRITICAL" if _is_default else "CRITICAL"
+            _tag = " (DEFAULT - never rotated)" if _is_default else ""
+            report.add(_sev, "CRED PAIRS", path, _ln(m),
+                       f"Grafana admin: {u}:{p}{_tag}",
+                       hint=(f"curl -u '{_u_sh_gf}:{_p_sh_gf}' "
+                             f"http://<host>:3000/api/user  |  API URL panel "
+                             f"editor / SSRF via ds_proxy - authenticated "
+                             f"plugin RCE via Grafana < 9.5.3"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                   source=path, line=_ln(m)))
+
+    # iter-201: Airflow sql_alchemy_conn - DB connection URI with creds.
+    # Filename-gated to airflow.cfg (also handles Airflow env-var dump).
+    _airflow_gate = ("airflow" in _plow_gf
+                     or _plow_gf.endswith(("airflow.cfg",))
+                     or "sql_alchemy_conn" in text[:8000])
+    if _airflow_gate and not filters.is_doc_file(path):
+        _af_seen = set()
+        for m in _AIRFLOW_CONN.finditer(text):
+            scheme, u, p, host = (m.group(1), m.group(2), m.group(3), m.group(4))
+            port = m.group(5) or ""
+            db = m.group(6) or ""
+            key = (u, p, host)
+            if key in _af_seen:
+                continue
+            _af_seen.add(key)
+            if _is_cli_placeholder(u) or filters.is_placeholder(p):
+                continue
+            _u_sh_af = u.replace("'", "'\\''")
+            _p_sh_af = p.replace("'", "'\\''")
+            _host_shown = host + (f":{port}" if port else "")
+            _db_shown = f"/{db}" if db else ""
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                       f"Airflow metadata DB ({scheme}): {u}:{p} @ "
+                       f"{_host_shown}{_db_shown}",
+                       hint=(f"psql -U '{_u_sh_af}' -h {host}"
+                             f"{' -p ' + port if port else ''} "
+                             f"{'-d ' + db if db else ''}  |  Airflow REST: "
+                             f"POST /api/v1/dags/<id>/dagRuns with runId - "
+                             f"trigger BashOperator for RCE"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                   host=host, source=path, line=_ln(m)))
 
     # iter-200: nmap NSE script VULNERABLE markers + SMB signing check.
     # Doc-file gated. Per-CVE hint routes to concrete exploit tooling.
