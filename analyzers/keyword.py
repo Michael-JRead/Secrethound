@@ -1163,6 +1163,10 @@ def _multiline_passes(path, report, store):
     # marker in each case.
     _PS_TRANSCRIPT_BLEED = re.compile(r'Windows PowerShell transcript start')
     _PE_VULN_BLEED = re.compile(r'"(?:VulnerabilityName|Vulnerability)"\s*:')
+    # iter-172: partial IMDS captures (Metadata endpoint response missing
+    # SecretAccessKey but present in the next role dump) would mispair
+    # AccessKeyId[N] with SecretAccessKey[N+1].
+    _IMDS_BLEED = re.compile(r'"AccessKeyId"\s*:')
 
     # SCCM NAA
     for m in _SCCM_NAA_MULTI.finditer(text):
@@ -1365,6 +1369,10 @@ def _multiline_passes(path, report, store):
         skip_imds = False
     for m in _IMDS_BLOCK.finditer(text):
         if skip_imds:
+            continue
+        # iter-172: bleed guard - a partial IMDS block missing SAK would
+        # grab the next role dump's SAK.
+        if not _no_bleed(m, 1, 2, _IMDS_BLEED):
             continue
         akid, sak, tok = m.group(1), m.group(2), m.group(3)
         if filters.is_placeholder(akid) or filters.is_canonical_sample(akid):
