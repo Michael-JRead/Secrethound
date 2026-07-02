@@ -186,9 +186,14 @@ def _entities(report, store):
             e.krbtgt_src = None
         if ev.kind == "acl_edge" and ev.fact:
             m = ev.meta or {}
+            # iter-103: ev.host got canon'd (lowercased) by Store.add(); the
+            # original case-preserved target lives in meta['target']. Prefer
+            # the meta version so summaries + commands read 'HELPDESK' not
+            # 'helpdesk' when BloodHound had it uppercase.
+            _tgt_pref = m.get("target") or ev.host
             e.acl_edges.append({
                 "right": ev.fact,
-                "target": ev.host,
+                "target": _tgt_pref,
                 "principal": ev.user,
                 "ptype": m.get("principal_type", ""),
                 "target_kind": m.get("target_kind", ""),
