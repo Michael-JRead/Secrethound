@@ -158,6 +158,24 @@ class Store:
         c.pop("", None)
         return c.most_common(1)[0][0] if c else ""
 
+    # iter-39: resolve a BloodHound principal SID to a real user name using
+    # ObjectIdentifier evidence captured from users/groups/computers.
+    # Returns the sam short name (e.g. 'helpdesk') or '' when unknown.
+    def resolve_sid(self, sid):
+        if not sid:
+            return ""
+        sid_s = str(sid).strip()
+        # lazy-build index on first call, invalidate never (Store lifecycle
+        # is per-scan-run so we don't need to worry about stale entries).
+        if not hasattr(self, "_sid_index"):
+            self._sid_index = {}
+            for e in self.items:
+                m = e.meta or {}
+                oid = str(m.get("object_identifier", "") or "").strip()
+                if oid and e.user:
+                    self._sid_index.setdefault(oid, e.user)
+        return self._sid_index.get(sid_s, "")
+
     # iter-38: extract the S-1-5-21-a-b-c domain SID prefix from any
     # BloodHound principal SID (Aces[].PrincipalSID or ObjectIdentifier).
     # Threaded into R-GOLDEN / R-SILVER / R-DCSYNC ticketer commands so

