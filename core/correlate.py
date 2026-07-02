@@ -16,6 +16,14 @@ from analyzers.ingest.evidence import Evidence
 
 LAB = compliance.LAB_ONLY_TAG
 
+
+# iter-127: bash single-quote escape. To embed arbitrary text in a bash
+# single-quoted string, replace every ' with '\'' (close-quote, escaped
+# single-quote, reopen-quote). Passwords from GPP / netexec .db / notes
+# can carry ' or $ or ! - without this a paste breaks lexing.
+def _sh_sq(text):
+    return str(text).replace("'", "'\\''")
+
 # ── detail-prefix parsers (the entity extractors) ──
 _RX = {
     "credpair": re.compile(r'USER=(\S+)\s+PASS=(\S+)'),
@@ -1207,6 +1215,17 @@ def run(report, store, ui=None):
             # blank-LM) or '-H NT' (netexec) or '--pw-nt-hash -U user%HASH'
             # (samba net rpc). Plaintext keeps the original -p / user:pw form.
             _blank_lm = "aad3b435b51404eeaad3b435b51404ee"
+            # iter-127: escape single quotes in pw / user / domain so pastes
+            # survive bash lexing when creds carry ' (e.g. "Fred's-P@ss").
+            # Redefine _owned_pw and _owned in-place so downstream branches
+            # (R-DCSYNC / R-SHADOW / R-OWNS / R-WRITEDACL / R-WRITESPN / R-RBCD
+            # / R-ADCS-ESC1 / R-GMSA-READ / etc.) that build their own URI or
+            # -u/-p args also get the escaped form. Summary values (see
+            # summary= arg above) already went through _pname resolution and
+            # use raw text - only shell arg values need escaping.
+            _owned_pw = _sh_sq(_owned_pw)
+            _owned = _sh_sq(_owned)
+            _dom_e = _sh_sq(_dom_e)
             if _owned_hash:
                 _impacket_uri = f"'{_dom_e}/{_owned}'"           # no ':pw' suffix
                 _impacket_hash = f"-hashes '{_blank_lm}:{_owned_hash}'"
