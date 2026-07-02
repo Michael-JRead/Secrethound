@@ -166,8 +166,13 @@ def parse(path, store, report):
             ca_names.append(ca_name)
             if dns:
                 store.learn_host(names=[dns])
+            # iter-84: set Evidence.domain so store.dominant_domain() picks
+            # up the domain we derived from the CA's DNS name (needed for
+            # the R-ADCS-ESC1 chain to substitute 'lowuser@htb.local' rather
+            # than '<dom>' when certipy is the only adapter that ran).
             store.add(Evidence(kind="service", service="adcs", host=dns,
-                               source=path, meta={"ca": ca_name}))
+                               source=path, domain=_dom if _dom != "<dom>" else "",
+                               meta={"ca": ca_name}))
             report.add("INFO", "RECON", path, None,
                        f"ADCS CA: {ca_name} ({dns})",
                        f"certipy-ad find -u <u>@{_dom} -p '<p>' -dc-ip <DC> -vulnerable")

