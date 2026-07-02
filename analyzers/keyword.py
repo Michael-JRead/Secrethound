@@ -1270,6 +1270,32 @@ _WINDOWS_SYSTEMINFO = re.compile(
     r'^\s*OS Version\s*:\s*(\d+\.\d+\.\d+)([^\r\n]{0,80})'
 )
 
+# iter-200: nmap NSE script VULNERABLE markers. Common shape from
+# `nmap --script=smb-vuln* -p 445 <target>`:
+#   | smb-vuln-ms17-010:
+#   |   VULNERABLE:
+#   |   Remote Code Execution vulnerability in Microsoft SMBv1 servers
+#   |     State: VULNERABLE
+#   |     IDs:  CVE:CVE-2017-0143
+# Also rdp-vuln-ms12-020 for RDP DoS, and cve-2017-7494 SambaCry variant.
+_NMAP_VULN_SCRIPT = re.compile(
+    r'(?im)^\|\s*(smb-vuln-[a-z0-9\-]+|rdp-vuln-[a-z0-9\-]+|'
+    r'cve-\d{4}-\d{4,7}|http-vuln-[a-z0-9\-]+|'
+    r'ssl-poodle|ssl-heartbleed|ftp-vsftpd-backdoor|'
+    r'ftp-proftpd-backdoor)\s*:\s*\n'
+    r'\|\s*VULNERABLE:'
+)
+
+# iter-200: SMB signing not required (from `smb2-security-mode` or
+# `smb-security-mode`). Signals SMB relay attacks are possible if we had
+# the tools - but relay/coerce chains are OSCP+-BANNED, so this is intel
+# only (flag as MEDIUM RECON with a compliance note).
+_SMB_SIGNING_UNREQ = re.compile(
+    r'(?im)(?:smb2?-security-mode|Message signing)[^\r\n]*\r?\n'
+    r'(?:\|[^\r\n]*\r?\n){0,4}'
+    r'\|[_\s]*Message signing enabled but not required'
+)
+
 # iter-199: OpenSSH banner. SSH-2.0 protocol identifier plus OpenSSH version.
 # Common shapes:
 #   SSH-2.0-OpenSSH_7.4p1 Debian-10+deb9u3
@@ -1734,6 +1760,66 @@ def _multiline_passes(path, report, store):
             if store is not None:
                 store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                    source=path, line=_ln(m)))
+
+    # iter-200: nmap NSE script VULNERABLE markers + SMB signing check.
+    # Doc-file gated. Per-CVE hint routes to concrete exploit tooling.
+    if not filters.is_doc_file(path):
+        _script_hints = {
+            "smb-vuln-ms17-010": ("MS17-010 (EternalBlue / EternalRomance)",
+                "PoC: use metasploit ms17_010_eternalblue (ONLY on Windows 7/2008 "
+                "R2 targets; NOT on Windows 10 - use ETERNAL_SYNERGY variant). "
+                "Manual: python2 zzz_exploit.py + AutoBlue-MS17-010 shellcode"),
+            "smb-vuln-ms08-067": ("MS08-067 netapi RCE",
+                "PoC: searchsploit -m 40279; targets XP/2003 - rare on modern "
+                "labs but comes up in HTB retro boxes"),
+            "smb-vuln-cve-2017-7494": ("SambaCry (Samba < 4.6.4)",
+                "PoC: exploit/linux/samba/is_known_pipename in metasploit "
+                "(ONE-target-only quota on exam) OR manual .so upload + "
+                "call_pipename trigger"),
+            "smb-vuln-conficker": ("Conficker check (worm hostility, not RCE)",
+                "intel only"),
+            "rdp-vuln-ms12-020": ("MS12-020 RDP DoS",
+                "DoS only - not useful for exam; note the target as legacy"),
+            "rdp-vuln-cve-2019-0708": ("BlueKeep (CVE-2019-0708)",
+                "PoC: metasploit rdp_cve_2019_0708_bluekeep_rce (unreliable "
+                "on default configs; needs precise hal.dll offsets). ONLY on "
+                "Win 7/2008/XP-Embedded targets"),
+            "ssl-heartbleed": ("Heartbleed (CVE-2014-0160)",
+                "PoC: python heartbleed.py <host> 443 or nmap script "
+                "recovery; grep memory dump for session tokens + creds"),
+            "ssl-poodle": ("SSLv3 POODLE (CVE-2014-3566)",
+                "protocol downgrade intel; not directly exploitable"),
+            "ftp-vsftpd-backdoor": ("vsftpd 2.3.4 backdoor CVE-2011-2523",
+                "PoC: metasploit vsftpd_234_backdoor OR nc <host> 21 with "
+                "smiley user"),
+            "http-vuln-cve-2017-5638": ("Apache Struts2 (Jakarta)",
+                "PoC: metasploit exploit/multi/http/struts2_content_type_ognl "
+                "(one-target quota); manual: curl -H 'Content-Type: %{...}"),
+        }
+        _script_seen = set()
+        for m in _NMAP_VULN_SCRIPT.finditer(text):
+            script = m.group(1).lower()
+            if script in _script_seen:
+                continue
+            _script_seen.add(script)
+            label, hint = _script_hints.get(script,
+                ("nmap NSE flagged vulnerable",
+                 f"searchsploit --nmap - lookup by NSE script id / CVE tag"))
+            report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                       f"nmap NSE VULNERABLE: {script} - {label}",
+                       hint=hint)
+
+        # SMB signing not required: MEDIUM RECON with compliance note.
+        for m in _SMB_SIGNING_UNREQ.finditer(text):
+            report.add("MEDIUM", "RECON", path, _ln(m),
+                       "SMB signing enabled but not required (SMB relay-vector, "
+                       "but OSCP+ BANS relay tools like Responder/ntlmrelayx)",
+                       hint=("intel only for the exam - `SMB signing not "
+                             "required` normally invites NTLM relay, but "
+                             "Responder / ntlmrelayx are exam-forbidden. "
+                             "Note the target for post-exam followup / "
+                             "compliance report."))
+            break  # dedup - one signing check per file is enough
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
