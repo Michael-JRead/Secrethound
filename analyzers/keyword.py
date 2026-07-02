@@ -269,6 +269,28 @@ _AD = [
     # `client-certificate-data: <b64>` + `client-key-data: <b64>` under user.
     ("kubeconfig token", re.compile(
         r'(?im)^\s*token\s*:\s*([A-Za-z0-9._-]{32,})\s*$')),
+    # iter-27: ~/.docker/config.json auth b64. Shape:
+    #   "auths": {"registry.io": {"auth": "dXNlcjpwYXNz"}}
+    # The b64 decodes to user:password for direct registry auth. Also
+    # covers Kubernetes .dockerconfigjson secrets which use the same shape.
+    ("docker config auth", re.compile(
+        r'"auth"\s*:\s*"([A-Za-z0-9+/]{8,}={0,2})"')),
+    # iter-27: Ansible inventory / group_vars password variables. Common
+    # in Ansible-provisioned lab boxes (THM Overpass 2 Hacked, HTB Curling,
+    # etc). Also covers ansible_ssh_pass (older name) and
+    # ansible_winrm_password / ansible_become_password.
+    ("ansible var pass", re.compile(
+        r'(?im)^\s*(ansible_(?:become_(?:pass(?:word)?)?|ssh_pass|password|'
+        r'winrm_pass(?:word)?|paramiko_pass))\s*[:=]\s*'
+        r'["\']?([^\s"\'#\r\n]{3,80})["\']?\s*$')),
+    # iter-27: GitLab runner config.toml token entry. The [[runners]]
+    # section carries `token = "..."` which auths the runner to GitLab.
+    ("gitlab runner token", re.compile(
+        r'(?im)^\s*token\s*=\s*"([A-Za-z0-9_-]{20,})"\s*$')),
+    # iter-27: Chef data_bags encrypted secret (marker). Just flag as
+    # INTERESTING; decryption requires the org's shared secret key.
+    ("chef databag marker", re.compile(
+        r'"encrypted_data"\s*:\s*"[A-Za-z0-9+/]{50,}={0,2}"')),
     # Terraform state with "sensitive": true output keeps the plaintext value.
     ("Terraform sensitive", re.compile(
         r'"sensitive"\s*:\s*true[\s\S]{0,300}?"value"\s*:\s*"([^"]{3,200})"')),
@@ -2350,6 +2372,74 @@ def analyze(path, report, store=None):
                         report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
                                    f"kubeconfig token: {tok[:40]}...",
                                    hint="kubectl --kubeconfig <this> get pods --all-namespaces  -> escalate to nodes via privileged pods")
+                        hit = True
+                        break
+                    # iter-27: Docker config.json auth block - b64 of user:pw
+                    if name == "docker config auth":
+                        import base64 as _b64
+                        b64v = am.group(1)
+                        if filters.is_placeholder(b64v):
+                            continue
+                        try:
+                            dec = _b64.b64decode(b64v, validate=True).decode(
+                                "utf-8", "replace")
+                        except Exception:
+                            dec = ""
+                        if dec and ":" in dec and len(dec) < 200:
+                            u, p = dec.split(":", 1)
+                            if p and not filters.is_placeholder(p):
+                                report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                           f"Docker registry auth: {u}:{p}",
+                                           hint=f"docker login <registry> -u '{u}' -p '{p}'; "
+                                                f"docker pull / image extract for secrets")
+                                if store is not None:
+                                    from analyzers.ingest.evidence import Evidence
+                                    store.add(Evidence(kind="plaintext", user=u,
+                                                       plaintext=p, source=path,
+                                                       line=lineno))
+                                hit = True
+                                break
+                    # iter-27: Ansible playbook / inventory password variable
+                    if name == "ansible var pass":
+                        varname, pw = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw) or pw.startswith(("{{", "$")):
+                            # jinja templating / env-var reference - skip
+                            continue
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"Ansible {varname}: {pw}",
+                                   hint=(f"reuse: ssh <user>@<host> with '{pw}'; "
+                                         f"or ansible-playbook uses this directly"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-27: GitLab runner token
+                    if name == "gitlab runner token":
+                        tok = am.group(1)
+                        if filters.is_placeholder(tok):
+                            continue
+                        # /etc/gitlab-runner/config.toml carries the runner
+                        # registration token; not a user cred, but a foothold
+                        # into the CI system.
+                        base = os.path.basename(path).lower()
+                        if "runner" not in base and "gitlab" not in base \
+                                and not path.lower().endswith("config.toml"):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"GitLab runner token: {tok[:16]}...",
+                                   hint=(f"curl -H 'PRIVATE-TOKEN: {tok}' https://<gitlab>/"
+                                         f"api/v4/projects  -> project foothold"))
+                        hit = True
+                        break
+                    # iter-27: Chef encrypted data_bag marker
+                    if name == "chef databag marker":
+                        report.add("MEDIUM", "INTERESTING FILES", path, lineno,
+                                   "Chef encrypted data_bag - needs shared secret",
+                                   hint=("knife data bag show -F json <bag> <item> "
+                                         "--secret-file <secret>  (locate secret in "
+                                         "/etc/chef/encrypted_data_bag_secret)"))
                         hit = True
                         break
                     if name == "Terraform sensitive":
