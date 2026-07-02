@@ -523,12 +523,39 @@ _AD = [
         r'(?i)Sudo\s+version\s+(\d+\.\d+\.\d+)')),
     # SUID find output: `-rwsr-xr-x ... /path/to/binary` of common GTFOBins-able
     # binaries (curl, wget, find, python, perl, etc.).
+    # iter-164: expanded significantly - the prior list missed bash/sh/dash
+    # (direct shell escape), mount/umount (direct root), chown/chmod (write
+    # /etc/passwd), docker (docker group == root), openssl (file read/write
+    # as root), apt/yum/dnf/apk (package manager hook execution), crontab,
+    # git (pager escape), mysql/sqlite3 (\! shell escape), service/systemctl
+    # (spawn as root), and the flock/time/timeout/stdbuf wrapper set that
+    # lets the operator prefix an arbitrary command with the SUID wrapper.
+    # OSCP+ boxes routinely ship non-obvious SUIDs (Return, Nibbles,
+    # PermX-style) that fell through the old list.
     ("SUID GTFOBins", re.compile(
-        r'(?im)^[-l]rws[\s\S]{0,40}\b(/(?:usr/)?(?:s?bin)/'
-        r'(?:python\d*|perl|ruby|php|nmap|find|vim|less|more|nano|tee|'
-        r'awk|cp|mv|cat|tar|zip|gzip|env|node|wall|dd|expect|rsync|'
-        r'gdb|gimp|lua|mawk|nice|nohup|pkexec|setarch|socat|strace|'
-        r'taskset|tclsh|unzip|wget|curl|xargs|xxd|zsh))$')),
+        r'(?im)^[-l]rws[\s\S]{0,120}\s(/(?:usr/)?(?:s?bin|libexec)/'
+        r'(?:python\d*|perl|ruby|php|nmap|find|vim|vi|view|rvim|less|more|nano|tee|'
+        r'awk|mawk|gawk|cp|mv|cat|tac|tar|zip|unzip|gzip|env|node|wall|dd|expect|rsync|'
+        r'gdb|gimp|lua|nice|nohup|pkexec|setarch|socat|strace|'
+        r'taskset|tclsh|wget|curl|xargs|xxd|zsh|'
+        r'bash|sh|dash|ash|csh|ksh|tcsh|'
+        r'mount|umount|chown|chmod|chroot|'
+        r'docker|openssl|apt|apt-get|dpkg|yum|dnf|apk|pip|pip3|snap|'
+        r'crontab|at|batch|'
+        r'git|screen|tmux|'
+        r'mysql|psql|sqlite3|'
+        r'service|systemctl|systemd-tmpfiles|'
+        r'flock|time|timeout|stdbuf|'
+        r'iconv|xz|make|ld|'
+        r'busybox|ash|sudo|sudoedit|su|'
+        r'sed|ed|ex|emacs|'
+        r'jq|nl|paste|column|'
+        r'ftp|sftp|scp|ssh|smbclient|nc|ncat|netcat|'
+        r'strings|readelf|objdump|ltrace|'
+        r'watch|top|htop|'
+        r'ionice|ip|iptables|nmcli|'
+        r'setfacl|getfacl|'
+        r'view|vimdiff|ash))$')),
     # `getcap -r /` output - capability bits on binaries.
     # `/usr/bin/python3 = cap_setuid+ep`
     # iter-11 FP audit: LHS must be an absolute path (rejects Makefile
