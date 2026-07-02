@@ -151,7 +151,14 @@ def _all_tokens(cmd):
     # referencing the denylist. _primary_binaries() already does this; keep
     # the two callers in sync.
     cmd = cmd.split("#", 1)[0]
-    return set(_re.split(r'[\s/;|]+', cmd.lower()))
+    # iter-93: also split on shell substitution characters ($(, ), `,
+    # "&", '"', "'"). Without these, an obvious injection like
+    # 'netexec ... -p $(hydra ...)' or '`msfconsole`' let a denylisted
+    # binary slip through because '$(hydra' isn't equal to 'hydra' in the
+    # token set. This is defence-in-depth: no legitimate emitter uses
+    # command substitution to inject a denylisted tool, but if one did,
+    # this catch would surface it.
+    return set(_re.split(r'[\s/;|$()`"\'&]+', cmd.lower()))
 
 
 def is_denied(cmd):
