@@ -291,6 +291,25 @@ _AD = [
     # INTERESTING; decryption requires the org's shared secret key.
     ("chef databag marker", re.compile(
         r'"encrypted_data"\s*:\s*"[A-Za-z0-9+/]{50,}={0,2}"')),
+    # iter-28: systemd .service unit Environment= directive with a plaintext
+    # password / token / secret. Common on service-managed lab boxes where
+    # a maintainer inlines DB creds instead of using EnvironmentFile=.
+    # Shape:
+    #   Environment=DB_PASSWORD=SuperSecret!2024
+    #   Environment="POSTGRES_PASSWORD=P@ss word"
+    # Also matches ExecStart lines with inline env prefix.
+    ("systemd Environment=", re.compile(
+        r'(?im)^\s*Environment\s*=\s*"?'
+        r'([A-Z][A-Z0-9_]{2,40}(?:PASS(?:WORD)?|PWD|SECRET|TOKEN|KEY|CRED))'
+        r'=([^"\r\n]{3,200})"?\s*$')),
+    # iter-28: RabbitMQ definitions.json users array - handled in
+    # _multiline_passes() since the fields span JSON lines.
+    # iter-28: PostgreSQL .pgpass row where credline may have already
+    # caught it, but a keyword pass emits it into ASSIGNED SECRETS too
+    # so the operator sees the host + db context inline.
+    ("pgpass row hint", re.compile(
+        r'(?m)^([^:\r\n]+):(\d{1,5}|\*):([^:\r\n]+):([^:\r\n]+):'
+        r'([^:\r\n#][^:\r\n]{2,80})\s*$')),
     # Terraform state with "sensitive": true output keeps the plaintext value.
     ("Terraform sensitive", re.compile(
         r'"sensitive"\s*:\s*true[\s\S]{0,300}?"value"\s*:\s*"([^"]{3,200})"')),
@@ -1157,6 +1176,28 @@ def _multiline_passes(path, report, store):
             report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
                        f"AWS Session Token (IMDS): {tok[:20]}{'*'*16}",
                        hint="must export AWS_SESSION_TOKEN alongside the AccessKeyId/SecretAccessKey")
+
+    # iter-28: RabbitMQ definitions.json users[].password_hash. The name +
+    # password_hash + hashing_algorithm triplet spans JSON lines so we run
+    # this at file scope. Only fire in files that look like RabbitMQ
+    # definitions (path contains 'definitions.json' or matches the
+    # top-level 'rabbit_version' marker).
+    _RMQ_PWHASH = re.compile(
+        r'"name"\s*:\s*"([^"]{1,80})"\s*,\s*"password_hash"\s*:\s*'
+        r'"([A-Za-z0-9+/=]{20,})"\s*,\s*"hashing_algorithm"\s*:\s*'
+        r'"([^"]{1,40})"')
+    plow_rmq = path.lower()
+    if ("definitions.json" in plow_rmq or "rabbit" in plow_rmq
+            or '"rabbit_version"' in text[:400]):
+        for m in _RMQ_PWHASH.finditer(text):
+            if filters.is_doc_file(path):
+                continue
+            u, ph, algo = m.group(1), m.group(2), m.group(3)
+            report.add("HIGH", "PASSWORD HASHES", path, _ln(m),
+                       f"RabbitMQ {u} password_hash ({algo}): {ph}",
+                       hint=("hash = base64(salt(4B) || sha256(salt||utf8(pw))). "
+                             "Offline: for pw in rockyou; check sha256(salt||pw) "
+                             "== decoded[4:]"))
 
     # PowerShell transcript header - flag the file for deeper inspection
     for m in _PS_TRANSCRIPT.finditer(text):
@@ -2440,6 +2481,56 @@ def analyze(path, report, store=None):
                                    hint=("knife data bag show -F json <bag> <item> "
                                          "--secret-file <secret>  (locate secret in "
                                          "/etc/chef/encrypted_data_bag_secret)"))
+                        hit = True
+                        break
+                    # iter-28: systemd Environment= password / secret / token
+                    if name == "systemd Environment=":
+                        varname, val = am.group(1), am.group(2).strip()
+                        if filters.is_placeholder(val) or val.startswith("$"):
+                            continue
+                        # only fire in likely-service-unit files or logs of same
+                        plow = path.lower()
+                        base = os.path.basename(plow)
+                        if not (base.endswith((".service", ".socket", ".timer",
+                                                ".target", ".mount"))
+                                or "systemd" in plow or "systemctl" in plow
+                                or "/etc/systemd/" in plow
+                                or plow.endswith((".log", ".txt", ".conf"))):
+                            continue
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"systemd Environment= {varname}={val}",
+                                   hint=(f"service reads env at start; run "
+                                         f"`systemctl cat` to confirm, then "
+                                         f"reuse '{val}' against the service DB/API"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-28: RabbitMQ password_hash moved to _multiline_passes
+                    # iter-28: .pgpass row hint - already covered by credline
+                    # for the classified form; this adds a keyword ASSIGNED
+                    # SECRETS record with the host/db context for the operator.
+                    if name == "pgpass row hint":
+                        host, port, db, u, pw = (am.group(1), am.group(2),
+                                                  am.group(3), am.group(4),
+                                                  am.group(5))
+                        plow = path.lower()
+                        base = os.path.basename(plow)
+                        if not (base == ".pgpass" or base.endswith(".pgpass")):
+                            continue
+                        if filters.is_placeholder(pw):
+                            continue
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f".pgpass host={host} db={db} {u}:{pw}",
+                                   hint=(f"psql -h {host} -p {port} -U '{u}' "
+                                         f"-d '{db}'  (uses PGPASSFILE=this)"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
                         hit = True
                         break
                     if name == "Terraform sensitive":

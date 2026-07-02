@@ -32,6 +32,9 @@ TEXT_EXT = {".ini", ".conf", ".cnf", ".cfg", ".env", ".yml", ".yaml", ".json", "
             # iter-12: NDJSON / JSONL credential dumps (Bloodhound, secretsdump
             # JSON, kubectl get -o json | jq -c)
             ".ndjson", ".jsonl",
+            # iter-28: systemd unit files (Environment= directives carry
+            # plaintext creds on service-managed boxes)
+            ".service", ".socket", ".timer", ".target", ".mount", ".path",
             ""}
 SRC_EXT = {".js", ".pl", ".ps1", ".py", ".php", ".rb", ".java", ".go", ".cs", ".sh"}
 DB_EXT = {".sqlite", ".sqlite3", ".db", ".db3"}
