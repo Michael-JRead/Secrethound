@@ -182,6 +182,16 @@ class Store:
                     self._sid_index.setdefault(oid, e.user)
         return self._sid_index.get(sid_s, "")
 
+    # iter-50: pick the DC's IP for '<DC-IP>' substitution in chain
+    # commands that don't need Kerberos (netexec smb, secretsdump w/o -k).
+    def dc_ip(self):
+        for ev in self.items:
+            if ev.kind == "host" and ev.fact == "dc" and ev.host:
+                # canon guarantees IP-ish when it can be normalised
+                if _IP.match(ev.host):
+                    return ev.host
+        return ""
+
     # iter-48: pick the DC's FQDN when known. Chain commands that need
     # -k -no-pass secretsdump / psexec against the DC use this instead
     # of the '<DC-FQDN>' placeholder. Falls back to '' when unknown.

