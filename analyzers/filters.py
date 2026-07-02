@@ -94,6 +94,15 @@ _PLACEHOLDER_EMBEDDED = re.compile(
     r"Authkey|API|Auth))"
     # iter-20: also catch the SAMPLE-X / EXAMPLE-X dash variant
     r"|(?:(?:SAMPLE|EXAMPLE|PLACEHOLDER|YOUR)-[A-Z]{2,12})"
+    # iter-31: catch dash-separated instructional placeholders like
+    # 'password-goes-here', 'token-here', 'change-me-please',
+    # 'replace-with-real', 'add-your-secret'. Case-insensitive since
+    # YAML/JSON b64-decoded values are usually lowercase.
+    r"|(?i:(?:password|pwd|token|secret|key|cred|api[_-]?key|"
+    r"auth[_-]?token)"
+    r"[-_](?:goes[-_])?here)"
+    r"|(?i:(?:replace|add|put|change)[-_](?:with[-_])?(?:your[-_])?"
+    r"(?:real[-_])?(?:password|pwd|token|secret|key|cred|value|me))"
 )
 
 # canonical documentation / example secrets (gitleaks EXAMPLE allowlist + the

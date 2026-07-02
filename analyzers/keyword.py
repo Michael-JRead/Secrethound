@@ -204,9 +204,15 @@ _AD = [
     ("bash history sshpass -p", re.compile(
         r'(?i)\bsshpass\s+-p\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?\s+'
         r'(?:ssh|scp|rsync)\s+[^\r\n]*?(\S+@\S+)')),
+    # iter-31 FP fix: the user portion must not look like a URL scheme
+    # (http/https/ftp/etc.) - otherwise `curl -u http://<IP>:8080/api`
+    # matched with user='http' pw='//<IP>...' which is a URL, not a cred.
+    # Also reject when the user starts with '<' (placeholder) or contains '/'.
     ("bash history curl -u", re.compile(
         r'(?i)\bcurl\s+[^\r\n]*?(?:-u|--user)\s+'
-        r'["\']?(\S{1,40}):([^"\'\s][^"\'\s\r\n]{1,79})["\']?')),
+        r'["\']?(?!(?:https?|ftp|smb|s3|file|ldap|ssh)://)'
+        r'([A-Za-z_][A-Za-z0-9._-]{0,39}):'
+        r'([^"\'\s/<][^"\'\s\r\n]{1,79})["\']?')),
     ("bash history wget --user", re.compile(
         r'(?i)\bwget\s+[^\r\n]*?--user[= ]\s*["\']?(\S{1,40})["\']?\s+'
         r'[^\r\n]*?--password[= ]\s*["\']?([^"\'\s][^"\'\s\r\n]{1,79})["\']?')),
@@ -1207,8 +1213,12 @@ def _multiline_passes(path, report, store):
     # password (printable, 4-80 chars, not placeholder), emit as CRED PAIRS.
     # Gated to files whose first ~400 bytes have both 'apiVersion' and
     # 'kind: Secret' to skip generic YAML.
-    if "kind: Secret" in text[:800] and ("apiVersion" in text[:200] or
-                                          "apiVersion" in text[:800]):
+    # iter-31 FP fix: also suppress on doc/cheatsheet files - a docs page
+    # showing an example Secret manifest with 'password-goes-here' or
+    # 'my-app-secret' isn't a real cred.
+    if ("kind: Secret" in text[:800]
+            and ("apiVersion" in text[:200] or "apiVersion" in text[:800])
+            and not filters.is_doc_file(path)):
         _K8S_DATA = re.compile(
             r'(?im)^\s{2,6}([A-Za-z][A-Za-z0-9_-]{1,60})\s*:\s*'
             r'"?([A-Za-z0-9+/=]{8,})"?\s*$')
@@ -2165,6 +2175,10 @@ def analyze(path, report, store=None):
                     # The 'mysql client opt' regex captures `password = X`; pair
                     # it with the nearest preceding `user = X` to bind. Falling
                     # back to a generic record when user isn't in the same file.
+                    # iter-31 FP fix: gate label to .my.cnf-shaped files -
+                    # supervisord.conf / app.conf / mail.ini all have their
+                    # own `password = X` which was mis-labeled as "MySQL"
+                    # (still valid creds, just wrong provenance in the label).
                     if name == "mysql client opt":
                         pw = am.group(1).strip()
                         if filters.is_placeholder(pw) or filters.is_code_not_literal(pw, line):
@@ -2181,9 +2195,20 @@ def analyze(path, report, store=None):
                                     usr = um.group(1).strip()
                         except OSError:
                             pass
+                        base = os.path.basename(path).lower()
+                        is_mysql = ("my.cnf" in base or "mariadb" in base
+                                    or "debian.cnf" in base
+                                    or "/mysql/" in path.lower())
+                        if is_mysql:
+                            label = "MySQL .my.cnf cred"
+                            hint_ = (f"mysql -h <host> -u '{usr}' -p'{pw}'  "
+                                     f"(or auto: mysql --defaults-extra-file=<f>)")
+                        else:
+                            label = "config password= entry"
+                            hint_ = (f"password from ini/conf: reuse '{pw}' as "
+                                     f"service password; if user unknown try common")
                         report.add("HIGH", "CRED PAIRS", path, lineno,
-                                   f"MySQL .my.cnf cred: {usr}:{pw}",
-                                   hint=f"mysql -h <host> -u '{usr}' -p'{pw}'  (or auto: mysql --defaults-extra-file=<f>)")
+                                   f"{label}: {usr}:{pw}", hint=hint_)
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=usr, plaintext=pw,
