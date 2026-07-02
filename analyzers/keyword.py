@@ -1039,9 +1039,16 @@ _PSPY_LINE = re.compile(
 )
 # Docker registry config.json auths block (Docker for Linux/Windows, podman):
 #   "auths": { "registry.example.com": { "auth": "<base64 user:pass>" } }
+# iter-169: split into a context anchor + a per-entry pattern. The prior
+# combined regex only matched the FIRST registry in a multi-registry
+# config.json because the `"auths":{` prefix was inside the repeated pattern;
+# finditer restarted past the first b64 without finding another `"auths":{`
+# to satisfy the prefix. Now match each entry independently and gate on
+# the presence of `"auths"` in the surrounding text.
+_DOCKER_AUTH_CTX = re.compile(r'"auths"\s*:\s*\{')
 _DOCKER_AUTH = re.compile(
-    r'"auths"\s*:\s*\{[\s\S]{0,2000}?'
-    r'"([^"]{3,80})"\s*:\s*\{\s*"auth"\s*:\s*"([A-Za-z0-9+/=]{12,200})"',
+    r'"([A-Za-z0-9._\-][A-Za-z0-9._\-:/]{2,79})"\s*:\s*\{[^{}]{0,300}?'
+    r'"auth"\s*:\s*"([A-Za-z0-9+/=]{12,200})"',
     re.MULTILINE,
 )
 # AWS instance metadata service v1/v2 capture - IAM role JSON response
@@ -1301,8 +1308,15 @@ def _multiline_passes(path, report, store):
                    hint="root cron/service path - check perms; if writable / argv leaks creds, that IS the privesc")
 
     # Docker registry config.json auths - base64(user:pass) per registry
+    # iter-169: gate on `"auths":{` context anchor so the per-entry pattern
+    # only fires inside a real docker config, not any random JSON that
+    # happens to have "registry":{"auth":"..."} shape.
     import base64 as _b64
-    for m in _DOCKER_AUTH.finditer(text):
+    if not _DOCKER_AUTH_CTX.search(text):
+        _docker_auth_iter = ()
+    else:
+        _docker_auth_iter = _DOCKER_AUTH.finditer(text)
+    for m in _docker_auth_iter:
         registry, b64 = m.group(1), m.group(2)
         if filters.is_placeholder(b64):
             continue
