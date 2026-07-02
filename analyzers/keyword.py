@@ -1509,9 +1509,12 @@ def _multiline_passes(path, report, store):
         u, pw = m.group(1), m.group(2)
         if filters.is_placeholder(pw) or pw.startswith(("*", "/")):
             continue
+        # iter-173: shell-escape u + pw for parity with the wider sweep.
+        _u_sh = u.replace("'", "'\\''")
+        _pw_sh = pw.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"net user plaintext: {u}:{pw}",
-                   hint=f"from PowerShell/cmd history; try: nxc smb <host> -u '{u}' -p '{pw}'")
+                   hint=f"from PowerShell/cmd history; try: nxc smb <host> -u '{_u_sh}' -p '{_pw_sh}'")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
                                source=path, line=_ln(m)))
