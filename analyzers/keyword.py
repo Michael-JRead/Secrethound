@@ -804,6 +804,14 @@ _AD = [
     ("impacket-lookupsid user", re.compile(
         r'^\s*(\d{3,7}):\s*([^\\\s]+)\\([^\s()]+)\s+\(SidType(User|Group|Alias|WellKnownGroup|Domain)\)\s*$',
         re.MULTILINE)),
+    # iter-125: impacket-lookupsid announces the domain SID prefix as:
+    #   [*] Domain SID is: S-1-5-21-100-200-300-400
+    # This seeds store.domain_sid() so R-GOLDEN/R-SILVER ticketer emit a
+    # real -domain-sid instead of the '<S-1-5-21-...>' placeholder. Also
+    # covers 'Domain Sid:' variants from bloodyAD / rpcclient lsaquery.
+    ("impacket-lookupsid domain SID", re.compile(
+        r'(?i)^\s*(?:\[\*\]\s+)?Domain\s+SID(?:\s+is)?\s*:\s*(S-1-5-21-\d+-\d+-\d+)\s*$',
+        re.MULTILINE)),
     # Rubeus dump 'Base64EncodedTicket :' label (header-only; b64 follows)
     ("Rubeus dump ticket", re.compile(
         r'(?im)^\s*Base64EncodedTicket\s*:\s*$')),
@@ -2473,6 +2481,20 @@ def analyze(path, report, store=None):
                                    f"pypykatz Kerberos {etype} key: {key}",
                                    hint=(f"Pass-the-Key: impacket-getTGT '<dom>/<user>' -aesKey {key}; "
                                          "mimikatz: kerberos::ptt + sekurlsa::ekeys"))
+                        hit = True
+                        break
+                    if name == "impacket-lookupsid domain SID":
+                        if filters.is_doc_file(path):
+                            continue
+                        dsid = am.group(1)
+                        report.add("INFO", "RECON", path, lineno,
+                                   f"Domain SID: {dsid}",
+                                   hint=("seeds impacket-ticketer -domain-sid; "
+                                         "R-GOLDEN/R-SILVER will emit a real SID"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="ldap_attr", source=path, line=lineno,
+                                               meta={"dc_sid": dsid}))
                         hit = True
                         break
                     if name in ("nxc rid-brute user", "impacket-lookupsid user"):
