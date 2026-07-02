@@ -12,6 +12,19 @@ from analyzers.ingest.evidence import Evidence
 
 _USER_LINE = re.compile(r'(?:user:\[(?P<u1>[^\]]+)\]|index:.*Name:\s*(?P<u2>\S+)|^\s*(?P<u3>[A-Za-z0-9._-]+)\s*$)')
 _RID = re.compile(r'rid:\[0x[0-9a-f]+\]\s*user:\[([^\]]+)\]', re.I)
+# iter-126: enum4linux's 'Domain Sid: S-1-5-21-...' line seeds
+# Store.domain_sid() so downstream ticketer commands emit real SIDs.
+_DOM_SID = re.compile(
+    r'(?im)^\s*(?:\[\+\]\s+)?Domain\s+SID(?:\s+is)?\s*:\s*(S-1-5-21-\d+-\d+-\d+)\s*$')
+# iter-126: enum4linux / enum4linux-ng RID cycling emits SID lines like:
+#   S-1-5-21-100-200-300-500 LAB\Administrator (Local User)
+#   S-1-5-21-100-200-300-1104 LAB\svc_backup (Local User)
+# Only match 'Local User' - Local Group / Domain Group would seed group
+# names which are less useful for spray/roast candidates. Capture the
+# full SID so it also seeds Store.domain_sid() via principal_sid.
+_RID_SID = re.compile(
+    r'^(S-1-5-21-\d+-\d+-\d+-\d+)\s+([^\\\s]+)\\([^\s()]+)\s+\(Local User\)\s*$',
+    re.MULTILINE)
 _SHARE = re.compile(r'^\s*(\S+)\s+(Disk|IPC|Printer)\s', re.I)
 _LOCKOUT = re.compile(r'(?:lockout threshold|account lockout threshold)\D*(\d+)', re.I)
 
@@ -89,23 +102,35 @@ def parse(path, store, report):
     n = 0
     try:
         with open(path, "r", errors="ignore") as fh:
-            for line in fh:
-                m = _RID.search(line)
-                if m:
-                    store.add(Evidence(kind="user", user=m.group(1), source=path))
-                    n += 1
-                    continue
-                lo = _LOCKOUT.search(line)
-                if lo:
-                    try:
-                        store.lockout_threshold = int(lo.group(1))
-                    except ValueError:
-                        pass
-                sh = _SHARE.match(line)
-                if sh:
-                    store.add(Evidence(kind="share", meta={"name": sh.group(1)}, source=path))
+            text = fh.read()
     except OSError:
         return 0
+    # iter-126: RID_SID matches multi-line so it needs the full file
+    # buffer once, not per-line.
+    for m in _RID_SID.finditer(text):
+        sid, dom, user = m.group(1), m.group(2), m.group(3)
+        store.add(Evidence(kind="user", user=user, domain=dom, source=path,
+                           meta={"principal_sid": sid}))
+        n += 1
+    for m in _DOM_SID.finditer(text):
+        store.add(Evidence(kind="ldap_attr", source=path,
+                           meta={"dc_sid": m.group(1)}))
+        n += 1
+    for line in text.splitlines():
+        m = _RID.search(line)
+        if m:
+            store.add(Evidence(kind="user", user=m.group(1), source=path))
+            n += 1
+            continue
+        lo = _LOCKOUT.search(line)
+        if lo:
+            try:
+                store.lockout_threshold = int(lo.group(1))
+            except ValueError:
+                pass
+        sh = _SHARE.match(line)
+        if sh:
+            store.add(Evidence(kind="share", meta={"name": sh.group(1)}, source=path))
     if n:
         report.add("INFO", "RECON", path, None, f"enum4linux parsed: {n} users")
     return n
