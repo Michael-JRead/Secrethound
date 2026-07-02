@@ -153,12 +153,13 @@ _GETS = re.compile(
     r"(?i)(?:"
     # verb-phrase branches: separator is optional (word-boundary suffices)
     r"\b(?:gets?\s+password|password\s+set\s+to|"
-    r"(?:my|the|default|your)\s+(?:default\s+)?password\s+is)\b"
+    r"(?:my|the|default|your)\s+(?:default\s+)?password\s+is|"
+    r"with\s+password)\b"
     r"\s*(?:[:=]|==>|->)?\s*"
     r"|"
     # anchor-phrase branches: separator required (colon / equal / arrow)
     r"\b(?:(?:temp(?:orary)?|initial|new|reset|welcome|kerberos|service|user|admin|root|guest)"
-    r"\s+password|with\s+password|password|pw)"
+    r"\s+(?:password|pass)|password|pw)"
     r"\s*(?:==>|->|:=|[:=]+)\s*"
     r")"
     r"[\"']?([^\s\"',;]{3,})")
