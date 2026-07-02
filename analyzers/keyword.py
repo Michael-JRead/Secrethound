@@ -268,6 +268,26 @@ _AD = [
         r'(?:smb|ldap|ssh|mssql|winrm|rdp|vnc|wmi|nfs|ftp)\s+'
         r'[^\r\n]*?\s-u\s+["\']?([^"\'\s]{1,40})["\']?'
         r'\s+[^\r\n]*?-p\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-184: schtasks /create /RU X /RP Y - Windows scheduled task with
+    # cleartext user + pw. When operators script periodic exec with a service
+    # account this pattern lives in .bat / .ps1 / cmd history. Also handles
+    # `-RU`/`-RP` short form (PowerShell aliasing).
+    ("bash history schtasks", re.compile(
+        r'(?i)\bschtasks(?:\.exe)?\s+[/-]create\b'
+        r'[^\r\n]*?[/-]RU[= ]\s*["\']?([^"\'\s]{1,60})["\']?'
+        r'\s+[^\r\n]*?[/-]RP[= ]\s*["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-184: kubectl config set-credentials NAME --token=X. Modern K8s
+    # deploy: operator wires up a service account, token lands in bash
+    # history. Rejects `<token>` and short tokens; real JWTs are >= 100 chars.
+    ("bash history kubectl set-cred token", re.compile(
+        r'(?i)\bkubectl\s+config\s+set-credentials\s+(\S{1,60})'
+        r'[^\r\n]*?--token[= ]\s*["\']?([A-Za-z0-9._-]{20,})["\']?')),
+    # iter-184: kubectl config set-credentials NAME --username=X --password=Y.
+    # Older / basic-auth K8s deploys.
+    ("bash history kubectl set-cred pw", re.compile(
+        r'(?i)\bkubectl\s+config\s+set-credentials\s+(\S{1,60})'
+        r'[^\r\n]*?--username[= ]\s*["\']?([^"\'\s]{1,60})["\']?'
+        r'\s+[^\r\n]*?--password[= ]\s*["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
     # iter-183: `net use \\host\share pw /user:[DOM\]user` - Windows cmd/PS
     # history saves this shape when an operator mounts a share with an inline
     # pw. Also fires on `net use z: \\host\share pw /user:X`. The order is
@@ -1065,6 +1085,22 @@ _SCCM_NAA_MULTI = re.compile(
     r'NetworkAccessPassword\s*[:=]\s*([^\r\n]{3,80})'
 )
 
+# iter-184: CIFS credentials file (/etc/cifs.creds, /etc/samba/*.creds,
+# /root/.smbcreds, /etc/mount.cifs.creds). Referenced by mount.cifs -o
+# credentials=<path>. The file is a simple 2- or 3-line trio:
+#   username=alice
+#   password=Sunfl0wer!
+#   domain=CORP        (optional)
+# The keys are also spelt user/pass/dom (short form) in some distros.
+# Only fire in _multiline_passes() AND only on file paths that look like
+# a CIFS creds file (filename gate applied at dispatch).
+_CIFS_CREDS = re.compile(
+    r'(?im)^\s*(?:username|user)\s*=\s*([^\s#\r\n]{1,60})\s*(?:#[^\r\n]*)?\s*\n'
+    r'[\s\S]{0,200}?'
+    r'^\s*(?:password|pass|pw)\s*=\s*([^\s#\r\n]{3,80})'
+    r'(?:[\s\S]{0,200}?^\s*(?:domain|dom|workgroup)\s*=\s*([^\s#\r\n]{1,60}))?'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -1263,6 +1299,37 @@ def _multiline_passes(path, report, store):
                    hint="Network Access Account - typically a domain account; reuse for SMB/WinRM")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=_ln(m)))
+
+    # iter-184: CIFS credentials file. Filename gate: only fire on paths
+    # that look like a mount.cifs credentials file. Real files include
+    # /etc/cifs.creds, /etc/samba/*.creds, /root/.smbcreds, /etc/mount.
+    # cifs.creds, or any filename containing 'cifs' + 'creds'. Also allow
+    # bare '.smbcreds' / '.cifs' extensions.
+    _plow_cf = path.lower().replace("\\", "/")
+    _base_cf = _plow_cf.rsplit("/", 1)[-1]
+    _cifs_gate = (("cifs" in _plow_cf and "cred" in _base_cf) or
+                  _base_cf in (".smbcreds", ".cifscreds", "smbcreds",
+                               "cifscreds", "cifs.creds", "smb.creds")
+                  or _base_cf.endswith((".smbcreds", ".cifscreds"))
+                  or "/samba/" in _plow_cf and "cred" in _base_cf)
+    if _cifs_gate:
+        for m in _CIFS_CREDS.finditer(text):
+            u, p = m.group(1).strip(), m.group(2).strip()
+            dom = (m.group(3) or "").strip()
+            if not p or filters.is_placeholder(p) or filters.is_placeholder(u):
+                continue
+            _u_sh_cf = u.replace("'", "'\\''")
+            _p_sh_cf = p.replace("'", "'\\''")
+            _dom_disp = f"\\\\{dom}\\" if dom else ""
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                       f"CIFS creds file: {_dom_disp}{u}:{p}",
+                       hint=(f"mount.cifs //<host>/<share> /mnt -o "
+                             f"credentials={path},uid=root  |  reuse: nxc smb "
+                             f"<host> -u '{_u_sh_cf}' -p '{_p_sh_cf}'"
+                             + (f" -d '{dom}'" if dom else "")))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                   domain=dom, source=path, line=_ln(m)))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
@@ -2634,6 +2701,68 @@ def analyze(path, report, store=None):
                                    f"shell history nxc/cme: {u}:{pw}",
                                    hint=(f"reuse: nxc smb <host> -u '{_u_sh_nx}' "
                                          f"-p '{_pw_sh_nx}' ; also winrm/ldap/mssql"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-184: schtasks /create /RU X /RP Y.
+                    if name == "bash history schtasks":
+                        u, pw = am.group(1), am.group(2)
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or filters.is_placeholder(u)):
+                            continue
+                        _u_sh_st = u.replace("'", "'\\''")
+                        _pw_sh_st = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history schtasks: {u}:{pw}",
+                                   hint=(f"scheduled-task service-account cred; "
+                                         f"reuse: nxc smb <host> -u '{_u_sh_st}' "
+                                         f"-p '{_pw_sh_st}'  |  or evil-winrm"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-184: kubectl config set-credentials NAME --token=X.
+                    if name == "bash history kubectl set-cred token":
+                        cred_name, tok = am.group(1), am.group(2)
+                        if (filters.is_placeholder(tok) or tok.startswith("$")
+                                or len(tok) < 20):
+                            continue
+                        _tok_sh = tok.replace("'", "'\\''")
+                        _name_sh = cred_name.replace("'", "'\\''")
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"shell history kubectl token '{cred_name}': "
+                                   f"{tok[:40]}{'...' if len(tok) > 40 else ''}",
+                                   hint=(f"kubectl --token='{_tok_sh}' --server "
+                                         f"https://<apiserver>:6443 "
+                                         f"--insecure-skip-tls-verify get pods -A"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=tok,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-184: kubectl config set-credentials NAME --username X
+                    # --password Y (basic-auth K8s).
+                    if name == "bash history kubectl set-cred pw":
+                        cred_name, u, pw = am.group(1), am.group(2), am.group(3)
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or filters.is_placeholder(u)):
+                            continue
+                        _u_sh_kc = u.replace("'", "'\\''")
+                        _pw_sh_kc = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history kubectl basic-auth "
+                                   f"'{cred_name}': {u}:{pw}",
+                                   hint=(f"K8s basic-auth cred; try: kubectl "
+                                         f"--username='{_u_sh_kc}' "
+                                         f"--password='{_pw_sh_kc}' get pods -A"))
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u,
