@@ -36,6 +36,14 @@ _AD = [
     ("mysql -p inline", re.compile(r'(?i)\bmysql\b[^\n]*?\s-p(\S{3,})')),
     ("sshpass -p", re.compile(r'(?i)sshpass\s+-p\s*["\']?([^"\'\s]{3,})')),
     ("runas /savecred", re.compile(r'(?i)runas\s+(?:/\w+\s+)*/user:(\S+)')),
+    # iter-86: RDP saved session artifacts. The '.rdp' format stores lines
+    # like 'username:s:HTB\\administrator' and 'full address:s:10.10.10.5'
+    # in plaintext (the pw is DPAPI-encrypted 'password 51:b:...' - operator
+    # needs the user's DPAPI masterkey to decrypt, which R-DPAPI already
+    # chains when both are present). Surface the user + host so the
+    # operator knows WHO was RDP'd to WHERE.
+    ("RDP saved user", re.compile(r'^username:s:([^\r\n]{2,80})$')),
+    ("RDP target host", re.compile(r'^full address:s:([^\r\n]{2,80})$')),
     ("ldapsearch -w bind", re.compile(r'(?i)\bldapsearch\b[^\n]*?\s-w\s*["\']([^"\']{3,})["\']')),
     ("smbclient -U pass", re.compile(r'(?i)\bsmbclient\b[^\n]*?\s-U\s+\S+%([^\s"\']{3,})')),
     ("psexec inline", re.compile(r'(?i)\bpsexec(?:\.py)?\b[^\n]*?\s\S+/\S+:([^\s@"\']{3,})@')),
@@ -3505,6 +3513,36 @@ def analyze(path, report, store=None):
                         report.add("MEDIUM", "RECON", path, lineno,
                                    f"AutoLogon default principal: {val}",
                                    hint="pair with adjacent DefaultPassword finding; that's the AutoLogon principal+pw")
+                        hit = True
+                        break
+                    # iter-86: RDP saved session artifacts. Only fire when the
+                    # file extension is .rdp (or .rdg for RDCMan) - the field
+                    # syntax 'username:s:foo' / 'full address:s:foo' is
+                    # unambiguous but not worth a global keyword sweep.
+                    if name in ("RDP saved user", "RDP target host"):
+                        _pl = path.lower()
+                        if not (_pl.endswith((".rdp", ".rdg"))):
+                            continue
+                        val = am.group(1).strip()
+                        if filters.is_placeholder(val):
+                            continue
+                        if name == "RDP saved user":
+                            report.add("HIGH", "RECON", path, lineno,
+                                       f"RDP saved session for user: {val}",
+                                       hint=("pair with the 'password 51:b:' DPAPI blob in this "
+                                             ".rdp file - decrypt via impacket-dpapi credential "
+                                             "using the user's masterkey (see R-DPAPI chain)"))
+                        else:  # RDP target host
+                            _host_only = val.split(":", 1)[0]
+                            report.add("HIGH", "RECON", path, lineno,
+                                       f"RDP saved target host: {val}",
+                                       hint=f"the saved-cred user in this file was RDP'd to {_host_only}; try any recovered cred there")
+                            if store is not None:
+                                from analyzers.ingest.evidence import Evidence
+                                store.learn_host(names=[_host_only])
+                                store.add(Evidence(kind="service", host=_host_only,
+                                                    port=3389, service="rdp",
+                                                    source=path, line=lineno))
                         hit = True
                         break
                     if name == "GPP cpassword inline":

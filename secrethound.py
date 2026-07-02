@@ -35,6 +35,11 @@ TEXT_EXT = {".ini", ".conf", ".cnf", ".cfg", ".env", ".yml", ".yaml", ".json", "
             # iter-28: systemd unit files (Environment= directives carry
             # plaintext creds on service-managed boxes)
             ".service", ".socket", ".timer", ".target", ".mount", ".path",
+            # iter-86: RDP saved sessions (.rdp = plaintext KV-style file,
+            # .rdg = RDCMan XML). Both carry the RDP username + target host
+            # + a DPAPI-encrypted password blob the operator can flag for
+            # DPAPI decryption via R-DPAPI later.
+            ".rdp", ".rdg",
             ""}
 SRC_EXT = {".js", ".pl", ".ps1", ".py", ".php", ".rb", ".java", ".go", ".cs", ".sh"}
 DB_EXT = {".sqlite", ".sqlite3", ".db", ".db3"}
