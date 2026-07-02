@@ -113,6 +113,12 @@ DENYLIST_BINARIES = frozenset({
     # spoofing primitives (iter-16 audit)
     "responder", "ntlmrelayx", "impacket-ntlmrelayx", "mitm6", "inveigh",
     "inveigh.ps1", "smbrelay", "smbrelayx", "impacket-smbrelayx", "ettercap",
+    # iter-85: '.py' aliases the LAB_ONLY set already contained but the
+    # DENYLIST missed. Without these, 'responder.py' / 'ntlmrelayx.py' hit
+    # needs_lab_tag first (returning "needs [LAB-ONLY] tag") instead of
+    # is_denied (returning "PROHIBITED"), so the same tool got different
+    # verdicts depending on which alias the operator typed.
+    "responder.py", "ntlmrelayx.py", "mitm6.py",
     # public online cracking / submission services (iter-16 audit)
     "crack.sh", "hashes.com", "weakpass.com", "online-hash-crack",
     # msfvenom: payload generation counts toward MSF budget per OSCP+ rules
