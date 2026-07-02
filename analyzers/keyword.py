@@ -349,6 +349,17 @@ _AD = [
     # PHP array secret rule because Python config often uses UPPERCASE keys.
     ("Django DATABASES password", re.compile(
         r"(?i)['\"]PASSWORD['\"]\s*:\s*['\"]([^'\"\r\n]{3,200})['\"]")),
+    # iter-33: PowerShell $env:VARNAME = 'X' where VARNAME ends in a
+    # password / secret / token marker. Common in Windows service-setup
+    # scripts on HTB/THM lab boxes that provision creds via PowerShell.
+    # Also matches $ENV:varname (case insensitive in PowerShell).
+    ("powershell env var secret", re.compile(
+        r"(?i)\$env:([A-Z][A-Z0-9_]{2,50}(?:PASSWORD|PASS|PW|PWD|SECRET|"
+        r"TOKEN|KEY|CRED))\s*=\s*['\"]([^'\"\r\n]{3,200})['\"]")),
+    # iter-33: PowerShell Set-Item env:VAR VALUE alternate form
+    ("powershell set-item env", re.compile(
+        r"(?i)Set-Item\s+env:([A-Z][A-Z0-9_]{2,50}(?:PASSWORD|PASS|PW|PWD|"
+        r"SECRET|TOKEN|KEY|CRED))\s+['\"]([^'\"\r\n]{3,200})['\"]")),
     # iter-28: PostgreSQL .pgpass row where credline may have already
     # caught it, but a keyword pass emits it into ASSIGNED SECRETS too
     # so the operator sees the host + db context inline.
@@ -2712,6 +2723,23 @@ def analyze(path, report, store=None):
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-33: PowerShell $env:VARNAME = 'X' + Set-Item env:
+                    if name in ("powershell env var secret",
+                                "powershell set-item env"):
+                        varname, val = am.group(1), am.group(2)
+                        if (filters.is_placeholder(val) or
+                                val.startswith(("${", "$", "(", "@"))):
+                            continue
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"PowerShell $env:{varname} = {val}",
+                                   hint=(f"Windows service-setup provisioning; "
+                                         f"reuse '{val}' as service/user pw"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=val,
                                                source=path, line=lineno))
                         hit = True
                         break
