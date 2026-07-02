@@ -34,6 +34,11 @@ _ACL_RIGHTS = frozenset({
     "ReadGMSAPassword", "ReadLAPSPassword", "AllExtendedRights",
     "AddSelf", "WriteSPN", "Owns", "WriteAccountRestrictions",
     "AddAllowedToAct",
+    # iter-37: DCSync rights - the operator's principal can pull ALL
+    # domain password hashes without being admin. GetChanges is normal
+    # DS replication, GetChangesAll adds encrypted-attribute (password
+    # hash) replication - both are needed.
+    "GetChanges", "GetChangesAll", "GetChangesInFilteredSet",
 })
 
 # Description-field keys that historically carry plaintext passwords on AD

