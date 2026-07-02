@@ -44,6 +44,12 @@ _AD = [
     # operator knows WHO was RDP'd to WHERE.
     ("RDP saved user", re.compile(r'^username:s:([^\r\n]{2,80})$')),
     ("RDP target host", re.compile(r'^full address:s:([^\r\n]{2,80})$')),
+    # iter-87: RDCMan .rdg XML variant. Same DPAPI-encrypted password but
+    # user/domain/server name are plaintext XML text nodes. One line at a
+    # time is fine because RDCMan emits each field on its own line.
+    ("RDCMan user", re.compile(r'<userName>([^<>\r\n]{2,80})</userName>')),
+    ("RDCMan domain", re.compile(r'<domain>([^<>\r\n]{2,80})</domain>')),
+    ("RDCMan server", re.compile(r'<name>([^<>\r\n]{2,80}\.[^<>\r\n]+)</name>')),
     ("ldapsearch -w bind", re.compile(r'(?i)\bldapsearch\b[^\n]*?\s-w\s*["\']([^"\']{3,})["\']')),
     ("smbclient -U pass", re.compile(r'(?i)\bsmbclient\b[^\n]*?\s-U\s+\S+%([^\s"\']{3,})')),
     ("psexec inline", re.compile(r'(?i)\bpsexec(?:\.py)?\b[^\n]*?\s\S+/\S+:([^\s@"\']{3,})@')),
@@ -3541,6 +3547,40 @@ def analyze(path, report, store=None):
                                 from analyzers.ingest.evidence import Evidence
                                 store.learn_host(names=[_host_only])
                                 store.add(Evidence(kind="service", host=_host_only,
+                                                    port=3389, service="rdp",
+                                                    source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-87: RDCMan .rdg XML variant - only fire on .rdg
+                    # (or the special 'rdcman.settings' file), never on the
+                    # thousands of other .xml/.config files that use these
+                    # generic tag names (<name>, <domain>, <userName> also
+                    # show up in Java Spring beans and .NET web.config).
+                    if name in ("RDCMan user", "RDCMan domain", "RDCMan server"):
+                        _pl = path.lower()
+                        _base = os.path.basename(_pl)
+                        if not (_pl.endswith(".rdg") or _base == "rdcman.settings"):
+                            continue
+                        val = am.group(1).strip()
+                        if filters.is_placeholder(val):
+                            continue
+                        if name == "RDCMan user":
+                            report.add("HIGH", "RECON", path, lineno,
+                                       f"RDCMan saved profile user: {val}",
+                                       hint=("pair with the <password> DPAPI blob in this .rdg -"
+                                             " impacket-dpapi credential -key 0x<sha1> to decrypt"))
+                        elif name == "RDCMan domain":
+                            report.add("MEDIUM", "RECON", path, lineno,
+                                       f"RDCMan saved profile domain: {val}",
+                                       hint="AD domain the RDCMan profile authenticates to")
+                        else:  # RDCMan server
+                            report.add("HIGH", "RECON", path, lineno,
+                                       f"RDCMan saved server: {val}",
+                                       hint=f"target host in the operator's RDCMan file; try any recovered cred against {val}")
+                            if store is not None:
+                                from analyzers.ingest.evidence import Evidence
+                                store.learn_host(names=[val])
+                                store.add(Evidence(kind="service", host=val,
                                                     port=3389, service="rdp",
                                                     source=path, line=lineno))
                         hit = True
