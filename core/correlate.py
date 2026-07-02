@@ -1109,8 +1109,14 @@ def run(report, store, ui=None):
     # decryption is one impacket-dpapi command - no online prompt needed.
     # Looks for masterkey via Evidence(kind='dpapi_mk', meta={sha1}) and
     # Credential blob via INTERESTING FILES finding referencing /Credentials/<hex>.
+    # iter-117: skip system-tagged masterkey seeds from LSA DPAPI_SYSTEM -
+    # dpapi_machinekey/userkey unwraps a MACHINE-scope masterkey file, not
+    # a user Credentials\ blob directly. Pairing them here would emit a
+    # command that silently fails to decrypt. The LSA finding's hint already
+    # documents the two-step unwrap flow for the operator.
     dpapi_mks = [ev for ev in store.items if ev.kind == "dpapi_mk"
-                 and (ev.meta or {}).get("sha1")]
+                 and (ev.meta or {}).get("sha1")
+                 and not (ev.meta or {}).get("system")]
     blob_paths = []
     for f in report.findings:
         det = (f.get("detail") or "")

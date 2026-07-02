@@ -1544,6 +1544,37 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_ln(m)))
                 break  # one cred per attr line
 
+    # iter-117: LSA DPAPI_SYSTEM secret block emitted by impacket-secretsdump
+    # every time the SECURITY hive is decrypted. Format:
+    #   [*] DPAPI_SYSTEM
+    #   dpapi_machinekey:0x{40hex}
+    #   dpapi_userkey:0x{40hex}
+    # dpapi_machinekey unwraps SYSTEM-scope DPAPI masterkeys (services, IIS
+    # applicationhost, Scheduled Tasks). dpapi_userkey unwraps user-scope MKs
+    # when the user's plaintext is unknown. Emit them as dpapi_mk Evidence
+    # tagged with 'system=True' so R-DPAPI can pair with any Credentials\ blob
+    # even without a per-user masterkey file.
+    _LSA_DPAPI_SYSTEM = re.compile(
+        r'(?im)^\s*\[\*\]\s*DPAPI_SYSTEM\s*\r?\n'
+        r'\s*dpapi_machinekey\s*:\s*0x([0-9a-f]{40})\s*\r?\n'
+        r'\s*dpapi_userkey\s*:\s*0x([0-9a-f]{40})\s*$')
+    for m in _LSA_DPAPI_SYSTEM.finditer(text):
+        if filters.is_doc_file(path):
+            continue
+        mk_key, uk_key = m.group(1), m.group(2)
+        if filters.is_canonical_sample(mk_key):
+            continue
+        report.add("HIGH", "INTERESTING FILES", path, _ln(m),
+                   f"LSA DPAPI_SYSTEM: machinekey=0x{mk_key[:16]}... "
+                   f"userkey=0x{uk_key[:16]}...",
+                   hint=(f"impacket-dpapi masterkey -file <mk-blob> "
+                         f"-system {mk_key}  # unwrap SYSTEM DPAPI MK; then "
+                         f"impacket-dpapi credential -file <cred> -key 0x<sha1>"))
+        if store is not None:
+            store.add(Evidence(kind="dpapi_mk", source=path, line=_ln(m),
+                               meta={"sha1": mk_key, "system": True,
+                                     "userkey": uk_key}))
+
     # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
     # (impacket secretsdump.py LSASecrets output)
     _LSA_SC = re.compile(
