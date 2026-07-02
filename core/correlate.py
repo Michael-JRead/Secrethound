@@ -556,9 +556,13 @@ def run(report, store, ui=None):
             src="bloodhound"))
     if e.has_tgs:
         s, l = e.tgs_src
+        # iter-80: use the real path to the hash file so operator doesn't
+        # have to extract the TGS blob into a separate tgs.txt file first.
+        _tgs_path = s if s else "tgs.txt"
         chains.append(Chain("R10", "crack TGS", "Kerberoast TGS hash present",
             crit=4, conf=0.8, ready=0.7, prox=0.6,
-            commands=["hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"], src=s, line=l))
+            commands=[f"hashcat -m 13100 '{_tgs_path}' rockyou.txt -r best64.rule"],
+            src=s, line=l))
     # AS-REP. iter-13: prox honors DC presence
     # iter-24: per-user form when target user is known (AS-REP doesn't need
     # creds: -no-pass flag). With a single asreproastable user we don't
@@ -572,9 +576,12 @@ def run(report, store, ui=None):
                       "hashcat -m 18200 asrep.txt rockyou.txt"], src="bloodhound"))
     if e.has_asrep:
         s, l = e.asrep_src
+        # iter-80: same path threading for the AS-REP cracker.
+        _asrep_path = s if s else "asrep.txt"
         chains.append(Chain("R12", "crack AS-REP", "AS-REP hash present",
             crit=4, conf=0.8, ready=0.7, prox=0.6,
-            commands=["hashcat -m 18200 asrep.txt rockyou.txt"], src=s, line=l))
+            commands=[f"hashcat -m 18200 '{_asrep_path}' rockyou.txt"],
+            src=s, line=l))
 
     # GPP cpassword. iter-13: conf=1.0 was over-confident - the DECRYPTION is
     # deterministic (published MS AES key) but the recovered cred validity is
