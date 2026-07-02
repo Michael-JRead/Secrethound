@@ -571,8 +571,12 @@ def run(report, store, ui=None):
                 break
     for u in e.kerberoastable:
         # iter-105: switch to -hashes form when we only have an NT hash.
-        _kb_uri = (f"{dom}/{_kb_owner}" if _kb_hash
-                   else f"{dom}/{_kb_owner}:{_kb_pw}")
+        # iter-107: single-quote the URI so machine-account names ending in
+        # '$' don't get partially-eaten by bash variable expansion. Plaintext
+        # form quotes the whole 'dom/user:pw' so ':' + special chars in pw
+        # are also safe.
+        _kb_uri = (f"'{dom}/{_kb_owner}'" if _kb_hash
+                   else f"'{dom}/{_kb_owner}:{_kb_pw}'")
         _kb_hash_flag = (f" -hashes 'aad3b435b51404eeaad3b435b51404ee:{_kb_hash}'"
                          if _kb_hash else "")
         chains.append(Chain("R9", "kerberoast", f"kerberoastable: {u}",
