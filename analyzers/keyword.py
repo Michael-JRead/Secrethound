@@ -797,6 +797,13 @@ _AD = [
     ("nxc rid-brute user", re.compile(
         r'^(?:SMB|LSARPC|WINRM|LDAP)\s+\d{1,3}(?:\.\d{1,3}){3}\s+\d{1,5}\s+\S+\s+'
         r'(\d{3,7}):\s*([^\\\s]+)\\([^\s()]+)\s+\(SidType(User|Group|Alias|WellKnownGroup|Domain)\)')),
+    # iter-124: impacket-lookupsid single-line output (no SMB/IP prefix)
+    #   500: LAB\Administrator (SidTypeUser)
+    # Same shape as nxc rid-brute, minus the ncacn header. Feeds users.txt
+    # + spray candidates when the operator has null/guest LSARPC access.
+    ("impacket-lookupsid user", re.compile(
+        r'^\s*(\d{3,7}):\s*([^\\\s]+)\\([^\s()]+)\s+\(SidType(User|Group|Alias|WellKnownGroup|Domain)\)\s*$',
+        re.MULTILINE)),
     # Rubeus dump 'Base64EncodedTicket :' label (header-only; b64 follows)
     ("Rubeus dump ticket", re.compile(
         r'(?im)^\s*Base64EncodedTicket\s*:\s*$')),
@@ -2468,7 +2475,7 @@ def analyze(path, report, store=None):
                                          "mimikatz: kerberos::ptt + sekurlsa::ekeys"))
                         hit = True
                         break
-                    if name == "nxc rid-brute user":
+                    if name in ("nxc rid-brute user", "impacket-lookupsid user"):
                         if filters.is_doc_file(path):
                             continue
                         rid_str, dom, user, sidtype = am.group(1), am.group(2), am.group(3), am.group(4)
@@ -2481,9 +2488,11 @@ def analyze(path, report, store=None):
                         if user in seen_svc:
                             continue
                         seen_svc.add(user)
+                        _tool = ("nxc rid-brute" if name.startswith("nxc")
+                                 else "impacket-lookupsid")
                         sev = "HIGH" if rid_n in (500, 512, 519, 518, 520) else "MEDIUM"
                         report.add(sev, "RECON", path, lineno,
-                                   f"nxc rid-brute user: {dom}\\{user} (RID {rid_n})",
+                                   f"{_tool} user: {dom}\\{user} (RID {rid_n})",
                                    hint=("add to users.txt; AS-REPRoast (impacket-GetNPUsers ... -no-pass) "
                                          "+ password-spray; RID 500/512/519 = high-value targets"))
                         if store is not None:
