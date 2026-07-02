@@ -1262,6 +1262,39 @@ _HTPASSWD_LINE = re.compile(
     r'\$\d\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{22,})\s*$'
 )
 
+# iter-195: iSCSI initiator config (/etc/iscsi/iscsid.conf) and per-node
+# config files under /etc/iscsi/nodes/. Format is INI-like:
+#   node.session.auth.authmethod = CHAP
+#   node.session.auth.username = target-init
+#   node.session.auth.password = MyStrongP@ss2024
+# Also `discovery.sendtargets.auth.username/password` for target discovery.
+# Multi-line: username and password rows can be separated by other options.
+_ISCSI_AUTH = re.compile(
+    r'(?im)^\s*(node|discovery)\.[a-z_]+\.auth\.username(?:_in)?\s*=\s*'
+    r'([^\s#\r\n]{1,80})\s*(?:#[^\r\n]*)?\s*\n'
+    r'(?:(?!\n\s*(?:node|discovery)\.[a-z_]+\.auth\.username)[\s\S]){0,400}?'
+    r'^\s*(?:node|discovery)\.[a-z_]+\.auth\.password(?:_in)?\s*=\s*'
+    r'([^\s#\r\n]{3,80})\s*(?:#[^\r\n]*)?\s*$'
+)
+
+# iter-195: Elasticsearch config plaintext passwords. `elasticsearch.yml`
+# / `kibana.yml` / `logstash.yml` / `apm-server.yml` all use the same
+# YAML shape with dotted-key or nested-object forms. Plaintext passwords
+# most commonly appear on:
+#   xpack.security.transport.ssl.keystore.password: X
+#   xpack.security.http.ssl.keystore.password: X
+#   xpack.security.authc.realms.native.native1.order: X
+#   elastic.password: X                                (Kibana / bootstrap)
+#   elasticsearch.password: X                          (Kibana)
+#   xpack.reporting.encryptionKey: X
+_ES_XPACK_PW = re.compile(
+    r'(?im)^\s*'
+    r'((?:xpack\.[a-z._]+\.(?:password|encryption[_-]?key|secret[_-]?key)|'
+    r'elasticsearch\.password|elastic(?:\.username|\.password)?|'
+    r'kibana\.password|logstash\.password))'
+    r'\s*:\s*["\']?([^"\'\s#\r\n]{3,120})["\']?\s*(?:#[^\r\n]*)?$'
+)
+
 # iter-192: PPP chap-secrets / pap-secrets file.
 # `/etc/ppp/chap-secrets` and `/etc/ppp/pap-secrets` format:
 #   # client   server   secret               IP addresses
@@ -1701,6 +1734,77 @@ def _multiline_passes(path, report, store):
                                    meta={"aws_profile": profile,
                                          "aws_access_key_id": akid,
                                          "temporary": _tmp}))
+
+    # iter-195: iSCSI iscsid.conf and per-node config. File-gated to
+    # /etc/iscsi/ paths OR filenames containing 'iscsid'/'iscsi'.
+    _plow_isc = path.lower().replace("\\", "/")
+    _iscsi_gate = ("/etc/iscsi/" in _plow_isc or "iscsid" in _plow_isc
+                   or "iscsi.conf" in _plow_isc
+                   or _plow_isc.endswith(("/iscsid.conf", ".iscsi")))
+    if _iscsi_gate and not filters.is_doc_file(path):
+        _isc_seen = set()
+        for m in _ISCSI_AUTH.finditer(text):
+            scope = m.group(1)  # 'node' or 'discovery'
+            u, p = m.group(2).strip(), m.group(3).strip()
+            key = (u, p)
+            if key in _isc_seen:
+                continue
+            _isc_seen.add(key)
+            if _is_cli_placeholder(u) or filters.is_placeholder(p):
+                continue
+            _u_sh_isc = u.replace("'", "'\\''")
+            _p_sh_isc = p.replace("'", "'\\''")
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                       f"iSCSI CHAP ({scope}): {u}:{p}",
+                       hint=(f"iscsiadm -m discovery -t sendtargets -p "
+                             f"<portal-ip>  |  iscsiadm -m node -T <iqn> -l "
+                             f"--login  (uses these creds); reuse as OS/SAN "
+                             f"cred: nxc smb <host> -u '{_u_sh_isc}' "
+                             f"-p '{_p_sh_isc}'"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                   source=path, line=_ln(m),
+                                   meta={"iscsi_scope": scope}))
+
+    # iter-195: Elasticsearch xpack + related YAML passwords. File-gated to
+    # elasticsearch.yml/kibana.yml/logstash.yml/apm-server.yml (or filenames
+    # containing 'elastic'/'kibana'/'logstash').
+    _es_gate = (_plow_isc.endswith(("elasticsearch.yml", "kibana.yml",
+                                     "logstash.yml", "apm-server.yml",
+                                     "beat.yml", "beats.yml"))
+                or any(t in _plow_isc for t in ("/elasticsearch/",
+                                                  "/kibana/", "/logstash/"))
+                or "xpack.security" in text[:8000])
+    if _es_gate and not filters.is_doc_file(path):
+        _es_seen = set()
+        for m in _ES_XPACK_PW.finditer(text):
+            key_name = m.group(1)
+            val = m.group(2).strip()
+            if (key_name, val) in _es_seen:
+                continue
+            _es_seen.add((key_name, val))
+            if filters.is_placeholder(val):
+                continue
+            # skip variable references ${SEC_PW} / {{ vault_es_pw }}
+            if val.startswith(("${", "{{", "$(")):
+                continue
+            _val_sh_es = val.replace("'", "'\\''")
+            # If key is `elastic.username`, treat as user hint only (LOW)
+            if key_name.endswith(".username"):
+                report.add("MEDIUM", "RECON", path, _ln(m),
+                           f"Elasticsearch username: {key_name} = {val}",
+                           hint=f"pair with 'elastic.password' from same file")
+                continue
+            report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
+                       f"Elasticsearch {key_name}: {val}",
+                       hint=(f"curl -k -u elastic:'{_val_sh_es}' "
+                             f"https://<es-host>:9200/_security/user  |  "
+                             f"if this is a keystore pw: use with "
+                             f"bin/elasticsearch-keystore"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", plaintext=val,
+                                   source=path, line=_ln(m),
+                                   meta={"es_key": key_name}))
 
     # iter-192: PPP chap-secrets / pap-secrets. Filename-gated to
     # basenames containing 'chap-secrets' / 'pap-secrets' or path under
