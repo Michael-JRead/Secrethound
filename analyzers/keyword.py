@@ -676,8 +676,12 @@ _AD = [
     # PHP bracketed-array secret: $cfg['db_password'] = 'X'  /
     # $cfg['DB_PASSWORD']="X"  (vtigercrm / Roundcube / Sentinel-style).
     # Different from the existing 'PHP array secret' rule (fat-arrow '=>').
+    # iter-30: added 'controlpass' (phpMyAdmin config.inc.php), 'ftppass'
+    # (nextcloud / cPanel), and 'adminpass' (moodle / kirby CMS).
     ("PHP bracketed array secret", re.compile(
-        r"(?i)\[\s*['\"](?:db_)?(?:password|passwd|pwd|secret|salt|smtppass|api_?key|token)['\"]\s*\]"
+        r"(?i)\[\s*['\"](?:db_)?(?:password|passwd|pwd|controlpass|"
+        r"ftppass|adminpass|secret|salt|smtppass|api_?key|token)"
+        r"['\"]\s*\]"
         r"\s*=\s*['\"]([^'\"\r\n]{3,200})['\"]")),
     # Tomcat context.xml Resource auth (Catalina DataSource with inline pw).
     # `<Resource name="..." username="X" password="Y" .../>` - whitespace flexible.
