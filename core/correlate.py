@@ -459,7 +459,11 @@ def run(report, store, ui=None):
         return fallback
 
     def dc(fallback="<DC-IP>"):
-        return global_dc or fallback
+        # iter-82: prefer Store.dc_ip() (which enforces IP-shape via _IP regex
+        # and IPv6 canonicalisation) over the raw global_dc from by_kind('host'),
+        # so callers threading dc() into '-dc-ip <val>' get an IP address rather
+        # than an FQDN that -dc-ip can't consume without DNS SRV present.
+        return store.dc_ip() or global_dc or fallback
 
     # iter-12 composite: AWS access key + secret in the same file within
     # 30 lines = an AWS auth-complete pair. Emit one CRITICAL chain with the
