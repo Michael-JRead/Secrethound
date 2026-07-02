@@ -52,7 +52,18 @@ _AD = [
     ("RDCMan server", re.compile(r'<name>([^<>\r\n]{2,80}\.[^<>\r\n]+)</name>')),
     ("ldapsearch -w bind", re.compile(r'(?i)\bldapsearch\b[^\n]*?\s-w\s*["\']([^"\']{3,})["\']')),
     ("smbclient -U pass", re.compile(r'(?i)\bsmbclient\b[^\n]*?\s-U\s+\S+%([^\s"\']{3,})')),
-    ("psexec inline", re.compile(r'(?i)\bpsexec(?:\.py)?\b[^\n]*?\s\S+/\S+:([^\s@"\']{3,})@')),
+    # iter-182: broadened from psexec-only to the full impacket exec/dump/kerb
+    # family (wmiexec/smbexec/atexec/dcomexec/secretsdump/getST/getTGT/getUserSPNs/
+    # GetNPUsers/lookupsid/rpcdump/mssqlclient). Also allow both `impacket-<tool>`
+    # (Kali packaging) and bare `<tool>.py`, and both `DOMAIN/user:pass@host`
+    # (kerb / DC login) and `user:pass@host` (WORKGROUP / local). Groups:
+    # (1) optional domain, (2) user, (3) pw, (4) target host.
+    ("impacket inline", re.compile(
+        r'(?i)\b(?:impacket-)?(?:psexec|wmiexec|smbexec|atexec|dcomexec|'
+        r'secretsdump|getST|getTGT|getUserSPNs|GetNPUsers|lookupsid|'
+        r'rpcdump|mssqlclient)(?:\.py)?\b[^\r\n]*?\s'
+        r'(?:(\S+)/)?([A-Za-z_][A-Za-z0-9._$-]{0,39}):'
+        r'([^\s@"\']{3,80})@(\S+)')),
     # MSSQL setup-INI keys: SAPWD, SQLSVCPASSWORD, AGTSVCPASSWORD, RSSVCPASSWORD,
     # ISSVCPASSWORD, FTSVCPASSWORD (EscapeTwo, real exam-style ConfigurationFile.ini).
     # These slip past the generic KEY regex because `\bpassword` won't match
@@ -230,6 +241,43 @@ _AD = [
     ("bash history wget --user", re.compile(
         r'(?i)\bwget\s+[^\r\n]*?--user[= ]\s*["\']?(\S{1,40})["\']?\s+'
         r'[^\r\n]*?--password[= ]\s*["\']?([^"\'\s][^"\'\s\r\n]{1,79})["\']?')),
+    # iter-182: PGPASSWORD= env-var prefix. Extremely common in bash history
+    # around lab Postgres foothold: `PGPASSWORD='p@ss!' psql -U alice -h host -d db`.
+    # Also fires on Dockerfile `ENV PGPASSWORD=`, systemd `Environment=PGPASSWORD=`,
+    # .env files. Captures pw (group 1) + optional -U user (group 2, forward-looking
+    # search up to 200 chars for psql/pg_dump/pg_restore's user flag).
+    ("bash history PGPASSWORD", re.compile(
+        r'(?i)\bPGPASSWORD\s*=\s*["\']?([^"\'\s\r\n]{3,80})["\']?'
+        r'(?:[^\r\n]{0,200}?\b(?:psql|pg_dump|pg_restore|pg_dumpall|pg_isready)\b'
+        r'[^\r\n]{0,200}?\s-U\s+["\']?([A-Za-z_][A-Za-z0-9._-]{0,39})["\']?)?')),
+    # iter-182: MYSQL_PWD= env-var prefix. Same rationale as PGPASSWORD;
+    # `MYSQL_PWD='p@ss' mysql -u root -h host` avoids -p's 'Using password on the
+    # command line' warning so it's the recommended non-interactive form in
+    # walkthroughs. Captures pw (group 1) + optional -u user (group 2).
+    ("bash history MYSQL_PWD", re.compile(
+        r'(?i)\bMYSQL_PWD\s*=\s*["\']?([^"\'\s\r\n]{3,80})["\']?'
+        r'(?:[^\r\n]{0,200}?\b(?:mysql|mysqldump|mariadb|mariadb-dump)\b'
+        r'[^\r\n]{0,200}?\s(?:-u|--user[= ])\s*["\']?([A-Za-z_][A-Za-z0-9._-]{0,39})["\']?)?')),
+    # iter-182: NetExec / crackmapexec / cme -u <user> -p <pw>. The single most
+    # common typed-cred shape in modern OSCP+ bash history. Protocol argument
+    # (smb/ldap/ssh/mssql/winrm/rdp/vnc/wmi/nfs/ftp) sits between the tool and
+    # the target, so we just consume up to the -u flag. -p can be immediately
+    # followed by the pw (quoted or unquoted); handle both.
+    ("bash history nxc/cme", re.compile(
+        r'(?i)\b(?:nxc|netexec|crackmapexec|cme)\s+'
+        r'(?:smb|ldap|ssh|mssql|winrm|rdp|vnc|wmi|nfs|ftp)\s+'
+        r'[^\r\n]*?\s-u\s+["\']?([^"\'\s]{1,40})["\']?'
+        r'\s+[^\r\n]*?-p\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-182: evil-winrm -i host -u user -p pass. Standard PowerShell foothold
+    # once WinRM is open. Order of flags varies (some walkthroughs put -u before
+    # -i), so accept either order. Note: `(?:[^\r\n]*?\s)?-u` — after the tool
+    # name's required \s+, we optionally consume `<flags> ` before -u (handles
+    # the `-i host -u ...` order) but also allow -u to be the very first flag
+    # (`-u alice -i host ...`) without needing another space in front.
+    ("bash history evil-winrm", re.compile(
+        r'(?i)\bevil-winrm(?:\.rb)?\s+'
+        r'(?:[^\r\n]*?\s)?-u\s+["\']?([^"\'\s]{1,40})["\']?'
+        r'\s+[^\r\n]*?-p\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
     # iter-26: /etc/passwd GECOS field with embedded plaintext password.
     # Shape: user:x:UID:GID:GECOS:home:shell  - the GECOS can carry an
     # admin's reminder like 'svc-web - default pwd: WinterIsCold2024!'.
@@ -2457,6 +2505,125 @@ def analyze(path, report, store=None):
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
                                                source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-182: impacket family (DOMAIN/user:pass@host). Was
+                    # psexec-only; now covers wmiexec/smbexec/atexec/dcomexec/
+                    # secretsdump/getST/getTGT/getUserSPNs/GetNPUsers/lookupsid/
+                    # rpcdump/mssqlclient, all with impacket- prefix or bare
+                    # .py form. Emit CRED PAIRS + Evidence so downstream chains
+                    # can immediately reuse the pw.
+                    if name == "impacket inline":
+                        dom, u, pw, tgt = (am.group(1) or "",
+                                           am.group(2), am.group(3),
+                                           am.group(4))
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or filters.is_placeholder(u)):
+                            continue
+                        _u_sh_ik = u.replace("'", "'\\''")
+                        _pw_sh_ik = pw.replace("'", "'\\''")
+                        _who = (dom + "/" + u) if dom else u
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history impacket cred: {_who}:{pw}"
+                                   f"  -> {tgt}",
+                                   hint=(f"reuse: nxc smb {tgt} -u '{_u_sh_ik}'"
+                                         f" -p '{_pw_sh_ik}'"
+                                         + (f" -d {dom}" if dom else "")))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, host=tgt,
+                                               domain=dom, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-182: PGPASSWORD='p@ss' psql -U alice -h host -d db.
+                    # Group 1 is pw; optional group 2 is -U user (may be absent
+                    # when PGPASSWORD is set in a Dockerfile / systemd unit
+                    # without an inline psql invocation).
+                    if name == "bash history PGPASSWORD":
+                        pw = am.group(1)
+                        u = am.group(2) or ""
+                        if filters.is_placeholder(pw) or pw.startswith("$"):
+                            continue
+                        _pw_sh_pg = pw.replace("'", "'\\''")
+                        _u_disp = u or "postgres"
+                        _u_sh_pg = _u_disp.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history PGPASSWORD: {_u_disp}:{pw}",
+                                   hint=(f"PGPASSWORD='{_pw_sh_pg}' psql -U "
+                                         f"'{_u_sh_pg}' -h <pg-host>  |  also try "
+                                         f"as OS user pw: ssh {_u_disp}@<host>"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext",
+                                               user=(u or None),
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-182: MYSQL_PWD='p@ss' mysql -u root -h host. Same
+                    # shape as PGPASSWORD. Default user is 'root' when the
+                    # -u flag isn't on this line (mysql default).
+                    if name == "bash history MYSQL_PWD":
+                        pw = am.group(1)
+                        u = am.group(2) or ""
+                        if filters.is_placeholder(pw) or pw.startswith("$"):
+                            continue
+                        _pw_sh_my2 = pw.replace("'", "'\\''")
+                        _u_disp_my = u or "root"
+                        _u_sh_my2 = _u_disp_my.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history MYSQL_PWD: {_u_disp_my}:{pw}",
+                                   hint=(f"MYSQL_PWD='{_pw_sh_my2}' mysql -u "
+                                         f"'{_u_sh_my2}' -h <mysql-host>  |  "
+                                         f"also try as OS user pw"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext",
+                                               user=(u or None),
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-182: nxc/netexec/crackmapexec/cme -u X -p Y. Standard
+                    # foothold-hunting shape in modern OSCP+ walkthroughs.
+                    if name == "bash history nxc/cme":
+                        u, pw = am.group(1), am.group(2)
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or filters.is_placeholder(u)):
+                            continue
+                        _u_sh_nx = u.replace("'", "'\\''")
+                        _pw_sh_nx = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history nxc/cme: {u}:{pw}",
+                                   hint=(f"reuse: nxc smb <host> -u '{_u_sh_nx}' "
+                                         f"-p '{_pw_sh_nx}' ; also winrm/ldap/mssql"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-182: evil-winrm -i <host> -u X -p Y (or flag order
+                    # swapped). Standard WinRM foothold with a valid user cred.
+                    if name == "bash history evil-winrm":
+                        u, pw = am.group(1), am.group(2)
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or filters.is_placeholder(u)):
+                            continue
+                        _u_sh_ew = u.replace("'", "'\\''")
+                        _pw_sh_ew = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history evil-winrm: {u}:{pw}",
+                                   hint=(f"reuse: evil-winrm -i <host> -u "
+                                         f"'{_u_sh_ew}' -p '{_pw_sh_ew}'"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
                         hit = True
                         break
                     # iter-26: /etc/passwd GECOS field with embedded pw hint.
