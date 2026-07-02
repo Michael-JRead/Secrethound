@@ -556,6 +556,25 @@ _AD = [
     # holds 'smtp.example.com user:password' rows.
     ("postfix sasl map", re.compile(
         r'(?im)^\s*smtp_sasl_password_maps\s*=\s*hash:\s*(\S{3,200})\s*$')),
+    # iter-202: Redis Sentinel `sentinel auth-pass <mastername> <password>`
+    # line. Common on Redis HA setups (sentinel + master + replicas). The
+    # pw is used for Sentinel <-> replica auth. Also handles Sentinel 6+
+    # variants like `sentinel deny-scripts-reconfig` (which we filter out
+    # via the required "auth-pass" keyword).
+    ("Redis Sentinel auth-pass", re.compile(
+        r'(?im)^\s*sentinel\s+auth-pass\s+([A-Za-z_][\w.-]{1,60})\s+'
+        r'([^\s#\r\n]{3,80})\s*(?:#[^\r\n]*)?$')),
+    # iter-202: HashiCorp Vault token file. `~/.vault-token` is a 1-line
+    # file containing the raw token used by `vault` CLI. Also matches
+    # `VAULT_TOKEN=<token>` env var lines and `X-Vault-Token: <token>`
+    # headers. Vault tokens are typically UUIDs (36 char) or hvs.<hex>
+    # for service tokens.
+    ("Vault token file", re.compile(
+        r'(?i)(?:^|\bVAULT_TOKEN\s*[:=]\s*|X-Vault-Token\s*:\s*)'
+        r'(hvs\.[A-Za-z0-9._-]{20,}|'
+        r's\.[A-Za-z0-9]{20,}|'
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+        r'(?:$|\s|\r|\n)')),
     # iter-29: haproxy stats socket admin password: 'stats admin if TRUE ...'
     # or 'stats auth admin:P@ss' style
     ("haproxy stats auth", re.compile(
@@ -3586,6 +3605,10 @@ def analyze(path, report, store=None):
                                 # cheatsheets.
                                 "opaque token prefix",
                                 "PAM misconfig",
+                                # iter-202 additions - Redis Sentinel + Vault
+                                # tokens appear in DevOps tutorials.
+                                "Redis Sentinel auth-pass",
+                                "Vault token file",
                                 ) and filters.is_doc_file(path):
                         continue
                     # AD CS ESC#: must look like ACTUAL certipy / certify output
@@ -4880,6 +4903,67 @@ def analyze(path, report, store=None):
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u,
                                                plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-202: Redis Sentinel auth-pass. Emits CRITICAL
+                    # CRED PAIRS with sentinel + master name context.
+                    if name == "Redis Sentinel auth-pass":
+                        master_name, pw = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw):
+                            continue
+                        _p_sh_rs = pw.replace("'", "'\\''")
+                        _m_sh_rs = master_name.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"Redis Sentinel auth-pass "
+                                   f"({master_name}): {pw}",
+                                   hint=(f"redis-cli -h <sentinel-host> -p "
+                                         f"26379 -a '{_p_sh_rs}' SENTINEL "
+                                         f"MASTERS  |  connect to master: "
+                                         f"redis-cli -h <master-host> "
+                                         f"-a '{_p_sh_rs}'"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext",
+                                               plaintext=pw, source=path,
+                                               line=lineno,
+                                               meta={"sentinel_master": master_name}))
+                        hit = True
+                        break
+                    # iter-202: Vault token (env var / X-Vault-Token / bare
+                    # file). Filename gate: only auto-fire on .vault-token /
+                    # vault-token / X-Vault-Token headers. Env var form fires
+                    # via the VAULT_TOKEN prefix in the pattern itself so it
+                    # can be broad.
+                    if name == "Vault token file":
+                        tok = am.group(1)
+                        _base_vt = os.path.basename(path).lower()
+                        _plow_vt = path.lower().replace("\\", "/")
+                        _in_vault_file = (_base_vt in (".vault-token",
+                                                       "vault-token", ".vault_token")
+                                          or "/vault/" in _plow_vt
+                                          or "VAULT_TOKEN" in line
+                                          or "X-Vault-Token" in line)
+                        if not _in_vault_file:
+                            continue
+                        # Reject common placeholder shapes
+                        if (tok.startswith(("00000000-", "s.example",
+                                             "hvs.example"))
+                                or filters.is_placeholder(tok)):
+                            continue
+                        _tok_sh = tok.replace("'", "'\\''")
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"Vault token: {tok[:40]}"
+                                   f"{'...' if len(tok) > 40 else ''}",
+                                   hint=(f"export VAULT_TOKEN='{_tok_sh}'; "
+                                         f"vault secrets list; vault token "
+                                         f"lookup  |  vault kv get -field=value "
+                                         f"secret/<path>  - read every mounted "
+                                         f"secret store"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext",
+                                               plaintext=tok, source=path,
                                                line=lineno))
                         hit = True
                         break
