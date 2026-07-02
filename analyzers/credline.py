@@ -179,6 +179,11 @@ _GETS_STOP = frozenset((
     "expires", "expiring", "expiration", "expiry", "aging",
     "prohibits", "prohibited", "allows", "allowed", "supports",
     "enforced", "enforces", "enforcement", "guidelines", "guideline",
+    # iter-180: prose adjectives about password quality/state:
+    #   "password is guessable" / "password is public" / "password is weak"
+    "guessable", "public", "compromised", "leaked",
+    "trivial", "simple", "easy", "hardcoded", "predictable", "guess",
+    "guessed", "shared", "reused",
 ))
 
 
@@ -290,9 +295,18 @@ def classify(line):
         return Cred("cred", user=m.group(1), password=m.group(2), note="note cred")
 
     # ---- note shorthand: "GETS PASSWORD: x" / "the password is x" ----
+    # iter-180: strip trailing sentence punctuation (.?) for the stopword
+    # check so prose tokens like "guessable." (with the sentence period)
+    # don't slip past the stopword set. Preserve the raw token in the
+    # returned value - `!` is a valid password char so we can't rstrip it,
+    # and legit trailing `.` inside a password is extremely rare vs the
+    # prose-period FP savings.
     m = _GETS.search(s)
-    if m and _ok_pw(m.group(1)) and m.group(1).strip("'\"`").lower() not in _GETS_STOP:
-        return Cred("cred", password=m.group(1).strip("'\"`"), note="note password")
+    if m:
+        _raw = m.group(1).strip("'\"`")
+        _tok_check = _raw.rstrip(".?").lower()
+        if _ok_pw(_raw) and _tok_check not in _GETS_STOP:
+            return Cred("cred", password=_raw.rstrip(".?"), note="note password")
 
     return None
 
