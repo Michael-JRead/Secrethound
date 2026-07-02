@@ -344,10 +344,11 @@ _AD = [
         r'(?im)^\s*(SECRET_KEY|JWT_SECRET_KEY|SECURITY_PASSWORD_SALT|'
         r'CSRF_SECRET|SESSION_SECRET|FLASK_SECRET)'
         r'\s*=\s*["\']([^"\'\r\n]{16,200})["\']')),
-    # iter-32: Django DATABASES entry - matches the common Django/Flask
-    # SQLAlchemy dict form {"PASSWORD": "X"}. Distinct from the existing
-    # PHP array secret rule because Python config often uses UPPERCASE keys.
-    ("Django DATABASES password", re.compile(
+    # iter-32: uppercase-PASSWORD dict entry - Django DATABASES {"PASSWORD":
+    # "X"} shape but also fires on any JSON/YAML with that key. Kept because
+    # a MongoDB dump / JSON export with a real password in there is loot too;
+    # dispatcher relabels based on file context.
+    ("uppercase PASSWORD dict entry", re.compile(
         r"(?i)['\"]PASSWORD['\"]\s*:\s*['\"]([^'\"\r\n]{3,200})['\"]")),
     # iter-33: PowerShell $env:VARNAME = 'X' where VARNAME ends in a
     # password / secret / token marker. Common in Windows service-setup
@@ -2732,15 +2733,27 @@ def analyze(path, report, store=None):
                                          "session forgery"))
                         hit = True
                         break
-                    # iter-32: Django DATABASES password dict entry
-                    if name == "Django DATABASES password":
+                    # iter-32: uppercase PASSWORD dict entry (Django DATABASES
+                    # + generic JSON/YAML config). iter-42 relabel: pick a
+                    # honest label based on file context - Django only when
+                    # the file looks like Django settings.py; otherwise
+                    # generic config PASSWORD entry.
+                    if name == "uppercase PASSWORD dict entry":
                         pw = am.group(1)
                         if filters.is_placeholder(pw) or pw.startswith(("os.", "env")):
                             continue
+                        plow_p = path.lower()
+                        base_p = os.path.basename(plow_p)
+                        is_django = (base_p in ("settings.py", "local_settings.py",
+                                                 "production.py")
+                                     or "DATABASES" in line
+                                     or "django" in plow_p)
+                        label = ("Django DATABASES password" if is_django
+                                 else "config PASSWORD entry")
                         report.add("HIGH", "CRED PAIRS", path, lineno,
-                                   f"Django DATABASES password: {pw}",
-                                   hint=(f"pgconnect / mysql -p'{pw}' - DB from "
-                                         f"Django app config"))
+                                   f"{label}: {pw}",
+                                   hint=(f"connect with '{pw}' - source is "
+                                         f"{'Django settings' if is_django else 'a config file'}"))
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", plaintext=pw,
