@@ -304,6 +304,27 @@ _AD = [
         r'=([^"\r\n]{3,200})"?\s*$')),
     # iter-28: RabbitMQ definitions.json users array - handled in
     # _multiline_passes() since the fields span JSON lines.
+    # iter-29: APT machine auth (/etc/apt/auth.conf.d/*.conf). Same
+    # ~/.netrc format but scoped to APT: 'machine host login user password X'.
+    # Common on THM/OSCP+ boxes with private APT repos.
+    ("apt auth machine", re.compile(
+        r'(?im)^\s*machine\s+(\S+)\s+login\s+(\S+)\s+password\s+(\S+)\s*$')),
+    # iter-29: HAProxy userlist entry: 'user admin insecure-password P@ss' or
+    # 'user admin password $6$...'. Only fire on the insecure-password form
+    # (the hashed form is caught by patterns.py bcrypt/sha512crypt rules).
+    ("haproxy user insecure", re.compile(
+        r'(?im)^\s*user\s+(\S{1,50})\s+insecure-password\s+(\S{3,80})')),
+    # iter-29: rsyncd.conf 'secrets file' pointer - flag the referenced path.
+    ("rsyncd secrets pointer", re.compile(
+        r'(?im)^\s*secrets\s+file\s*=\s*(\S{3,200})\s*$')),
+    # iter-29: Postfix smtp_sasl_password_maps: pointer to a hash file that
+    # holds 'smtp.example.com user:password' rows.
+    ("postfix sasl map", re.compile(
+        r'(?im)^\s*smtp_sasl_password_maps\s*=\s*hash:\s*(\S{3,200})\s*$')),
+    # iter-29: haproxy stats socket admin password: 'stats admin if TRUE ...'
+    # or 'stats auth admin:P@ss' style
+    ("haproxy stats auth", re.compile(
+        r'(?im)^\s*stats\s+auth\s+(\S{1,50}):(\S{3,80})\s*$')),
     # iter-28: PostgreSQL .pgpass row where credline may have already
     # caught it, but a keyword pass emits it into ASSIGNED SECRETS too
     # so the operator sees the host + db context inline.
@@ -1176,6 +1197,53 @@ def _multiline_passes(path, report, store):
             report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
                        f"AWS Session Token (IMDS): {tok[:20]}{'*'*16}",
                        hint="must export AWS_SESSION_TOKEN alongside the AccessKeyId/SecretAccessKey")
+
+    # iter-29: Kubernetes Secret manifest (apiVersion:v1, kind:Secret) with
+    # data.<key>: <b64> entries. Decode each b64 and if it looks like a
+    # password (printable, 4-80 chars, not placeholder), emit as CRED PAIRS.
+    # Gated to files whose first ~400 bytes have both 'apiVersion' and
+    # 'kind: Secret' to skip generic YAML.
+    if "kind: Secret" in text[:800] and ("apiVersion" in text[:200] or
+                                          "apiVersion" in text[:800]):
+        _K8S_DATA = re.compile(
+            r'(?im)^\s{2,6}([A-Za-z][A-Za-z0-9_-]{1,60})\s*:\s*'
+            r'"?([A-Za-z0-9+/=]{8,})"?\s*$')
+        import base64 as _b64_k8s
+        in_data = False
+        for lineno_k, line_k in enumerate(text.split("\n"), 1):
+            ls = line_k.rstrip()
+            if re.match(r'^\s*(data|stringData)\s*:\s*$', ls):
+                in_data = True
+                continue
+            if in_data and ls and not ls.startswith(" "):
+                in_data = False
+            if not in_data:
+                continue
+            mk = _K8S_DATA.match(line_k)
+            if not mk:
+                continue
+            k, v = mk.group(1), mk.group(2)
+            try:
+                dec = _b64_k8s.b64decode(v, validate=True).decode(
+                    "utf-8", "replace").rstrip("\r\n")
+            except Exception:
+                dec = ""
+            if not dec or len(dec) > 200 or not dec.isprintable():
+                continue
+            if filters.is_placeholder(dec):
+                continue
+            # heuristic: only surface as CRED if key hints at password/token/secret
+            klower = k.lower()
+            is_credy = any(h in klower for h in ("pass", "pwd", "token", "secret",
+                                                  "key", "cred", "user", "auth"))
+            if is_credy:
+                report.add("CRITICAL", "CRED PAIRS", path, lineno_k,
+                           f"K8s Secret data.{k}: {dec}",
+                           hint=(f"apiVersion v1 Secret decoded value; reuse "
+                                 f"'{dec}' as cred against the workload"))
+                from analyzers.ingest.evidence import Evidence
+                store.add(Evidence(kind="plaintext", plaintext=dec, source=path,
+                                   line=lineno_k)) if store is not None else None
 
     # iter-28: RabbitMQ definitions.json users[].password_hash. The name +
     # password_hash + hashing_algorithm triplet spans JSON lines so we run
@@ -2509,6 +2577,70 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     # iter-28: RabbitMQ password_hash moved to _multiline_passes
+                    # iter-29: APT auth.conf machine entry
+                    if name == "apt auth machine":
+                        host, u, pw = am.group(1), am.group(2), am.group(3)
+                        if filters.is_placeholder(pw):
+                            continue
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"APT auth {host}: {u}:{pw}",
+                                   hint=f"apt update via '{host}' with {u}:{pw}")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-29: HAProxy insecure-password user
+                    if name == "haproxy user insecure":
+                        u, pw = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw):
+                            continue
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"HAProxy userlist: {u}:{pw}",
+                                   hint=f"try against HAProxy stats socket / "
+                                        f"backend: curl -u '{u}:{pw}' <url>")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-29: HAProxy stats auth
+                    if name == "haproxy stats auth":
+                        u, pw = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw):
+                            continue
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"HAProxy stats auth: {u}:{pw}",
+                                   hint=f"curl -u '{u}:{pw}' http://<haproxy>/stats  "
+                                        f"-> shows backend inventory")
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-29: rsyncd secrets file pointer
+                    if name == "rsyncd secrets pointer":
+                        p_ = am.group(1)
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"rsyncd secrets file pointer: {p_}",
+                                   hint=(f"read {p_} for 'user:password' rows; "
+                                         f"anonymous rsync module if 'auth users' absent"))
+                        hit = True
+                        break
+                    # iter-29: Postfix SASL map pointer
+                    if name == "postfix sasl map":
+                        p_ = am.group(1)
+                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                                   f"Postfix SASL map pointer: {p_}",
+                                   hint=(f"read {p_} for 'smtp.host user:pass' rows"))
+                        hit = True
+                        break
                     # iter-28: .pgpass row hint - already covered by credline
                     # for the classified form; this adds a keyword ASSIGNED
                     # SECRETS record with the host/db context for the operator.
