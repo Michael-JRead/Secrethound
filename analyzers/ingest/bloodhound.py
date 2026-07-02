@@ -182,6 +182,15 @@ def _ingest_objects(data, kind_hint, store, report, src):
                 facts.append("admincount")
             if p.get("unconstraineddelegation"):
                 facts.append("unconstrained")
+            # iter-47: constrained delegation - AllowedToDelegate is an
+            # array of SPN strings for msDS-AllowedToDelegateTo. Fires
+            # R-CONSTRAINED when operator owns this principal.
+            atd = p.get("allowedtodelegate") or obj.get("AllowedToDelegate")
+            if atd and isinstance(atd, list) and atd:
+                facts.append("has_delegation_to")
+                # store the SPN list in a dedicated Evidence with meta
+                store.add(Evidence(kind="ldap_attr", user=short, source=src,
+                                   meta={"allowed_to_delegate": [str(x) for x in atd]}))
             # iter-23: extract password tokens from description/info/etc.
             # The HTB Forest box's `svc-alfresco` password lives in
             # Properties.info; ldapdomaindump-style scanning catches it.
