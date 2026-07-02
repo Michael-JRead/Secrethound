@@ -1270,6 +1270,17 @@ _WINDOWS_SYSTEMINFO = re.compile(
     r'^\s*OS Version\s*:\s*(\d+\.\d+\.\d+)([^\r\n]{0,80})'
 )
 
+# iter-199: OpenSSH banner. SSH-2.0 protocol identifier plus OpenSSH version.
+# Common shapes:
+#   SSH-2.0-OpenSSH_7.4p1 Debian-10+deb9u3
+#   SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1
+#   Banner grab / nmap script output: `ssh-hostkey: ... OpenSSH 7.4p1`
+# Captures major/minor/patch/optional p<N> for range comparison. The pnum
+# defaults to 0 when absent (so `8.4` == 8.4.0.0).
+_OPENSSH_BANNER = re.compile(
+    r'(?i)(?:SSH-2\.0-OpenSSH|OpenSSH)[_\s]+(\d+)\.(\d+)(?:p(\d+))?'
+)
+
 # iter-198: Sudo version banner (`sudo --version` / `sudo -V` output).
 # Vulnerable to CVE-2021-3156 (Baron Samedit): 1.8.2 through 1.9.5p1
 # inclusive - a decade of sudo builds. Also 1.9.5p2 fixed it.
@@ -1723,6 +1734,62 @@ def _multiline_passes(path, report, store):
             if store is not None:
                 store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                    source=path, line=_ln(m)))
+
+    # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
+    # RECON per unique version + a HIGH marker for each known-vulnerable
+    # range. Two-tuple (major, minor); patch/p_num held separately so
+    # `7.7p0` == `7.7` and `7.7p2` still counts. Doc-file gated.
+    if not filters.is_doc_file(path):
+        _ssh_seen = set()
+        for m in _OPENSSH_BANNER.finditer(text):
+            try:
+                maj = int(m.group(1))
+                minn = int(m.group(2))
+                pnum = int(m.group(3)) if m.group(3) else 0
+            except (TypeError, ValueError):
+                continue
+            # Sanity gate: real OpenSSH majors are 3..10 for years covered
+            # here.
+            if maj < 3 or maj > 10:
+                continue
+            key = (maj, minn, pnum)
+            if key in _ssh_seen:
+                continue
+            _ssh_seen.add(key)
+            vsz = f"{maj}.{minn}" + (f"p{pnum}" if pnum else "")
+            report.add("INFO", "RECON", path, _ln(m),
+                       f"OpenSSH banner: {vsz}",
+                       hint=(f"cross-ref by version: searchsploit openssh "
+                             f"{maj}.{minn}"))
+            # CVE-2018-15473 (user enumeration): < 7.7
+            if (maj, minn) < (7, 7):
+                report.add("HIGH", "RECON", path, _ln(m),
+                           f"OpenSSH {vsz} vulnerable to CVE-2018-15473 "
+                           f"(username enumeration via timing)",
+                           hint=("PoC: `git clone github.com/Rhynorater/"
+                                 "CVE-2018-15473-Exploit; python3 "
+                                 "sshUsernameEnumExploit.py -u users.txt "
+                                 "<host>` - use to verify users found in "
+                                 "AD/RID enum are also local shell users"))
+            # CVE-2016-6210 (older user enum via hash length): < 7.3
+            if (maj, minn) < (7, 3):
+                report.add("HIGH", "RECON", path, _ln(m),
+                           f"OpenSSH {vsz} may also be vulnerable to "
+                           f"CVE-2016-6210 (older user enum via HASHING)",
+                           hint=("nmap --script ssh-enum-users - or the "
+                                 "python PoC in searchsploit -m 40113"))
+            # CVE-2023-38408 (client-side agent RCE via forwarded agent): < 9.3p2
+            # NB: this needs client-side forwarding to trigger, so intel only
+            # from server banner unless we're the client.
+            if (maj, minn, pnum) < (9, 3, 2):
+                report.add("MEDIUM", "RECON", path, _ln(m),
+                           f"OpenSSH {vsz} client < 9.3p2 - CVE-2023-38408 "
+                           f"(agent-forwarding RCE if we're the client)",
+                           hint=("intel-only from banner alone; if operator's "
+                                 "own ssh client is < 9.3p2 AND they forward "
+                                 "agent to a compromised box, RCE against "
+                                 "the operator - warn, don't enable "
+                                 "ForwardAgent on untrusted hosts"))
 
     # iter-198: Sudo version detection + Baron Samedit range flag. Runs
     # BEFORE the kernel block because both blocks are cheap and independent.
