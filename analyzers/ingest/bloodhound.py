@@ -217,15 +217,18 @@ def _ingest_objects(data, kind_hint, store, report, src):
             if not facts:
                 store.add(Evidence(kind="user", user=short, domain=dom, source=src,
                                    meta={"object_identifier": oid} if oid else {}))
+            # iter-70: thread real domain into RECON hint so operator gets
+            # a paste-ready 'htb.local/<u>:<p>' instead of '<DOM>/<u>:<p>'.
+            _dom_lbl = dom or "<DOM>"
             if "kerberoastable" in facts:
                 report.add("HIGH", "RECON", src, None,
                            f"kerberoastable: {short}",
                            f"impacket-GetUserSPNs -request-user '{short}' "
-                           f"<DOM>/<u>:<p> -dc-ip <DC> -> hashcat -m 13100")
+                           f"{_dom_lbl}/<u>:<p> -dc-ip <DC> -> hashcat -m 13100")
             if "asreproastable" in facts:
                 report.add("HIGH", "RECON", src, None,
                            f"AS-REP-roastable: {short}",
-                           f"impacket-GetNPUsers <DOM>/ -usersfile users.txt "
+                           f"impacket-GetNPUsers {_dom_lbl}/ -usersfile users.txt "
                            f"-no-pass -request -format hashcat -> hashcat -m 18200")
         elif kind_hint == "computers":
             if p.get("unconstraineddelegation"):
@@ -277,11 +280,15 @@ def _ingest_objects(data, kind_hint, store, report, src):
             if esc_list:
                 store.add(Evidence(kind="cert_template", source=src,
                                    meta={"template": short, "esc": esc_list}))
+                # iter-70: thread real domain from the certtemplate object
+                # (or Store) so the hint's UPN slot resolves. dom is set
+                # above from p.get('domain') / name FQDN split.
+                _esc_dom = dom or store.dominant_domain() or "<dom>"
                 for esc in esc_list:
                     report.add("CRITICAL", "INTERESTING FILES", src, None,
                                f"AD CS {esc} candidate template: {short}",
-                               f"certipy-ad req -u <u>@<dom> -p '<p>' -ca <CA> "
-                               f"-template '{short}' -upn 'administrator@<dom>'")
+                               f"certipy-ad req -u <u>@{_esc_dom} -p '<p>' -ca <CA> "
+                               f"-template '{short}' -upn 'administrator@{_esc_dom}'")
                     n += 1
     return n
 
