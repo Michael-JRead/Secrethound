@@ -91,6 +91,33 @@ _MSSQL_CS = re.compile(
     r'\s*;.{0,120}?'
     r'(?:\bPassword|\bPWD)\s*=\s*[\'"]?([^;\'";\s]{3,120})[\'"]?')
 _PLAIN = re.compile(r'^(?P<dom>[A-Za-z0-9.\-]+)\\(?P<user>[^\s:\\]{1,64}):(?P<pw>\S{3,})$')
+# iter-203: slash-separated cred notes. Common walkthrough shapes:
+#   Credentials: alice / Sunfl0wer
+#   Login: alice / Sunfl0wer
+#   Creds: alice/Sunfl0wer
+#   Access: alice / Sunfl0wer!
+# Anchor on the intent keyword so we don't FP on `10.10.10.10 / 24` etc.
+_SLASH_PAIR = re.compile(
+    r'(?i)\b(?:credentials|login|creds?|access|auth|account)\s*[:=]?\s+'
+    r'([A-Za-z_][A-Za-z0-9._@\\-]{1,60})\s*/\s*'
+    r'([^\s"\',][^\s"\',\r\n]{2,79})'
+)
+# iter-203: Markdown table row `| user | pass |`. Restrict to rows with
+# 2 pipe-separated columns (allow trailing) so `| a | b | c | d |` doesn't
+# trigger with the wrong grouping. Also exclude header rows (all-dashes)
+# and rows whose first column looks like a numeric ID (INSERT-style tables).
+_MD_TABLE_PAIR = re.compile(
+    r'^\|\s*([A-Za-z_][A-Za-z0-9._@\\-]{1,40})\s*\|\s*'
+    r'([^\s"\'|][^"\'|\r\n]{2,79})\s*\|'
+)
+# iter-203: Markdown bullet with user:pass shape.
+#   - alice: Sunfl0wer
+#   * alice:Sunfl0wer
+#   + alice: Sunfl0wer!
+_MD_BULLET_PAIR = re.compile(
+    r'^\s*[-*+]\s+([A-Za-z_][A-Za-z0-9._@\\-]{1,40})\s*:\s*'
+    r'([^\s"\'][^"\'\r\n]{2,79})$'
+)
 # bare note pair:  whole line is exactly  user:pass  (admin:nibbles)
 _PAIR = re.compile(r'^([A-Za-z0-9._@$-]{2,40}):([^\s:]{3,40})$')
 # creds:/login: <user:pass>  (keyword-prefixed, low FP risk)
@@ -322,6 +349,39 @@ def classify(line):
     if (m and _ok_pw(m.group(2)) and m.group(1).lower() not in _NOT_USER
             and any(ch.isalpha() for ch in m.group(1))):
         return Cred("cred", user=m.group(1), password=m.group(2), note="note cred")
+
+    # iter-203: slash-separated cred note (`Credentials: alice / Sunfl0wer`).
+    # Keyword-anchored so `10.10.10.10 / 24` (CIDR notation) doesn't fire.
+    m = _SLASH_PAIR.search(s)
+    if (m and _ok_pw(m.group(2))
+            and m.group(1).lower() not in _NOT_USER):
+        return Cred("cred", user=m.group(1), password=m.group(2),
+                    note="slash-separated note")
+
+    # iter-203: Markdown bullet with `- alice: Sunfl0wer`. Bullet-anchored
+    # so we don't clash with the bare-user:pass rule above (which needs
+    # the entire line to be user:pass).
+    m = _MD_BULLET_PAIR.match(s)
+    if (m and _ok_pw(m.group(2))
+            and m.group(1).lower() not in _NOT_USER):
+        return Cred("cred", user=m.group(1), password=m.group(2),
+                    note="markdown bullet")
+
+    # iter-203: Markdown table row `| alice | Sunfl0wer |`. Also captures
+    # 3+ column tables (username/password/role); we take the first two
+    # non-header columns. Header-row check: reject if any of the captured
+    # values look like a column-header word.
+    m = _MD_TABLE_PAIR.match(s)
+    if m:
+        u, p = m.group(1).strip(), m.group(2).strip()
+        _hdr_words = {"user", "username", "password", "pass", "pw",
+                      "login", "name", "notes", "role", "email"}
+        if (u.lower() not in _hdr_words and p.lower() not in _hdr_words
+                and u.lower() not in _NOT_USER
+                and _ok_pw(p)
+                and not re.fullmatch(r'-+', u)  # skip separator row
+                and not re.fullmatch(r'-+', p)):
+            return Cred("cred", user=u, password=p, note="markdown table")
 
     # ---- note shorthand: "GETS PASSWORD: x" / "the password is x" ----
     # iter-180: strip trailing sentence punctuation (.?) for the stopword
