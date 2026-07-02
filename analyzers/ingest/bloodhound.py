@@ -188,9 +188,18 @@ def _ingest_objects(data, kind_hint, store, report, src):
             atd = p.get("allowedtodelegate") or obj.get("AllowedToDelegate")
             if atd and isinstance(atd, list) and atd:
                 facts.append("has_delegation_to")
+                # iter-92: capture 'trustedtoauth' (T2A4D flag). Without T2A4D,
+                # a constrained delegator can only S4U2Self for itself, not
+                # arbitrary users - so the impersonate-administrator step
+                # emitted by R-CONSTRAINED silently fails on the KDC. Attach
+                # the flag to the Evidence so correlate.py can add a warning
+                # note when it's False.
+                _t2a = bool(p.get("trustedtoauth")
+                            or obj.get("TrustedToAuth"))
                 # store the SPN list in a dedicated Evidence with meta
                 store.add(Evidence(kind="ldap_attr", user=short, source=src,
-                                   meta={"allowed_to_delegate": [str(x) for x in atd]}))
+                                   meta={"allowed_to_delegate": [str(x) for x in atd],
+                                         "trusted_to_auth": _t2a}))
             # iter-23: extract password tokens from description/info/etc.
             # The HTB Forest box's `svc-alfresco` password lives in
             # Properties.info; ldapdomaindump-style scanning catches it.
