@@ -71,6 +71,38 @@ _AD = [
         r"\s+(?:IDENTIFIED\s+BY|WITH\s+PASSWORD)\s+"
         r"['\"`]([^'\"`\r\n]{3,80})['\"`]")),
     ("SQL IDENTIFIED BY", re.compile(r'(?i)IDENTIFIED\s+BY\s+["\']([^"\']{3,})["\']')),
+    # iter-193: Generic opaque-token prefix detector. Iter-185's Bearer-only
+    # pattern misses tokens embedded in `oauth_token: ghp_...` (gh CLI
+    # hosts.yml), `token = "glpat-..."` (.gitconfig), .env file `SLACK_TOKEN=
+    # xoxb-...` etc. This fires on ANY line containing a well-known prefix
+    # with the expected token length. Provider inference in dispatch mirrors
+    # iter-185's mapping. Length requirements are strict so short random
+    # words with matching prefixes ('skate', 'gho' as prose) don't FP.
+    ("opaque token prefix", re.compile(
+        r'(?<![\w])('
+        r'gh[pousr]_[A-Za-z0-9_]{36,}|'
+        r'github_pat_[A-Za-z0-9_]{40,}|'
+        r'glpat-[A-Za-z0-9_-]{20,}|'
+        r'sk-(?:proj-)?[A-Za-z0-9_-]{40,}|'
+        r'xoxb-\d+-\d+-[A-Za-z0-9]{24,}|'
+        r'xoxp-\d+-\d+-\d+-[A-Za-z0-9]{32,}|'
+        r'xox[asro]-[A-Za-z0-9-]{20,}|'
+        r'xapp-\d+-[A-Za-z0-9-]{20,}|'
+        r'doo?_v1_[A-Za-z0-9]{40,}|'
+        r'nvapi-[A-Za-z0-9_-]{40,}|'
+        r'SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{40,}'
+        r')(?![\w])')),
+    # iter-193: PAM misconfig - `pam_permit.so` used at auth stage always
+    # succeeds. `pam_unix.so ... nullok` allows empty passwords. Both are
+    # Linux privesc primitives when found in /etc/pam.d/common-auth,
+    # /etc/pam.d/sshd, /etc/pam.d/su, etc. File-gated at dispatch.
+    # Control field accepts both simple keywords (sufficient/optional/etc.)
+    # AND bracketed expressions like `[success=1 default=ignore]` (which
+    # PAM allows and is common on modern Debian /etc/pam.d/common-auth).
+    ("PAM misconfig", re.compile(
+        r'(?im)^\s*(auth|password)\s+(?:\[[^\]]+\]|\S+)'
+        r'\s+(pam_permit\.so|pam_unix\.so[^\r\n]*?\bnullok(?:_secure)?)\b'
+        r'([^\r\n]*)$')),
     # iter-189: Slack incoming webhook URL. Full URL is the secret - anyone
     # with it can post to the channel. Format:
     #   https://hooks.slack.com/services/T<TeamID>/B<ChannelID>/<24-char token>
@@ -2953,6 +2985,11 @@ def analyze(path, report, store=None):
                                 "Slack webhook URL",
                                 "Discord webhook URL",
                                 "Teams webhook URL",
+                                # iter-193 additions - opaque tokens appear
+                                # in provider docs; PAM examples in privesc
+                                # cheatsheets.
+                                "opaque token prefix",
+                                "PAM misconfig",
                                 ) and filters.is_doc_file(path):
                         continue
                     # AD CS ESC#: must look like ACTUAL certipy / certify output
@@ -3101,6 +3138,81 @@ def analyze(path, report, store=None):
                             store.add(Evidence(kind="plaintext", user=u,
                                                plaintext=pw, source=path,
                                                line=lineno))
+                        hit = True
+                        break
+                    # iter-193: opaque-token prefix detector (broader than
+                    # iter-185's Bearer-only form). Same provider mapping
+                    # so the hint routes to the right tooling. CRITICAL
+                    # since these are account-wide keys.
+                    if name == "opaque token prefix":
+                        tok = am.group(1)
+                        # Provider inference from prefix (mirrors iter-185).
+                        prefix = tok[:2]
+                        if tok.startswith("SG."):
+                            prefix = "SG"
+                        elif tok.startswith("github_pat_"):
+                            prefix = "gi"
+                        _PROVIDER_HINTS_LINE = {
+                            "gh": ("GitHub PAT",
+                                   "gh api /user OR curl -H "
+                                   "'Authorization: token <tok>' "
+                                   "https://api.github.com/user"),
+                            "gl": ("GitLab PAT",
+                                   "curl -H 'PRIVATE-TOKEN: <tok>' "
+                                   "https://gitlab.example/api/v4/user"),
+                            "sk": ("OpenAI API key",
+                                   "billing risk; flag as intel, do NOT "
+                                   "hit live endpoint on exam"),
+                            "xo": ("Slack token",
+                                   "SlackPirate / slack-audit enumeration"),
+                            "nt": ("Notion integration token", "flag intel"),
+                            "sq": ("Square API token", "flag intel"),
+                            "do": ("DigitalOcean token",
+                                   "doctl auth init -t <tok>"),
+                            "nv": ("NVIDIA API key", "flag intel"),
+                            "SG": ("Sendgrid API key",
+                                   "phish-vector; flag intel"),
+                            "pa": ("Airtable PAT", "flag intel"),
+                            "gi": ("GitHub fine-grained PAT",
+                                   "curl -H 'Authorization: token <tok>' "
+                                   "https://api.github.com/user"),
+                        }
+                        provider, phint = _PROVIDER_HINTS_LINE.get(prefix,
+                            ("opaque bearer token", "flag intel"))
+                        report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
+                                   f"{provider}: {tok[:35]}"
+                                   f"{'...' if len(tok) > 35 else ''}",
+                                   hint=phint)
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=tok,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-193: PAM misconfig - `pam_permit.so` or `nullok`.
+                    # File-gated to /etc/pam.d/ paths. Emits HIGH RECON with
+                    # the specific privesc primitive noted in the hint.
+                    if name == "PAM misconfig":
+                        if "/etc/pam.d/" not in path.replace("\\", "/"):
+                            continue
+                        stage = am.group(1)
+                        primitive = am.group(2)
+                        _base_pam = os.path.basename(path).lower()
+                        _svc = _base_pam  # sshd/common-auth/su/sudo/etc.
+                        if "pam_permit.so" in primitive:
+                            _label = "pam_permit.so at auth stage"
+                            _hint = (f"pam_permit.so ALWAYS succeeds; login "
+                                     f"as ANY user to '{_svc}' service with "
+                                     f"anything. ssh <user>@<host>  |  su <user>")
+                        else:  # nullok
+                            _label = f"pam_unix.so with 'nullok' (empty pw allowed)"
+                            _hint = (f"empty-password auth enabled on '{_svc}'. "
+                                     f"users with no pw set can log in "
+                                     f"unauthenticated: ssh <user>@<host> "
+                                     f"(when prompted, press Enter)")
+                        report.add("HIGH", "RECON", path, lineno,
+                                   f"PAM ({_svc}): {_label}",
+                                   hint=_hint)
                         hit = True
                         break
                     # iter-189: Slack / Discord / Teams IncomingWebhook URLs.
