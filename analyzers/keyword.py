@@ -1751,11 +1751,14 @@ def _multiline_passes(path, report, store):
         if filters.is_placeholder(pw):
             continue
         principal = user or f"({svc} service)"
+        # iter-175: shell-escape principal + pw.
+        _u_sh_lsa = (user or svc).replace("'", "'\\''")
+        _pw_sh_lsa = pw.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"LSA _SC_{svc} service account: {principal}:{pw}",
                    hint=(f"impacket LSA secret - PLAINTEXT password of the {svc} service account; "
                          f"silver-ticket/lateral primitive: "
-                         f"nxc smb <host> -u '{user or svc}' -p '{pw}'"))
+                         f"nxc smb <host> -u '{_u_sh_lsa}' -p '{_pw_sh_lsa}'"))
         if store is not None:
             store.add(Evidence(kind="plaintext", user=user, plaintext=pw,
                                source=path, line=_ln(m)))
@@ -2391,9 +2394,12 @@ def analyze(path, report, store=None):
                         u, pw = am.group(1), am.group(2)
                         if filters.is_placeholder(pw) or pw.startswith("$"):
                             continue
+                        # iter-175: shell-escape u + pw.
+                        _u_sh_my = u.replace("'", "'\\''")
+                        _pw_sh_my = pw.replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"shell history MySQL: {u}:{pw}",
-                                   hint=f"mysql -h <host> -u '{u}' -p'{pw}'")
+                                   hint=f"mysql -h <host> -u '{_u_sh_my}' -p'{_pw_sh_my}'")
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
@@ -2405,9 +2411,12 @@ def analyze(path, report, store=None):
                         if filters.is_placeholder(pw) or pw.startswith("$"):
                             continue
                         u = target.split("@", 1)[0] if "@" in target else ""
+                        # iter-175: shell-escape pw (target is
+                        # user@host - shell metachars unlikely there).
+                        _pw_sh_sp = pw.replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"shell history sshpass: {u}:{pw} -> {target}",
-                                   hint=f"sshpass -p '{pw}' ssh {target}")
+                                   hint=f"sshpass -p '{_pw_sh_sp}' ssh {target}")
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
@@ -3477,9 +3486,12 @@ def analyze(path, report, store=None):
                                 or pw.startswith('${') or pw.startswith('<')):
                             continue
                         u = (um.group(1).strip() if um else "")
+                        # iter-175: shell-escape u + pw.
+                        _u_sh_cs = (u or "<user>").replace("'", "'\\''")
+                        _pw_sh_cs = pw.replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"connstring {u + ':' if u else ''}{pw}",
-                                   hint=f"DB/service cred: netexec mssql <host> -u '{u or '<user>'}' -p '{pw}' "
+                                   hint=f"DB/service cred: netexec mssql <host> -u '{_u_sh_cs}' -p '{_pw_sh_cs}' "
                                    "(or mssqlclient.py / reuse on the host)")
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
