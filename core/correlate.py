@@ -745,8 +745,19 @@ def run(report, store, ui=None):
                     break
             _dom_c = store.dominant_domain() or "<dom>"
             _dc_c = store.dc_ip() or "<DC-IP>"
-            # First target SPN for the sample command
-            first_spn = spns[0] if spns else "cifs/<target>.<dom>"
+            # iter-91: prefer SMB-shaped SPNs when the delegation list has
+            # multiple classes. cifs/host give the DA-track path (secretsdump)
+            # after S4U2Proxy; picking an mssqlsvc/http SPN when a cifs one
+            # exists sends the operator down a dead-end. Rank order: cifs >
+            # host > restrictedkrbhost > mssqlsvc > ldap > everything else.
+            _SPN_CLASS_RANK = {"cifs": 0, "host": 1, "restrictedkrbhost": 2,
+                                "mssqlsvc": 3, "ldap": 4}
+            def _spn_prio(s):
+                cls = s.split("/", 1)[0].lower() if "/" in s else s.lower()
+                return _SPN_CLASS_RANK.get(cls, 99)
+            # sort a stable copy so the original list order is preserved
+            # elsewhere (the summary still shows the raw sequence)
+            first_spn = min(spns, key=_spn_prio) if spns else "cifs/<target>.<dom>"
             # iter-49: SPN format is 'class/host[/port_or_path]' - grab the
             # host portion (index 1). Previous split('/', 1)[-1] returned
             # 'host/http' for 3-part SPNs, which impacket-secretsdump then
