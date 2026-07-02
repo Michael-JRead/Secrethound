@@ -609,9 +609,10 @@ def run(report, store, ui=None):
             silver_seen.add(host_short.lower())
             _dom_sv = store.dominant_domain() or "<dom>"
             _sid_sv = store.domain_sid() or "<S-1-5-21-...>"
+            _dc_sv = store.dc_ip() or "<DC>"
             _sid_note_sv = "" if _sid_sv.startswith("S-") else (
-                "   # look up domain SID: impacket-lookupsid "
-                "<DC>/<u>:<p>@<DC>")
+                f"   # look up domain SID: impacket-lookupsid "
+                f"{_dc_sv}/<u>:<p>@{_dc_sv}")
             # iter-55: substitute learned domain into the SPN FQDN so the
             # silver ticket targets the real service. Falls back to '<dom>'
             # placeholder when unknown.
