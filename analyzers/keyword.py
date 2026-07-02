@@ -1154,6 +1154,35 @@ _CIFS_CREDS = re.compile(
     r'(?:[\s\S]{0,200}?^\s*(?:domain|dom|workgroup)\s*=\s*([^\s#\r\n]{1,60}))?'
 )
 
+# iter-188: OpenVPN .ovpn config with inline auth-user-pass block.
+# Shape:
+#   <auth-user-pass>
+#   alice
+#   Sunfl0wer!
+#   </auth-user-pass>
+# Sometimes a `-----BEGIN AUTH-----`/`-----END AUTH-----` marker instead
+# of the XML-style tags. Both surface plaintext user + pw for VPN
+# authentication - very common in lab boxes that ship a ready-to-use
+# .ovpn with the operator's cred baked in.
+_OVPN_AUTH = re.compile(
+    r'(?i)<auth-user-pass>\s*\r?\n'
+    r'([^\r\n<]{2,80})\s*\r?\n'
+    r'([^\r\n<]{3,80})\s*\r?\n\s*'
+    r'</auth-user-pass>'
+)
+
+# iter-188: JBoss/WildFly mgmt-users.properties / application-users.properties.
+# The AS 7+ / WildFly management realm stores each user as
+#   alice=b3f1e8b04c9d2f4e7a2f0c1d5e8b3f2a
+# where the hex is HEX_MD5(username:realm:password) - hashcat mode 501.
+# Default management realm is 'ManagementRealm'; default application realm
+# is 'ApplicationRealm'. Very common on Jenkins/Confluence/Nexus boxes
+# that share JBoss / WildFly infra. Filename-gated at dispatch to avoid
+# matching generic `.properties` files.
+_JBOSS_MGMT_USER = re.compile(
+    r'(?m)^([a-zA-Z][a-zA-Z0-9._$-]{1,40})=([a-fA-F0-9]{32})\s*$'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -1425,6 +1454,68 @@ def _multiline_passes(path, report, store):
             if store is not None:
                 store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                    domain=dom, source=path, line=_ln(m)))
+
+    # iter-188: OpenVPN .ovpn inline <auth-user-pass> block. Filename gate:
+    # only fire on .ovpn / .conf paths (some ops rename .ovpn to .conf) OR
+    # when the surrounding text contains typical OpenVPN markers (`client\n`,
+    # `remote <host> <port>`, `proto udp/tcp`, `dev tun`). Doc-file gate.
+    _ovpn_gate = (_plow_cf.endswith((".ovpn", ".conf"))
+                  or "openvpn" in _plow_cf
+                  or bool(re.search(r'(?m)^(?:client|remote\s+\S+|dev\s+tun|proto\s+(?:tcp|udp))\b', text)))
+    if _ovpn_gate and not filters.is_doc_file(path):
+        for m in _OVPN_AUTH.finditer(text):
+            u, p = m.group(1).strip(), m.group(2).strip()
+            if not p or filters.is_placeholder(p) or _is_cli_placeholder(u):
+                continue
+            _u_sh_ov = u.replace("'", "'\\''")
+            _p_sh_ov = p.replace("'", "'\\''")
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                       f"OpenVPN inline cred: {u}:{p}",
+                       hint=(f"connect: openvpn --config {path}  |  reuse as "
+                             f"OS cred: nxc smb <host> -u '{_u_sh_ov}' "
+                             f"-p '{_p_sh_ov}'  (VPN + OS creds often shared)"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                   source=path, line=_ln(m)))
+
+    # iter-188: JBoss/WildFly mgmt-users.properties + application-users.properties.
+    # Very common on Java-heavy lab boxes. The file lives in
+    # <jboss>/standalone/configuration/ (AS7+/WildFly) or
+    # <jboss>/server/<profile>/conf/props/ (AS5-6). Each active line is
+    # `username=HEX32` where the hex is HEX_MD5(username:realm:password).
+    # Default realms are 'ManagementRealm' and 'ApplicationRealm'. Feed to
+    # HASHES with hashcat -m 501 (JBoss AS 7 - hashcat calls it 'DAHUA'
+    # incorrectly; -m 501 works for JBoss digest). Filename-gated.
+    _base_lc = os.path.basename(path).lower()
+    _jboss_gate = _base_lc in ("mgmt-users.properties", "application-users.properties",
+                                "management-users.properties")
+    if _jboss_gate and not filters.is_doc_file(path):
+        # Also try to sniff the realm from the file header
+        _realm_m = re.search(r'(?im)^\s*#[^\r\n]*\brealm[^\r\n]*?=\s*(\S+)', text)
+        realm = (_realm_m.group(1).strip() if _realm_m else
+                 ("ManagementRealm" if "mgmt" in _base_lc or "management" in _base_lc
+                  else "ApplicationRealm"))
+        for m in _JBOSS_MGMT_USER.finditer(text):
+            u, h = m.group(1), m.group(2).lower()
+            # iter-187 lesson: `admin` is in filters.is_placeholder's
+            # placeholder-word list, but is a real JBoss admin username.
+            # Use the narrow _is_cli_placeholder helper.
+            if _is_cli_placeholder(u) or filters.is_canonical_sample(h):
+                continue
+            # Skip commented lines (lines beginning with '#'). _JBOSS_MGMT_USER
+            # is line-anchored so a '#' before the username would fail the
+            # `[a-zA-Z]` lead char, but a leading space+non-comment might
+            # still bleed - a targeted comment guard on the line's
+            # start position.
+            _line_start = text.rfind("\n", 0, m.start()) + 1
+            if text[_line_start:_line_start + 1] == "#":
+                continue
+            report.add("CRITICAL", "PASSWORD HASHES", path, _ln(m),
+                       f"JBoss DIGEST-MD5 {realm} user '{u}': {h}",
+                       hint=(f"hashcat -m 501 <hash.txt> rockyou.txt  |  "
+                             f"input line: '{u}:{realm}:{h}'  (JBoss digest "
+                             f"format)  |  admin console: <jboss>/console"))
+            HASHES.append(("501", "JBoss DIGEST-MD5", h, path, _ln(m)))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
