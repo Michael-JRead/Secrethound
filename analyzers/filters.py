@@ -365,11 +365,42 @@ def extract_pw_from_desc(text):
     Caller is responsible for downstream placeholder / code filtering."""
     if not text:
         return None
+    # iter-177: prose stopwords - if the token that immediately follows
+    # 'password is' / 'pwd:' / 'cred =' is a common English continuation
+    # word (never / not / stored / hashed / etc.) it's prose, not a
+    # literal secret. Mirrors _GETS_STOP in credline.py for the extractor
+    # in filters.py (which sits below credline and is called from ingest).
+    _PW_DESC_STOP = {
+        "never", "not", "stored", "hashed", "encrypted", "required", "used",
+        "also", "only", "set", "case", "sensitive", "same", "different",
+        "correct", "wrong", "valid", "invalid", "empty", "blank", "optional",
+        "mandatory", "unique", "strong", "weak", "visible", "hidden", "shown",
+        "displayed", "saved", "kept", "generated", "created", "changed",
+        "reset", "expired", "disabled", "enabled", "important", "secure",
+        "safe", "protected", "transmitted", "sent", "checked", "known",
+        "unknown", "public", "private", "shared", "reused", "unique",
+        # iter-177 round 2: common English filler words that appear in prose
+        # about passwords ("password is hashed with SHA-256", "password
+        # never expires", "the password should be strong").
+        "with", "for", "from", "into", "when", "where", "what", "which",
+        "should", "must", "will", "would", "could", "may", "might", "can",
+        "the", "and", "but", "very", "quite", "always", "sometimes",
+        "expires", "expiring", "expiration", "requires", "requiring",
+        "prohibits", "prohibited", "allows", "allowed", "supports",
+        "supporting", "supported", "contains", "containing", "includes",
+        "including", "excludes", "excluding", "requires", "requires",
+    }
+    # iter-177: if the marker branch fires and captures a stopword, the
+    # sentence is prose about passwords ("password is hashed with SHA-256")
+    # not a keyword=literal binding. Short-circuit and return None so the
+    # fallback walker doesn't keep grabbing subsequent tokens ("SHA-256").
     for rx in (_PW_MARKER, _PW_MARKER_LOOSE):
         m = rx.search(text)
         if m:
             tok = m.group(1).strip("'\"`,;.()[]{}<>")
             if tok and len(tok) >= 4:
+                if tok.lower() in _PW_DESC_STOP:
+                    return None
                 return tok
     # fallback: any token after stripping common prose punctuation
     hint = ("pass" in text.lower() or "pwd" in text.lower() or
@@ -378,8 +409,12 @@ def extract_pw_from_desc(text):
         return None
     for tok in text.split():
         tok = tok.strip(":,;'\"()[]{}<>")
-        if 4 <= len(tok) <= 60 and not is_placeholder(tok) \
-                and not is_code_not_literal(tok, text):
+        # iter-177: also apply the prose-stopword filter to the fallback
+        # walk so 'password is never stored' doesn't return 'never'
+        # after the marker branch rejects it.
+        if (4 <= len(tok) <= 60 and not is_placeholder(tok)
+                and not is_code_not_literal(tok, text)
+                and tok.lower() not in _PW_DESC_STOP):
             return tok
     return None
 
