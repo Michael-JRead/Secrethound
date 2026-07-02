@@ -361,6 +361,13 @@ _AD = [
     ("powershell set-item env", re.compile(
         r"(?i)Set-Item\s+env:([A-Z][A-Z0-9_]{2,50}(?:PASSWORD|PASS|PW|PWD|"
         r"SECRET|TOKEN|KEY|CRED))\s+['\"]([^'\"\r\n]{3,200})['\"]")),
+    # iter-43: [Environment]::SetEnvironmentVariable('X', 'Y'[, 'User']) -
+    # .NET-style env setter, common in enterprise service-setup scripts.
+    ("dotnet env setter", re.compile(
+        r"(?i)\[Environment\]::SetEnvironmentVariable\s*\(\s*"
+        r"['\"]([A-Z][A-Z0-9_]{2,50}(?:PASSWORD|PASS|PW|PWD|"
+        r"SECRET|TOKEN|KEY|CRED))['\"]\s*,\s*"
+        r"['\"]([^'\"\r\n]{3,200})['\"]")),
     # iter-28: PostgreSQL .pgpass row where credline may have already
     # caught it, but a keyword pass emits it into ASSIGNED SECRETS too
     # so the operator sees the host + db context inline.
@@ -2761,8 +2768,10 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     # iter-33: PowerShell $env:VARNAME = 'X' + Set-Item env:
+                    # iter-43: also [Environment]::SetEnvironmentVariable().
                     if name in ("powershell env var secret",
-                                "powershell set-item env"):
+                                "powershell set-item env",
+                                "dotnet env setter"):
                         varname, val = am.group(1), am.group(2)
                         if (filters.is_placeholder(val) or
                                 val.startswith(("${", "$", "(", "@"))):
