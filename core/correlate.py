@@ -124,6 +124,16 @@ def _add_nt(e, hash_val, user, src, line):
     + LSA accumulates all evidence; the R7 chain count reflects the truth."""
     if not hash_val:
         return
+    # iter-138: mirror iter-136/137 for hash-side users. Most NT-hash sources
+    # (pwdump rows, pypykatz output) already emit bare sam-names, but some
+    # notes-style captures (secretsdump doc excerpts, kerberoast paste-ins)
+    # carry DOMAIN\user or user@dom form. Strip both prefixes so R7 emits
+    # clean impacket URIs like the credpair path already does.
+    if user:
+        if "\\" in user:
+            user = user.split("\\", 1)[1]
+        if "@" in user:
+            user = user.split("@", 1)[0]
     e.nt.setdefault(hash_val.lower(), []).append((user, src, line))
 
 
