@@ -1201,6 +1201,48 @@ _HTTP_AUTH_BASIC = re.compile(
 _HTTP_AUTH_BEARER_JWT = re.compile(
     r'(?i)Authorization\s*:\s*Bearer\s+(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,})'
 )
+# iter-185: Authorization: Bearer <opaque-token> - non-JWT PAT / API-key
+# formats. Common walkthrough shapes:
+#   ghp_, gho_, ghu_, ghs_, ghr_ (GitHub PATs)
+#   github_pat_ (fine-grained GitHub PAT)
+#   glpat- (GitLab PAT)
+#   sk-, sk-proj- (OpenAI)
+#   xoxb-, xoxp-, xoxa-, xapp-, xoxs- (Slack)
+#   ntn_ (Notion), pat_ (Airtable), sq0csp_, sq0atp_ (Square)
+#   dop_v1_, doo_v1_ (DigitalOcean)
+#   nvapi- (NVIDIA API), sgp_ (Sendgrid)
+# Prefix + underscore/hyphen + charset ranges are all well-known & distinct
+# from generic random strings, so this stays high-signal / low-FP.
+_HTTP_AUTH_BEARER_OPAQUE = re.compile(
+    r'(?i)Authorization\s*:\s*Bearer\s+('
+    r'gh[pousr]_[A-Za-z0-9_]{16,}|'
+    r'github_pat_[A-Za-z0-9_]{40,}|'
+    r'glpat-[A-Za-z0-9_-]{16,}|'
+    r'sk-(?:proj-)?[A-Za-z0-9_-]{20,}|'
+    r'xox[bpasro]-[A-Za-z0-9-]{10,}|'
+    r'xapp-\d+-[A-Za-z0-9-]{10,}|'
+    r'ntn_[A-Za-z0-9]{20,}|'
+    r'pat[A-Za-z0-9]{14,}|'
+    r'sq0csp-[A-Za-z0-9_-]{20,}|'
+    r'sq0atp-[A-Za-z0-9_-]{20,}|'
+    r'doo?_v1_[A-Za-z0-9]{40,}|'
+    r'nvapi-[A-Za-z0-9_-]{20,}|'
+    r'SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'
+    r')'
+)
+# iter-185: X-Api-Key / Api-Key / apikey header. Common in modern REST APIs
+# (curl, Postman JSON, Invoke-WebRequest -Headers). We accept several
+# equivalent spellings and gate on the key value looking like a real token
+# (>= 16 chars, mixed alnum + typical URL-safe punctuation). Rejects
+# placeholders like `<your-api-key>` / `YOUR_API_KEY` at dispatch.
+# The `["\']?\s*[:=]` sequence handles JSON `"X-Api-Key": "v"` and
+# PowerShell `@{'X-Api-Key' = 'v'}` where a closing quote sits between the
+# header name and the separator.
+_HTTP_APIKEY_HEADER = re.compile(
+    r'(?i)(?:^|["\s\'])(X-API[_-]?Key|Api[_-]?Key|apikey|X-Auth-Token|'
+    r'X-Access-Token|X-Auth-Key)["\']?\s*[:=]\s*'
+    r'["\']?([A-Za-z0-9][A-Za-z0-9_.+/=~-]{15,120})["\']?'
+)
 # Sherlock/Watson/wesng "Appears Vulnerable" missing-patch output block:
 #   Title:       Win32k Elevation of Privilege
 #   MSBulletin:  MS16-135
@@ -1719,6 +1761,84 @@ def _multiline_passes(path, report, store):
         report.add("HIGH", "ASSIGNED SECRETS", path, _ln(m),
                    f"HTTP Bearer JWT: {tok[:30]}...",
                    hint="decode at jwt.io (offline) - check alg=none, weak HS256 secret (hashcat -m 16500), expiry")
+
+    # iter-185: Authorization: Bearer <opaque-token> (non-JWT PATs / API keys
+    # whose format is well-known - GitHub ghp_/gho_/glpat-, OpenAI sk-,
+    # Slack xox[bp]-, Notion ntn_, DigitalOcean doo_v1_, Sendgrid SG.*.*,
+    # etc.). CRITICAL because these are typically namespace-wide account
+    # keys, not per-session tokens. Providers infer from prefix.
+    _PROVIDER_HINTS = {
+        "gh": ("GitHub PAT",
+               "gh api /user OR curl -H 'Authorization: token <tok>' "
+               "https://api.github.com/user  - repo/org access"),
+        "gl": ("GitLab PAT",
+               "curl -H 'PRIVATE-TOKEN: <tok>' https://gitlab.example/"
+               "api/v4/user  - project foothold"),
+        "sk": ("OpenAI API key",
+               "billing risk; if scope=admin can create keys. Do NOT hit "
+               "the live endpoint on exam - flag as intel"),
+        "xo": ("Slack token",
+               "SlackPirate / slack-audit: enumerate channels, users, "
+               "files. Bot tokens (xoxb) are org-wide."),
+        "nt": ("Notion integration token", "flag as intel"),
+        "sq": ("Square API token", "flag as intel"),
+        "do": ("DigitalOcean token",
+               "doctl auth init -t <tok> then doctl compute droplet list"),
+        "nv": ("NVIDIA API key", "flag as intel"),
+        "SG": ("Sendgrid API key",
+               "SendGrid mail API - could enable phishing; flag as intel"),
+        "pa": ("Airtable PAT", "flag as intel"),
+        "gi": ("GitHub fine-grained PAT",
+               "curl -H 'Authorization: token <tok>' https://api.github.com/user"),
+    }
+    bearer_seen = set()
+    for m in _HTTP_AUTH_BEARER_OPAQUE.finditer(text):
+        tok = m.group(1)
+        if tok in bearer_seen:
+            continue
+        bearer_seen.add(tok)
+        prefix = tok[:2]
+        # SG.foo.bar has SG. as its literal marker (uppercase); handle separately
+        if tok.startswith("SG."):
+            prefix = "SG"
+        elif tok.startswith("github_pat_"):
+            prefix = "gi"
+        provider, hint = _PROVIDER_HINTS.get(prefix,
+            ("opaque bearer token", "flag as intel; provider unknown"))
+        report.add("CRITICAL", "ASSIGNED SECRETS", path, _ln(m),
+                   f"HTTP Bearer opaque ({provider}): {tok[:35]}"
+                   f"{'...' if len(tok) > 35 else ''}",
+                   hint=hint)
+        if store is not None:
+            store.add(Evidence(kind="plaintext", plaintext=tok,
+                               source=path, line=_ln(m)))
+
+    # iter-185: X-Api-Key / Api-Key / apikey / X-Auth-Token / X-Access-Token
+    # header. Common in modern API walkthroughs (curl, Postman, PS
+    # Invoke-WebRequest -Headers @{X-Api-Key='...'}).
+    apikey_seen = set()
+    for m in _HTTP_APIKEY_HEADER.finditer(text):
+        header, tok = m.group(1), m.group(2)
+        if tok in apikey_seen:
+            continue
+        # Reject placeholder / obvious canonical sample values
+        if (filters.is_placeholder(tok) or filters.is_canonical_sample(tok)
+                or filters.is_known_example(tok)):
+            continue
+        # Reject values that look like a variable ref rather than a real token
+        # ($SECRET, ${API_KEY}, {{ api_key }}, etc.).
+        if tok.startswith(("$", "{", "%")):
+            continue
+        apikey_seen.add(tok)
+        report.add("HIGH", "ASSIGNED SECRETS", path, _ln(m),
+                   f"HTTP {header}: {tok[:35]}"
+                   f"{'...' if len(tok) > 35 else ''}",
+                   hint=(f"replay: curl -H '{header}: {tok}' "
+                         f"'https://<api-host>/<path>'  - API key auth; "
+                         f"look for /api/user endpoint to enumerate scope"))
+        if store is not None:
+            store.add(Evidence(kind="plaintext", plaintext=tok,
+                               source=path, line=_ln(m)))
 
     # Sherlock / Watson / wesng / PrivescCheck missing-patch output
     # Skip markdown writeups / cheatsheets - they routinely show wesng sample
