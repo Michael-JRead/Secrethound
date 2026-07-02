@@ -1291,9 +1291,11 @@ def _multiline_passes(path, report, store):
         if (filters.is_placeholder(p) or filters.is_placeholder(u)
                 or p.lower() in ("(null)", "[empty]", "(empty)")):
             continue
+        # iter-176: shell-escape pw.
+        _p_sh_lz = p.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"Lazagne extracted: {u}:{p}",
-                   hint=f"reuse: nxc smb <host> -u <user> -p '{p}'  - browser/wifi/mail/DPAPI lift")
+                   hint=f"reuse: nxc smb <host> -u <user> -p '{_p_sh_lz}'  - browser/wifi/mail/DPAPI lift")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=p, source=path, line=_ln(m)))
 
@@ -1501,9 +1503,11 @@ def _multiline_passes(path, report, store):
         pw = m.group(1)
         if filters.is_placeholder(pw):
             continue
+        # iter-176: shell-escape pw.
+        _pw_sh_ps = pw.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"PowerShell plaintext secret: {pw}",
-                   hint=f"captured from -AsPlainText invocation; try as user pw: nxc smb <host> -u <user> -p '{pw}'")
+                   hint=f"captured from -AsPlainText invocation; try as user pw: nxc smb <host> -u <user> -p '{_pw_sh_ps}'")
         if store is not None:
             store.add(Evidence(kind="plaintext", plaintext=pw, source=path, line=_ln(m)))
 
@@ -1870,9 +1874,12 @@ def _multiline_passes(path, report, store):
         u, dom, pw = m.group(1), m.group(2), m.group(3).strip()
         if filters.is_placeholder(pw):
             continue
+        # iter-176: shell-escape u + pw.
+        _u_sh_ssp = u.replace("'", "'\\''")
+        _pw_sh_ssp = pw.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"pypykatz SSP cleartext: {dom}\\{u}:{pw}",
-                   hint=f"reuse: nxc smb <host> -d {dom} -u {u} -p '{pw}'")
+                   hint=f"reuse: nxc smb <host> -d {dom} -u '{_u_sh_ssp}' -p '{_pw_sh_ssp}'")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=pw, domain=dom,
                                source=path, line=_ln(m)))
@@ -1897,9 +1904,12 @@ def _multiline_passes(path, report, store):
         # reject when pw is pure hex (blob, not cleartext)
         if re.match(r'^[0-9a-fA-F]{16,}$', pw):
             continue
+        # iter-176: shell-escape u + pw.
+        _u_sh_dp = u.replace("'", "'\\''")
+        _pw_sh_dp = pw.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"DPAPI Credential Manager {target}: {u}:{pw}",
-                   hint=f"plaintext from impacket-dpapi; reuse: nxc smb/mssql/winrm -u '{u}' -p '{pw}'")
+                   hint=f"plaintext from impacket-dpapi; reuse: nxc smb/mssql/winrm -u '{_u_sh_dp}' -p '{_pw_sh_dp}'")
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=pw,
                                source=path, line=_ln(m)))
@@ -2859,9 +2869,12 @@ def analyze(path, report, store=None):
                         if dec and ":" in dec and len(dec) < 200:
                             u, p = dec.split(":", 1)
                             if p and not filters.is_placeholder(p):
+                                # iter-176: shell-escape u + p.
+                                _u_sh_dl = u.replace("'", "'\\''")
+                                _p_sh_dl = p.replace("'", "'\\''")
                                 report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                            f"Docker registry auth: {u}:{p}",
-                                           hint=f"docker login <registry> -u '{u}' -p '{p}'; "
+                                           hint=f"docker login <registry> -u '{_u_sh_dl}' -p '{_p_sh_dl}'; "
                                                 f"docker pull / image extract for secrets")
                                 if store is not None:
                                     from analyzers.ingest.evidence import Evidence
@@ -3526,11 +3539,12 @@ def analyze(path, report, store=None):
                         u, p = am.group(1), am.group(2)
                         if filters.is_placeholder(p) or filters.is_placeholder(u):
                             continue
-                        # iter-141: shell-safe escape for pw hint.
+                        # iter-141 + iter-176: shell-safe escape for u + pw.
+                        _u_sh_psc = (u or "").replace("'", "'\\''")
                         _p_sh = (p or "").replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"PowerShell PSCredential: {u}:{p}",
-                                   hint=f"reuse: netexec smb <DC-IP> -u '{u}' -p '{_p_sh}'")
+                                   hint=f"reuse: netexec smb <DC-IP> -u '{_u_sh_psc}' -p '{_p_sh}'")
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u, plaintext=p,
@@ -4153,9 +4167,12 @@ def analyze(path, report, store=None):
                         u, p = am.group(1), am.group(2)
                         if filters.is_placeholder(p) or filters.is_placeholder(u):
                             continue
+                        # iter-176: shell-escape u + p.
+                        _u_sh_hb = u.replace("'", "'\\''")
+                        _p_sh_hb = p.replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"HTTP basic on cmdline: {u}:{p}",
-                                   hint=f"reuse: nxc smb <host> -u '{u}' -p '{p}' ; also try VPN / SSO / webmail")
+                                   hint=f"reuse: nxc smb <host> -u '{_u_sh_hb}' -p '{_p_sh_hb}' ; also try VPN / SSO / webmail")
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u, plaintext=p,
