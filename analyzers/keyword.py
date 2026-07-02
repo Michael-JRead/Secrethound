@@ -1230,6 +1230,20 @@ _HTPASSWD_LINE = re.compile(
     r'\$\d\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{22,})\s*$'
 )
 
+# iter-192: PPP chap-secrets / pap-secrets file.
+# `/etc/ppp/chap-secrets` and `/etc/ppp/pap-secrets` format:
+#   # client   server   secret               IP addresses
+#   alice      *        "MyP@ss2024"         192.168.1.10
+#   bob        vpn01    AnotherPass          *
+# Very common on VPN gateway / RADIUS-fronted lab boxes. Secret can be
+# quoted OR unquoted (bare token).
+_PPP_SECRETS = re.compile(
+    r'(?m)^([a-zA-Z_][a-zA-Z0-9._@\\/-]{0,60})\s+'
+    r'(\S+)\s+'
+    r'(?:"([^"\r\n]{3,80})"|([^\s#"\r\n]{3,80}))'
+    r'(?:\s+([^\s#\r\n]+))?\s*(?:#[^\r\n]*)?$'
+)
+
 # iter-190: AWS credentials INI block. Standard file ~/.aws/credentials or
 # ~/.aws/config; also fires in `[default]` / `[profile <name>]` embedded
 # in .env dumps, gitleaks findings, etc. Multi-line - the profile header,
@@ -1656,6 +1670,44 @@ def _multiline_passes(path, report, store):
                                          "aws_access_key_id": akid,
                                          "temporary": _tmp}))
 
+    # iter-192: PPP chap-secrets / pap-secrets. Filename-gated to
+    # basenames containing 'chap-secrets' / 'pap-secrets' or path under
+    # /etc/ppp/. The regex is broad so gate is essential to avoid FP on
+    # generic space-separated config files.
+    _plow_ppp = path.lower().replace("\\", "/")
+    _ppp_gate = ("chap-secrets" in _plow_ppp or "pap-secrets" in _plow_ppp
+                 or ("/etc/ppp/" in _plow_ppp and "secrets" in _plow_ppp))
+    if _ppp_gate and not filters.is_doc_file(path):
+        _ppp_seen = set()
+        for m in _PPP_SECRETS.finditer(text):
+            client = m.group(1).strip()
+            server = m.group(2).strip()
+            secret = (m.group(3) or m.group(4) or "").strip()
+            ip = (m.group(5) or "").strip()
+            key = (client, server, secret)
+            if key in _ppp_seen:
+                continue
+            _ppp_seen.add(key)
+            # skip comment / header rows via a lightweight sanity check
+            # (secret should not look like `IP` word or `addresses`)
+            if secret.lower() in ("addresses", "ip", "server", "*"):
+                continue
+            if (_is_cli_placeholder(client) or filters.is_placeholder(secret)
+                    or secret.lower() in ("server", "client")):
+                continue
+            _c_sh_p = client.replace("'", "'\\''")
+            _s_sh_p = secret.replace("'", "'\\''")
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                       f"PPP cred: {client}:{secret}"
+                       + (f"  -> {server}" if server != "*" else "")
+                       + (f"  (IP: {ip})" if ip and ip != "*" else ""),
+                       hint=(f"PPP/PPTP/L2TP dial-up cred; often reused as "
+                             f"OS/VPN auth: nxc smb <host> -u '{_c_sh_p}' "
+                             f"-p '{_s_sh_p}'  |  or connect via pppd / xl2tpd"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=client,
+                                   plaintext=secret, source=path, line=_ln(m)))
+
     # iter-191: Kafka SASL PLAIN / SCRAM JAAS config. Filename gate: only
     # fire on Kafka-shaped config paths OR when the surrounding text has
     # a Kafka marker (bootstrap.servers, security.protocol=SASL_*).
@@ -2009,42 +2061,59 @@ def _multiline_passes(path, report, store):
     if ("kind: Secret" in text[:800]
             and ("apiVersion" in text[:200] or "apiVersion" in text[:800])
             and not filters.is_doc_file(path)):
-        _K8S_DATA = re.compile(
+        # iter-192: split data: (b64) and stringData: (plaintext). Old code
+        # tried to b64-decode BOTH blocks, silently dropping plaintext values
+        # from stringData:. Different regex for each.
+        _K8S_DATA_B64 = re.compile(
             r'(?im)^\s{2,6}([A-Za-z][A-Za-z0-9_-]{1,60})\s*:\s*'
             r'"?([A-Za-z0-9+/=]{8,})"?\s*$')
+        _K8S_STRDATA = re.compile(
+            r'(?im)^\s{2,6}([A-Za-z][A-Za-z0-9_-]{1,60})\s*:\s*'
+            r'["\']?([^"\'\r\n]{3,200})["\']?\s*$')
         import base64 as _b64_k8s
-        in_data = False
+        # 'data' | 'stringData' | None
+        block = None
         for lineno_k, line_k in enumerate(text.split("\n"), 1):
             ls = line_k.rstrip()
-            if re.match(r'^\s*(data|stringData)\s*:\s*$', ls):
-                in_data = True
+            _hdr = re.match(r'^\s*(data|stringData)\s*:\s*$', ls)
+            if _hdr:
+                block = _hdr.group(1)
                 continue
-            if in_data and ls and not ls.startswith(" "):
-                in_data = False
-            if not in_data:
+            if block and ls and not ls.startswith(" "):
+                block = None
+            if not block:
                 continue
-            mk = _K8S_DATA.match(line_k)
-            if not mk:
-                continue
-            k, v = mk.group(1), mk.group(2)
-            try:
-                dec = _b64_k8s.b64decode(v, validate=True).decode(
-                    "utf-8", "replace").rstrip("\r\n")
-            except Exception:
-                dec = ""
-            if not dec or len(dec) > 200 or not dec.isprintable():
-                continue
+            if block == "data":
+                mk = _K8S_DATA_B64.match(line_k)
+                if not mk:
+                    continue
+                k, v = mk.group(1), mk.group(2)
+                try:
+                    dec = _b64_k8s.b64decode(v, validate=True).decode(
+                        "utf-8", "replace").rstrip("\r\n")
+                except Exception:
+                    continue
+                if not dec or len(dec) > 200 or not dec.isprintable():
+                    continue
+                _label_prefix = "data"
+            else:  # stringData - plaintext already
+                mk = _K8S_STRDATA.match(line_k)
+                if not mk:
+                    continue
+                k, dec = mk.group(1), mk.group(2).strip()
+                if not dec or len(dec) > 200:
+                    continue
+                _label_prefix = "stringData"
             if filters.is_placeholder(dec):
                 continue
-            # heuristic: only surface as CRED if key hints at password/token/secret
             klower = k.lower()
             is_credy = any(h in klower for h in ("pass", "pwd", "token", "secret",
                                                   "key", "cred", "user", "auth"))
             if is_credy:
                 report.add("CRITICAL", "CRED PAIRS", path, lineno_k,
-                           f"K8s Secret data.{k}: {dec}",
-                           hint=(f"apiVersion v1 Secret decoded value; reuse "
-                                 f"'{dec}' as cred against the workload"))
+                           f"K8s Secret {_label_prefix}.{k}: {dec}",
+                           hint=(f"apiVersion v1 Secret {_label_prefix} value; "
+                                 f"reuse '{dec}' as cred against the workload"))
                 from analyzers.ingest.evidence import Evidence
                 store.add(Evidence(kind="plaintext", plaintext=dec, source=path,
                                    line=lineno_k)) if store is not None else None
