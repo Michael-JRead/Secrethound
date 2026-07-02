@@ -1152,6 +1152,11 @@ def _multiline_passes(path, report, store):
     # signals a cmdkey /list block with no User: line - the missing block
     # made us pair Target[N] with User[N+1].
     _CMDKEY_BLEED = re.compile(r'(?i)^\s*Target\s*:\s*Domain:target=', re.MULTILINE)
+    # iter-170: fresh `Title:` line between wesng CVE and VulnStatus signals
+    # a wesng block missing its VulnStatus line - the missing block made us
+    # pair Title[N]/CVE[N] with VulnStatus[N+1], falsely marking block N as
+    # "Appears Vulnerable".
+    _WESNG_BLEED = re.compile(r'(?im)^\s*Title\s*:')
 
     # SCCM NAA
     for m in _SCCM_NAA_MULTI.finditer(text):
@@ -1532,6 +1537,11 @@ def _multiline_passes(path, report, store):
         return
     vuln_seen = set()
     for m in _WESNG_VULN.finditer(text):
+        # iter-170: bleed guard - a wesng block with no VulnStatus line
+        # would pull the next block's VulnStatus, falsely marking this
+        # block "Appears Vulnerable".
+        if not _no_bleed(m, 3, 4, _WESNG_BLEED):
+            continue
         title, kb, cve, status = (m.group(1).strip(), m.group(2).strip(),
                                   m.group(3).strip(), m.group(4).strip())
         key = (kb, cve)
