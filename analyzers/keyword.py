@@ -59,7 +59,34 @@ _AD = [
     # `reg query` columnar output (DefaultPassword  REG_SZ  x).
     ("autologon password", re.compile(
         r'(?i)(?:"?DefaultPassword"?|AutoAdminLogon\s+password)\s*(?:["=:]+|\s+REG_SZ\s+)\s*["\']?([^"\'\r\n]{3,})')),
+    # iter-189: CREATE USER 'x' IDENTIFIED BY 'y' - captures user + pw as a
+    # pair so the downstream chain gets both. Also covers ALTER USER's `WITH
+    # PASSWORD 'y'` variant (PostgreSQL). MUST sit BEFORE `SQL IDENTIFIED BY`
+    # in this list since _AD is checked in order and the first match wins -
+    # `SQL IDENTIFIED BY` would otherwise fire first with pw-only capture.
+    ("SQL CREATE USER", re.compile(
+        r"(?i)(?:CREATE|ALTER)\s+USER\s+['\"`]?"
+        r"([A-Za-z_][A-Za-z0-9_.-]{1,63})"
+        r"['\"`]?(?:@['\"`]?[^\s'\"`]+['\"`]?)?"
+        r"\s+(?:IDENTIFIED\s+BY|WITH\s+PASSWORD)\s+"
+        r"['\"`]([^'\"`\r\n]{3,80})['\"`]")),
     ("SQL IDENTIFIED BY", re.compile(r'(?i)IDENTIFIED\s+BY\s+["\']([^"\']{3,})["\']')),
+    # iter-189: Slack incoming webhook URL. Full URL is the secret - anyone
+    # with it can post to the channel. Format:
+    #   https://hooks.slack.com/services/T<TeamID>/B<ChannelID>/<24-char token>
+    ("Slack webhook URL", re.compile(
+        r'https://hooks\.slack\.com/services/T[A-Z0-9]{6,}/'
+        r'B[A-Z0-9]{6,}/[A-Za-z0-9]{20,}')),
+    # iter-189: Discord webhook URL. Same "full URL is the secret" model.
+    ("Discord webhook URL", re.compile(
+        r'https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/'
+        r'\d{16,}/[A-Za-z0-9._-]{60,}')),
+    # iter-189: MS Teams IncomingWebhook URL.
+    # https://<tenant>.webhook.office.com/webhookb2/<guid>@<guid>/IncomingWebhook/<hex>/<guid>
+    ("Teams webhook URL", re.compile(
+        r'https://[a-z0-9-]+\.webhook\.office\.com/webhookb2/'
+        r'[a-f0-9-]{20,}@[a-f0-9-]{20,}/IncomingWebhook/'
+        r'[a-f0-9]{20,}/[a-f0-9-]{20,}')),
     ("mysql -p inline", re.compile(r'(?i)\bmysql\b[^\n]*?\s-p(\S{3,})')),
     ("sshpass -p", re.compile(r'(?i)sshpass\s+-p\s*["\']?([^"\'\s]{3,})')),
     ("runas /savecred", re.compile(r'(?i)runas\s+(?:/\w+\s+)*/user:(\S+)')),
@@ -2627,6 +2654,13 @@ def analyze(path, report, store=None):
                                 "bash history mongo -u",
                                 "bash history cqlsh",
                                 "bash history influx",
+                                # iter-189 additions - CREATE USER and
+                                # webhook URL patterns appear in every DB
+                                # tutorial / DevOps integration guide.
+                                "SQL CREATE USER",
+                                "Slack webhook URL",
+                                "Discord webhook URL",
+                                "Teams webhook URL",
                                 ) and filters.is_doc_file(path):
                         continue
                     # AD CS ESC#: must look like ACTUAL certipy / certify output
@@ -2751,6 +2785,59 @@ def analyze(path, report, store=None):
                             elif hashy.startswith("$6$"): HASHES.append(("1800", "sha512crypt", hashy, path, lineno))
                             elif hashy.startswith("$apr1$"): HASHES.append(("1600", "apr1", hashy, path, lineno))
                             elif len(hashy) == 32: HASHES.append(("0", "MD5", hashy, path, lineno))
+                        hit = True
+                        break
+                    # iter-189: CREATE USER 'x' IDENTIFIED BY 'y' - user + pw pair.
+                    if name == "SQL CREATE USER":
+                        u, pw = am.group(1), am.group(2)
+                        if filters.is_placeholder(pw) or _is_cli_placeholder(u):
+                            continue
+                        _u_sh_cu = u.replace("'", "'\\''")
+                        _pw_sh_cu = pw.replace("'", "'\\''")
+                        # detect flavor: PostgreSQL, MySQL/MariaDB
+                        is_pg = "WITH PASSWORD" in line.upper()
+                        _db = "postgres" if is_pg else "mysql"
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"SQL CREATE USER: {u}:{pw}",
+                                   hint=(f"{_db} -u '{_u_sh_cu}' -p"
+                                         f"{'' if not is_pg else ''}"
+                                         f"  |  reuse as OS/service cred: "
+                                         f"nxc smb <host> -u '{_u_sh_cu}' "
+                                         f"-p '{_pw_sh_cu}'"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-189: Slack / Discord / Teams IncomingWebhook URLs.
+                    # The full URL IS the secret - anyone with it posts as the
+                    # webhook identity. Great for phishing / lateral pivoting on
+                    # DevOps-heavy engagements (with explicit scope).
+                    if name in ("Slack webhook URL", "Discord webhook URL",
+                                "Teams webhook URL"):
+                        url = am.group(0)
+                        # Reject obvious placeholder / all-zero / all-X URLs
+                        # (docs "your token here" filler).
+                        _tail = url.rsplit("/", 1)[-1]
+                        if (re.fullmatch(r'[0Xx]+', _tail)
+                                or "your-token" in url.lower()
+                                or "YOUR_TOKEN" in url):
+                            continue
+                        provider = name.split()[0]
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"{provider} webhook URL: {url[:80]}"
+                                   f"{'...' if len(url) > 80 else ''}",
+                                   hint=(f"phish/notif post: curl -X POST -H "
+                                         f"'Content-Type: application/json' "
+                                         f"-d '{{\"text\":\"test\"}}' '{url}'  "
+                                         f"(with explicit scope; do NOT hit on "
+                                         f"exam without permission)"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=url,
+                                               source=path, line=lineno))
                         hit = True
                         break
                     if name == "SNMP community":

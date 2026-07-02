@@ -307,7 +307,15 @@ def classify(line):
         _raw = m.group(1).strip("'\"`")
         _tok_check = _raw.rstrip(".?").lower()
         if _ok_pw(_raw) and _tok_check not in _GETS_STOP:
-            return Cred("cred", password=_raw.rstrip(".?"), note="note password")
+            # iter-189: try to pull the user from PostgreSQL/MySQL DDL context
+            # (CREATE|ALTER USER X WITH PASSWORD 'Y' | IDENTIFIED BY 'Y'). The
+            # `note password` fallback loses the user otherwise.
+            _user_m = re.search(
+                r'(?i)(?:CREATE|ALTER)\s+USER\s+["\'`]?'
+                r'([A-Za-z_][A-Za-z0-9_.-]{1,63})["\'`]?', s)
+            _u = _user_m.group(1) if _user_m else ""
+            return Cred("cred", user=_u,
+                        password=_raw.rstrip(".?"), note="note password")
 
     return None
 
