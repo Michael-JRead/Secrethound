@@ -268,6 +268,41 @@ _AD = [
         r'(?:smb|ldap|ssh|mssql|winrm|rdp|vnc|wmi|nfs|ftp)\s+'
         r'[^\r\n]*?\s-u\s+["\']?([^"\'\s]{1,40})["\']?'
         r'\s+[^\r\n]*?-p\s+["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-183: `net use \\host\share pw /user:[DOM\]user` - Windows cmd/PS
+    # history saves this shape when an operator mounts a share with an inline
+    # pw. Also fires on `net use z: \\host\share pw /user:X`. The order is
+    # net use TARGET [PW] /user:USER (pw can be a lone token OR '*'), so we
+    # anchor on \\host\share then grab the next non-flag token as pw and
+    # the /user:X token as user. Rejects '*' (interactive prompt marker).
+    ("bash history net use", re.compile(
+        r'(?i)\bnet\s+use\b[^\r\n]{0,80}?'
+        r'\\\\[^\s\\]+\\[^\s\r\n]+\s+'
+        r'(?!/)([^\s*/][^\s\r\n]{2,79})'
+        r'\s+/user:([^\s\r\n"\']{1,60})')),
+    # iter-183: az login --username X --password Y (Azure CLI). Also handles
+    # -u/-p short form. Placeholder-guarded so common docs `az login -u <user>`
+    # gets filtered.
+    ("bash history az login", re.compile(
+        r'(?i)\baz\s+login\b[^\r\n]*?(?:--username|--user|-u)[= ]\s*'
+        r'["\']?([^"\'\s]{1,80})["\']?'
+        r'\s+[^\r\n]*?(?:--password|--pw|-p)[= ]\s*'
+        r'["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?')),
+    # iter-183: docker login -u X -p Y [registry]. Also accepts long forms
+    # (--username/--user, --password/--pw). Registry defaults to docker.io
+    # when omitted; we optionally capture it for the hint.
+    ("bash history docker login", re.compile(
+        r'(?i)\bdocker\s+login\b[^\r\n]*?(?:-u|--user(?:name)?)[= ]\s*'
+        r'["\']?([^"\'\s]{1,60})["\']?'
+        r'\s+[^\r\n]*?(?:-p|--pass(?:word)?|--pw)[= ]\s*'
+        r'["\']?([^"\'\s][^"\'\s\r\n]{2,79})["\']?'
+        r'(?:\s+([^\s\-][^\s\r\n]{2,80}))?')),
+    # iter-183: echo 'p@ss' | sudo -S <cmd>. Extremely common walkthrough
+    # shape when a script needs non-interactive sudo. The pw always sits in
+    # the echo arg (quoted for shell safety) and the `-S` flag tells sudo
+    # to read from stdin. Also handles `printf`. Reject if pw is bash var.
+    ("bash history piped sudo -S", re.compile(
+        r'(?i)\b(?:echo|printf)\s+["\']([^"\'\r\n]{3,80})["\']'
+        r'\s*\|\s*(?:sudo|/usr/bin/sudo)\b[^|\r\n]{0,120}?\s-S\b')),
     # iter-182: evil-winrm -i host -u user -p pass. Standard PowerShell foothold
     # once WinRM is open. Order of flags varies (some walkthroughs put -u before
     # -i), so accept either order. Note: `(?:[^\r\n]*?\s)?-u` — after the tool
@@ -2604,6 +2639,88 @@ def analyze(path, report, store=None):
                             store.add(Evidence(kind="plaintext", user=u,
                                                plaintext=pw, source=path,
                                                line=lineno))
+                        hit = True
+                        break
+                    # iter-183: net use \\host\share pw /user:X.
+                    if name == "bash history net use":
+                        pw, u = am.group(1), am.group(2)
+                        if (filters.is_placeholder(pw) or pw == "*"
+                                or pw.startswith("$")
+                                or filters.is_placeholder(u)):
+                            continue
+                        _u_sh_nu = u.replace("'", "'\\''")
+                        _pw_sh_nu = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history net use: {u}:{pw}",
+                                   hint=(f"Windows share mount pw; reuse: nxc smb "
+                                         f"<host> -u '{_u_sh_nu}' -p '{_pw_sh_nu}'"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-183: az login --username X --password Y.
+                    if name == "bash history az login":
+                        u, pw = am.group(1), am.group(2)
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or filters.is_placeholder(u)):
+                            continue
+                        _u_sh_az = u.replace("'", "'\\''")
+                        _pw_sh_az = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history az login: {u}:{pw}",
+                                   hint=(f"Azure CLI cred; validate offline "
+                                         f"(check user domain / tenant); reuse "
+                                         f"as O365 / M365 / Entra ID login: "
+                                         f"az login -u '{_u_sh_az}' -p '{_pw_sh_az}'"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-183: docker login -u X -p Y [registry].
+                    if name == "bash history docker login":
+                        u, pw = am.group(1), am.group(2)
+                        registry = am.group(3) or "docker.io"
+                        if (filters.is_placeholder(pw) or pw.startswith("$")
+                                or filters.is_placeholder(u)):
+                            continue
+                        _u_sh_dl2 = u.replace("'", "'\\''")
+                        _pw_sh_dl2 = pw.replace("'", "'\\''")
+                        _reg_sh = registry.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history docker login "
+                                   f"{registry}: {u}:{pw}",
+                                   hint=(f"docker login '{_reg_sh}' -u '{_u_sh_dl2}' "
+                                         f"-p '{_pw_sh_dl2}'  - registry auth; "
+                                         f"often reused for SSH/SMB"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", user=u,
+                                               plaintext=pw, source=path,
+                                               line=lineno))
+                        hit = True
+                        break
+                    # iter-183: echo 'pw' | sudo -S <cmd>. Non-interactive sudo
+                    # via stdin. The pw is right there in the echo arg.
+                    if name == "bash history piped sudo -S":
+                        pw = am.group(1)
+                        if filters.is_placeholder(pw) or pw.startswith("$"):
+                            continue
+                        _pw_sh_ps = pw.replace("'", "'\\''")
+                        report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                   f"shell history piped-sudo pw: {pw}",
+                                   hint=(f"pw piped to `sudo -S` for non-interactive "
+                                         f"root; try: echo '{_pw_sh_ps}' | sudo -S "
+                                         f"-i  or ssh <op-user>@<host> pw '{_pw_sh_ps}'"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=pw,
+                                               source=path, line=lineno))
                         hit = True
                         break
                     # iter-182: evil-winrm -i <host> -u X -p Y (or flag order
