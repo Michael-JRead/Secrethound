@@ -295,6 +295,17 @@ def analyze(path, report, store=None):
                         # (indented bullet, inline code fence, or 'example:'/'sample:'/'e.g.')
                         if re.search(r'(?i)^\s*[-*]\s|`[^`]*`|e\.g\.|\bexample\b|\bsample\b|\btutorial\b', line):
                             continue
+                        # iter-81: also skip when the hash's HEX tail is a
+                        # canonical cheatsheet run ('0123456789abcdef...' /
+                        # 'deadbeef...' / repeated blocks). Docs authors put
+                        # these in Kerberoast hash samples all the time
+                        # ($krb5tgs$23$*svc$DOM$SPN*$<canonical-hex>$<canonical-hex>).
+                        # The line-content gate above misses these because
+                        # the sample line itself carries no prose markers.
+                        _hex_tails = re.findall(r'[a-f0-9]{16,}', full or "")
+                        if _hex_tails and all(filters.is_canonical_sample(h)
+                                              for h in _hex_tails):
+                            continue
                     # iter-9: Ansible Vault marker is a short, distinctive header
                     # ('$ANSIBLE_VAULT;1.1;AES256') - in doc files it's ALWAYS
                     # demonstrating the format, never real loot. Unconditional
