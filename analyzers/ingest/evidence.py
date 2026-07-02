@@ -172,7 +172,13 @@ class Store:
             for e in self.items:
                 m = e.meta or {}
                 oid = str(m.get("object_identifier", "") or "").strip()
-                if oid and e.user:
+                # iter-46: skip Evidence where the 'user' field IS itself the
+                # SID (from group-membership Evidence that hasn't been
+                # cross-resolved yet). Otherwise the group-member entry
+                # lands first (groups.json < users.json) and _sid_index
+                # ends up mapping SID -> SID (self-reference), breaking
+                # subsequent resolves for the same SID.
+                if oid and e.user and not str(e.user).startswith("S-1-"):
                     self._sid_index.setdefault(oid, e.user)
         return self._sid_index.get(sid_s, "")
 

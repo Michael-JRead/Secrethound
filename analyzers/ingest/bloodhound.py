@@ -223,6 +223,35 @@ def _ingest_objects(data, kind_hint, store, report, src):
                 store.add(Evidence(kind="host", host=name, fact="unconstrained", source=src))
                 n += 1
             store.learn_host(names=[name])
+        elif kind_hint == "groups":
+            # iter-46: parse tier-0 groups (Domain Admins / Enterprise Admins
+            # / Schema Admins / Backup Operators / Account Operators / Server
+            # Operators / etc.) and mark their Members as admincount so
+            # R-ADMIN-CRED fires even when the user's individual admincount
+            # attribute wasn't set.
+            g_short = short.lower()
+            _PRIV = {"domain admins", "enterprise admins", "schema admins",
+                     "backup operators", "account operators",
+                     "server operators", "print operators", "administrators",
+                     "domain controllers", "read-only domain controllers",
+                     "protected users", "key admins", "enterprise key admins"}
+            if g_short in _PRIV or p.get("admincount"):
+                members = obj.get("Members") or obj.get("members") or []
+                for mm in members:
+                    if not isinstance(mm, dict):
+                        continue
+                    m_sid = (mm.get("ObjectIdentifier")
+                             or mm.get("objectidentifier") or "")
+                    m_type = (mm.get("ObjectType")
+                              or mm.get("objecttype") or "").lower()
+                    if m_type != "user" or not m_sid:
+                        continue
+                    store.add(Evidence(
+                        kind="user", user=m_sid, fact="admincount",
+                        domain=dom, source=src,
+                        meta={"object_identifier": m_sid,
+                              "via_group": g_short}))
+                    n += 1
         elif kind_hint == "certtemplates":
             # iter-23: BloodHound CE collects ADCS templates directly. Mirror
             # the certipy-find shape so correlate.py routes ESC chains.
