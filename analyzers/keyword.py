@@ -1252,6 +1252,40 @@ _AWS_CREDS_INI = re.compile(
     r'^\s*aws_secret_access_key\s*[:=]\s*([A-Za-z0-9/+=]{40})\s*(?:\r?\n|$)'
 )
 
+# iter-191: Kafka SASL PLAIN / SCRAM JAAS config. Common in
+# `server.properties`, `client.properties`, `consumer.properties`,
+# `producer.properties`, and Spring Boot application.yaml with a
+# `spring.kafka.properties.sasl.jaas.config` key. Shape:
+#   sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule \
+#     required username="alice" password="MyPassword123";
+# Both PLAIN + SCRAM login modules use the same username/password fields.
+# The multi-line span accommodates backslash-continued or newline-broken
+# JAAS entries.
+_KAFKA_JAAS = re.compile(
+    r'(?i)(?:Plain|Scram(?:Sha(?:256|512)?)?)LoginModule\s+required'
+    r'[\s\S]{0,200}?'
+    r'username\s*=\s*["\']([^"\']{1,60})["\']'
+    r'[\s\S]{0,200}?'
+    r'password\s*=\s*["\']([^"\']{3,80})["\']'
+)
+
+# iter-191: Windows Task Scheduler XML export. `schtasks /query /XML` OR
+# `Export-ScheduledTask` produces XML containing:
+#   <Principals>
+#     <Principal id="Author">
+#       <UserId>CORP\svc-backup</UserId>
+#       <LogonType>Password</LogonType>
+# The password itself isn't in the XML (DPAPI-encrypted in the SCM store),
+# but the pairing signals: (a) a service account exists, and (b) it uses a
+# stored password (not S4U / GroupManaged). Feed to RECON so downstream
+# can prioritise credential-theft on that account. Also captures
+# InteractiveTokenOrPassword variants.
+_TASK_SCHED_XML = re.compile(
+    r'(?i)<UserId>([^<>\r\n]{2,80})</UserId>'
+    r'[\s\S]{0,300}?'
+    r'<LogonType>(Password|InteractiveTokenOrPassword|S4U)</LogonType>'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -1621,6 +1655,78 @@ def _multiline_passes(path, report, store):
                                    meta={"aws_profile": profile,
                                          "aws_access_key_id": akid,
                                          "temporary": _tmp}))
+
+    # iter-191: Kafka SASL PLAIN / SCRAM JAAS config. Filename gate: only
+    # fire on Kafka-shaped config paths OR when the surrounding text has
+    # a Kafka marker (bootstrap.servers, security.protocol=SASL_*).
+    _kafka_gate = (_plow_cf.endswith((".properties", ".yaml", ".yml", ".conf"))
+                   and ("kafka" in _plow_cf or "kafka" in text[:8000].lower()
+                        or "bootstrap.servers" in text[:8000]
+                        or "security.protocol" in text[:8000]))
+    if _kafka_gate and not filters.is_doc_file(path):
+        _kafka_seen = set()
+        for m in _KAFKA_JAAS.finditer(text):
+            u, p = m.group(1).strip(), m.group(2).strip()
+            if (u, p) in _kafka_seen:
+                continue
+            _kafka_seen.add((u, p))
+            if _is_cli_placeholder(u) or filters.is_placeholder(p):
+                continue
+            _u_sh_k = u.replace("'", "'\\''")
+            _p_sh_k = p.replace("'", "'\\''")
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                       f"Kafka SASL cred: {u}:{p}",
+                       hint=(f"kafka-console-consumer.sh --bootstrap-server "
+                             f"<host>:9092 --topic <topic> --consumer-property "
+                             f"'sasl.jaas.config=org.apache.kafka.common.security"
+                             f".plain.PlainLoginModule required username=\""
+                             f"{_u_sh_k}\" password=\"{_p_sh_k}\";' "
+                             f"--consumer-property "
+                             f"'security.protocol=SASL_PLAINTEXT'"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=u, plaintext=p,
+                                   source=path, line=_ln(m)))
+
+    # iter-191: Windows Task Scheduler XML export. RECON-only (pw isn't
+    # in the XML; DPAPI-encrypted separately). File-gated to XML paths
+    # that mention TaskScheduler markers.
+    _task_gate = (_plow_cf.endswith((".xml", ".txt"))
+                  and ("schtasks" in _plow_cf or "taskscheduler" in _plow_cf
+                       or "scheduledtask" in _plow_cf
+                       or "<Task" in text[:2000]
+                       or "schemas.microsoft.com/windows/2004/02/mit/task" in text[:8000]))
+    if _task_gate and not filters.is_doc_file(path):
+        _task_seen = set()
+        for m in _TASK_SCHED_XML.finditer(text):
+            u, ltype = m.group(1).strip(), m.group(2)
+            key = (u, ltype)
+            if key in _task_seen:
+                continue
+            _task_seen.add(key)
+            if _is_cli_placeholder(u):
+                continue
+            # skip SYSTEM / LocalService / NetworkService (built-in accounts)
+            if u.lower() in ("s-1-5-18", "system", "localsystem",
+                             "nt authority\\system", "local service",
+                             "nt authority\\local service",
+                             "network service",
+                             "nt authority\\network service"):
+                continue
+            _u_sh_ts = u.replace("'", "'\\''")
+            report.add("HIGH", "RECON", path, _ln(m),
+                       f"Task Scheduler runs as '{u}' ({ltype})",
+                       hint=(f"service account with stored pw - if we own the "
+                             f"host, try mimikatz sekurlsa::credman  or "
+                             f"schtasks /query /XML /TN <TaskName> and then "
+                             f"reg query for the encrypted secret; else spray "
+                             f"the account: nxc smb <host> -u '{_u_sh_ts}' "
+                             f"-p '<candidate>'"))
+            if store is not None:
+                # Track the account name so correlate.py can pair with a
+                # later-recovered pw / NT hash.
+                store.add(Evidence(kind="user", user=u, source=path,
+                                   line=_ln(m),
+                                   meta={"logon_type": ltype}))
 
     # iter-188: JBoss/WildFly mgmt-users.properties + application-users.properties.
     # Very common on Java-heavy lab boxes. The file lives in
