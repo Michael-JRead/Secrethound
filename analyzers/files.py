@@ -196,6 +196,24 @@ INTERESTING = [
     # Vagrant / Packer build artifact (frequently contains image build creds)
     (re.compile(r'(?i)^Vagrantfile$|^packer.*\.json$'),
      "Vagrant/Packer build script → embedded ssh_password / winrm_password", "MEDIUM"),
+    # iter-32: Erlang / RabbitMQ .erlang.cookie - cluster auth secret,
+    # single-line ascii. If operator has this + the erl node port they
+    # can connect as a peer node (full remote code exec on the target
+    # Erlang VM via rabbitmqctl / rpc).
+    (re.compile(r'(?i)^\.erlang\.cookie$|/\.erlang\.cookie$'),
+     "Erlang cookie → cluster auth secret for RabbitMQ/CouchDB/EMQX; "
+     "rabbitmqctl -n rabbit@<host> --erlang-cookie <val> status", "HIGH"),
+    # iter-32: Redis .rdb snapshot / .aof append-only file. Extractable
+    # with redis-check-rdb / rdb-tools; often carries app secrets in keys.
+    (re.compile(r'(?i)\.(rdb|aof)$|^dump\.rdb$'),
+     "Redis persistence file → rdb-tools / redis-check-rdb; grep for "
+     "secret/token/session keys", "MEDIUM"),
+    # iter-32: Rails master.key + credentials.yml.enc pair. master.key is
+    # the AES symmetric key that decrypts credentials.yml.enc.
+    (re.compile(r'(?i)^master\.key$|/config/master\.key$|'
+                r'^credentials\.yml\.enc$|/config/credentials\.yml\.enc$'),
+     "Rails master.key + credentials.yml.enc → EDITOR=cat "
+     "bin/rails credentials:show  or ruby OpenSSL decrypt", "HIGH"),
 
     # ── generic / catch-all (lowest priority) ──────────────────────────────
     (re.compile(r'(?i)\.(ini|conf|cnf|cfg|properties|toml)$'), "config file → read for creds", "INFO"),

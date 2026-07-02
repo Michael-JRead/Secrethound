@@ -124,10 +124,24 @@ def iter_files(root):
 
 def is_text_target(path, scan_src=False, oversized=None):
     """iter-12: oversized=set() collects paths that exceeded MAX_BYTES so the
-    main loop can emit an INFO finding (silent skip = silent miss)."""
+    main loop can emit an INFO finding (silent skip = silent miss).
+    iter-32: also scan named Python/Ruby config files even without --scan-src.
+    settings.py / config.py / secrets.py / local_settings.py / production.py
+    consistently carry framework SECRET_KEY + DATABASES creds on OSCP+ Python
+    boxes; scanning ALL .py by default is too noisy but scanning THESE by
+    name is high-signal."""
     ext = os.path.splitext(path)[1].lower()
+    base = os.path.basename(path).lower()
+    _PY_CONFIG_NAMES = {
+        "settings.py", "config.py", "secrets.py", "local_settings.py",
+        "production.py", "prod.py", "dev.py", "development.py",
+        "database.py", "db.py", "application.py",
+    }
+    is_py_config = (base in _PY_CONFIG_NAMES
+                    or base.endswith(("_config.py", "_settings.py",
+                                       "_secrets.py")))
     allowed = TEXT_EXT | SRC_EXT if scan_src else TEXT_EXT
-    if ext not in allowed:
+    if ext not in allowed and not is_py_config:
         return False
     try:
         sz = os.path.getsize(path)

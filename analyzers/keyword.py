@@ -331,6 +331,24 @@ _AD = [
     # or 'stats auth admin:P@ss' style
     ("haproxy stats auth", re.compile(
         r'(?im)^\s*stats\s+auth\s+(\S{1,50}):(\S{3,80})\s*$')),
+    # iter-32: Java Spring application.properties datasource passwords.
+    # Also covers Micronaut / Quarkus (same dot-property shape).
+    ("spring datasource props", re.compile(
+        r'(?im)^\s*(?:spring\.datasource(?:\.\w+)?|datasources\.\w+|'
+        r'quarkus\.datasource(?:\.\w+)?|micronaut\.datasources\.\w+)'
+        r'\.(?:password|pwd)\s*=\s*(\S{3,200})\s*$')),
+    # iter-32: Python framework SECRET_KEY (Django settings.py, Flask
+    # config.py). Also covers FastAPI, Starlette. 16-char minimum to avoid
+    # placeholder trigger 'CHANGE_ME'-style short values.
+    ("python SECRET_KEY", re.compile(
+        r'(?im)^\s*(SECRET_KEY|JWT_SECRET_KEY|SECURITY_PASSWORD_SALT|'
+        r'CSRF_SECRET|SESSION_SECRET|FLASK_SECRET)'
+        r'\s*=\s*["\']([^"\'\r\n]{16,200})["\']')),
+    # iter-32: Django DATABASES entry - matches the common Django/Flask
+    # SQLAlchemy dict form {"PASSWORD": "X"}. Distinct from the existing
+    # PHP array secret rule because Python config often uses UPPERCASE keys.
+    ("Django DATABASES password", re.compile(
+        r"(?i)['\"]PASSWORD['\"]\s*:\s*['\"]([^'\"\r\n]{3,200})['\"]")),
     # iter-28: PostgreSQL .pgpass row where credline may have already
     # caught it, but a keyword pass emits it into ASSIGNED SECRETS too
     # so the operator sees the host + db context inline.
@@ -2651,6 +2669,50 @@ def analyze(path, report, store=None):
                             store.add(Evidence(kind="plaintext", user=u,
                                                plaintext=pw, source=path,
                                                line=lineno))
+                        hit = True
+                        break
+                    # iter-32: Spring datasource properties password
+                    if name == "spring datasource props":
+                        pw = am.group(1).strip().strip("'\"")
+                        if filters.is_placeholder(pw) or pw.startswith(("${", "$")):
+                            continue
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"Spring datasource password: {pw}",
+                                   hint=("Spring app connects to DB with this pw; "
+                                         "try against the app + its DB backend"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=pw,
+                                               source=path, line=lineno))
+                        hit = True
+                        break
+                    # iter-32: Python SECRET_KEY (Django/Flask/FastAPI)
+                    if name == "python SECRET_KEY":
+                        keyname, val = am.group(1), am.group(2)
+                        if filters.is_placeholder(val) or val.startswith(("os.", "env")):
+                            continue
+                        # Django/Flask SECRET_KEY has ~50 char default; 16 min
+                        # allows short config for smaller frameworks.
+                        report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
+                                   f"{keyname}: {val[:60]}{'...' if len(val) > 60 else ''}",
+                                   hint=("session/cookie signing key. flask-unsign "
+                                         "or django cookie decode: reuse for "
+                                         "session forgery"))
+                        hit = True
+                        break
+                    # iter-32: Django DATABASES password dict entry
+                    if name == "Django DATABASES password":
+                        pw = am.group(1)
+                        if filters.is_placeholder(pw) or pw.startswith(("os.", "env")):
+                            continue
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"Django DATABASES password: {pw}",
+                                   hint=(f"pgconnect / mysql -p'{pw}' - DB from "
+                                         f"Django app config"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext", plaintext=pw,
+                                               source=path, line=lineno))
                         hit = True
                         break
                     # iter-29: rsyncd secrets file pointer
