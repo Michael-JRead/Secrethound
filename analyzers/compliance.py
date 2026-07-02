@@ -88,6 +88,11 @@ ALLOWLIST_BINARIES = frozenset({
     "chmod", "echo", "cat", "cut", "export", "cd", "grep", "strings", "file",
     "head", "tail", "sort", "uniq", "tr", "awk", "sed", "python3", "for",
     "tee", "wc", "rev", "tac", "xxd",
+    # iter-106: benign privilege-escalation / shell wrappers. Operators paste
+    # commands with 'sudo' / 'su' / 'bash -c' prefixes all the time; without
+    # these, any doc hint like 'sudo netexec smb ...' fails lint even though
+    # the wrapped command is exam-legal.
+    "sudo", "su", "bash", "sh", "zsh", "dash", "runuser", "env",
 })
 
 # may be SHOWN only with the [LAB-ONLY] tag; never a top/green action (spoofing)
