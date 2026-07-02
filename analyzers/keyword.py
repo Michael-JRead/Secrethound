@@ -2546,6 +2546,29 @@ def analyze(path, report, store=None):
                                    f"Snaffler {color} ({rule_n}): {target_p}",
                                    hint=f"smbclient copy / read: {target_p}  -  rule {rule_n}"
                                         + (f"  snippet: {snippet_short}" if snippet_short else ""))
+                        # iter-162: Snaffler's grep-mode snippet often carries
+                        # the actual credential match (e.g. Rule
+                        # 'KeepConfigPasswordOrange' fires on a web.config line
+                        # like `<add key="pw" value="Sup3r!">`, and the whole
+                        # line lands in the annotation). Feed the snippet
+                        # through credline so a real cred gets surfaced as a
+                        # separate CRED PAIRS finding on top of the file note.
+                        # The classifier already rejects placeholders / brute
+                        # templates / ACL masks so FP risk stays low.
+                        if snippet and store is not None:
+                            _sc = credline.classify(snippet)
+                            if _sc and _sc.kind == "cred" and _sc.password:
+                                _pw_sh = _sc.password.replace("'", "'\\''")
+                                _u_disp = _sc.user or "<user>"
+                                _u_sh = _u_disp.replace("'", "'\\''")
+                                report.add("CRITICAL", "CRED PAIRS", path, lineno,
+                                           f"[Snaffler grep] {_u_disp}:{_sc.password}"
+                                           + (f"  ({_sc.note})" if _sc.note else ""),
+                                           hint=f"reuse: netexec smb <target> -u '{_u_sh}' -p '{_pw_sh}'")
+                                from analyzers.ingest.evidence import Evidence
+                                store.add(Evidence(kind="plaintext", user=_sc.user,
+                                                   plaintext=_sc.password,
+                                                   source=path, line=lineno))
                         hit = True
                         break
                     if name == "Snaffler share":
