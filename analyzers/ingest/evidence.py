@@ -182,6 +182,28 @@ class Store:
                     self._sid_index.setdefault(oid, e.user)
         return self._sid_index.get(sid_s, "")
 
+    # iter-48: pick the DC's FQDN when known. Chain commands that need
+    # -k -no-pass secretsdump / psexec against the DC use this instead
+    # of the '<DC-FQDN>' placeholder. Falls back to '' when unknown.
+    # Sources: Evidence(kind='host', fact='dc', host=<IP>) plus the
+    # ip2names map that BloodHound / nmap populates.
+    def dc_fqdn(self):
+        for ev in self.items:
+            if ev.kind == "host" and ev.fact == "dc" and ev.host:
+                names = self._ip2names.get(ev.host, set())
+                # prefer the longest name (usually the FQDN)
+                fqdn = ""
+                for n in names:
+                    if "." in n and len(n) > len(fqdn):
+                        fqdn = n
+                if fqdn:
+                    return fqdn
+        # Fallback: any BH computer with domain suffix as FQDN.
+        for ev in self.items:
+            if ev.kind == "host" and ev.host and "." in ev.host:
+                return ev.host
+        return ""
+
     # iter-38: extract the S-1-5-21-a-b-c domain SID prefix from any
     # BloodHound principal SID (Aces[].PrincipalSID or ObjectIdentifier).
     # Threaded into R-GOLDEN / R-SILVER / R-DCSYNC ticketer commands so
