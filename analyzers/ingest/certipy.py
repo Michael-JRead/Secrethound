@@ -177,10 +177,15 @@ def parse(path, store, report):
                        f"ADCS CA: {ca_name} ({dns})",
                        f"certipy-ad find -u <u>@{_dom} -p '<p>' -dc-ip <DC> -vulnerable")
             # surface CA-wide ESCs (ESC6, ESC8, ESC11) reported per-CA
+            # iter-160: shell-escape ca / template names since they're
+            # spliced into single-quoted certipy args (parity with
+            # core/correlate.py iter-150).
+            _ca_sh = ca_name.replace("'", "'\\''")
+            _dom_sh = _dom.replace("'", "'\\''")
             for esc in _esc_tags(ca_entry):
                 desc, hint_t = _ESC_HINTS.get(esc, ("ADCS CA vulnerability", ""))
-                hint = hint_t.format(user="<u>", pw="<p>", dom=_dom,
-                                     ca=ca_name, template="<template>")
+                hint = hint_t.format(user="<u>", pw="<p>", dom=_dom_sh,
+                                     ca=_ca_sh, template="<template>")
                 lab_only = esc in ("ESC8", "ESC11")
                 sev = "HIGH" if lab_only else "CRITICAL"
                 report.add(sev, "INTERESTING FILES", path, None,
@@ -210,10 +215,14 @@ def parse(path, store, report):
                                meta={"template": name, "ca": ca_tag,
                                      "esc": escs,
                                      "enroll": principals}))
+            # iter-160: shell-escape template + ca + dom (parity with iter-150).
+            _name_sh = name.replace("'", "'\\''")
+            _ca_tag_sh = ca_tag.replace("'", "'\\''")
+            _dom_sh_t = _dom.replace("'", "'\\''")
             for esc in escs:
                 desc, hint_t = _ESC_HINTS.get(esc, ("ADCS template vulnerability", ""))
-                hint = hint_t.format(user="<u>", pw="<p>", dom=_dom,
-                                     ca=ca_tag, template=name)
+                hint = hint_t.format(user="<u>", pw="<p>", dom=_dom_sh_t,
+                                     ca=_ca_tag_sh, template=_name_sh)
                 lab_only = esc in ("ESC8", "ESC11")
                 sev = "HIGH" if lab_only else "CRITICAL"
                 report.add(sev, "INTERESTING FILES", path, None,

@@ -191,15 +191,19 @@ def analyze(path, report, store=None):
                 pw = credline.is_pwdump_row(line)
                 if pw:
                     user, nt, _dom = pw
+                    # iter-160: shell-escape user + known-pw in the hint
+                    # (parity with iter-140/141/158/159 sweep).
+                    _user_sh = user.replace("'", "'\\''")
                     known = known_hashes.lookup(nt)
                     if known is not None:
+                        _known_sh = known.replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"{user} NT=DEFAULT '{known}' ({nt[:12]}...)",
-                                   f"log in directly: netexec smb <DC-IP> -u '{user}' -p '{known}'")
+                                   f"log in directly: netexec smb <DC-IP> -u '{_user_sh}' -p '{_known_sh}'")
                     else:
                         report.add("HIGH", "PASSWORD HASHES", path, lineno,
                                    f"NTLM (NT) {user}: {nt}",
-                                   f"PtH: netexec smb <DC-IP> -u '{user}' -H {nt}  |  crack: hashcat -m 1000 <nt> rockyou.txt")
+                                   f"PtH: netexec smb <DC-IP> -u '{_user_sh}' -H {nt}  |  crack: hashcat -m 1000 <nt> rockyou.txt")
                         HASHES.append(("1000", "NTLM", nt, path, lineno))
                     continue
                 spans = []   # (start, end) of every match already taken on this line
@@ -368,9 +372,11 @@ def analyze(path, report, store=None):
                             continue
                         known = known_hashes.lookup(nt)
                         if known is not None:
+                            # iter-160: shell-escape known-pw for the paste.
+                            _known_sh_g = known.replace("'", "'\\''")
                             report.add("CRITICAL", "PASSWORD HASHES", path, lineno,
                                        f"NTLM (DEFAULT = {known!r}): {nt}",
-                                       f"NT hash of {known!r} - just log in: nxc smb <dc> -u <user> -p '{known}'")
+                                       f"NT hash of {known!r} - just log in: nxc smb <dc> -u <user> -p '{_known_sh_g}'")
                             continue
                         lm_note = "" if filters.is_blank_hash(lm) else " (LM half also crackable: hashcat -m 3000)"
                         report.add(sev, "PASSWORD HASHES", path, lineno,
