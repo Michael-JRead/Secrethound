@@ -152,10 +152,12 @@ def correlate(report, store, args=None):
         store.cracked.add(normalize(val))
         is_ntlm = "ntlm" in name.lower() or mode == "1000"
         pth = f"   (or PtH: netexec smb <DC-IP> -u '<user>' -H {val})" if is_ntlm else ""
+        # iter-139: bash-safe escape for cracked plaintext (may carry ')
+        _plain_sh = plain.replace("'", "'\\''")
         report.add("CRITICAL", "CRED PAIRS", fp, ln,
                    f"CRACKED {name}: {val[:24]}… = {plain!r}",
                    f"hash cracked in {os.path.basename(potsrc)} → use it: "
-                   f"netexec smb <DC-IP> -u '<user>' -p '{plain}' -k{pth}")
+                   f"netexec smb <DC-IP> -u '<user>' -p '{_plain_sh}' -k{pth}")
         store.add(Evidence(kind="plaintext", plaintext=plain, hash=val,
                            hash_mode=mode, source=fp, line=ln))
     return store.cracked
