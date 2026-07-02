@@ -40,7 +40,27 @@ _HELPSTR = re.compile(r'(?i)(lmhash|nthash|lm[_ ]?hash|nt[_ ]?hash|uid:rid|rid:l
 _TEMPLATE = re.compile(r'(?i)(\^USER\^|\^PASS\^|\^USER64\^|FUZZ|§\w|http-post-form|http-get-form|'
                        r'\$\{?USER\}?|\$\{?PASS(WORD)?\}?|<USERNAME>|<PASSWORD>|%USER%|%PASS%|'
                        r'\b(hydra|medusa|ncrack|patator)\b|users?\.txt|pass(words?)?\.txt|rockyou)')
-_BRUTE_BODY = re.compile(r'(?i)\b(curl|wget)\b.*(-d|--data)|username=\w+&password=')
+# iter-194: drop the bare `username=\w+&password=` alternative - it FPs on
+# real Burp form-urlencoded POST bodies (`username=alice&password=Sunfl0wer!`)
+# which are legitimate captures we WANT to classify as creds. The tool-context
+# form (`curl -d 'username=X&password=Y' <url>`) is still a template signal,
+# so keep it - but also require the presence of a placeholder / brute-list
+# marker AFTER the tool token to distinguish `curl -d ...` real POST from
+# `hydra -L users.txt -P passwords.txt http-post-form '/login:username=^USER^&password=^PASS^:F=fail'`
+_BRUTE_BODY = re.compile(
+    r'(?i)\b(curl|wget|hydra|medusa|ncrack|patator|ffuf|wfuzz)\b.*'
+    r'(?:(-d|--data)|http-(?:post|get)-form)[^\r\n]{0,200}?'
+    r'(?:\^(?:USER|PASS)\^|\$\{?(?:USER|PASS)\}?|FUZZ|<[^>]+>|%[A-Z]+%)'
+)
+# JSON login body: {"username": "X", "password": "Y"} or ADO.NET-style
+# {"Username":"X","Password":"Y"} or {"user":"X","pass":"Y"}. Common in
+# Burp captures of AJAX login endpoints and audit logs.
+_JSON_LOGIN_BODY = re.compile(
+    r'(?i)["\'](?:username|user|login|email|uid)["\']\s*:\s*["\']'
+    r'([^"\'\r\n]{1,80})["\']\s*,\s*'
+    r'["\'](?:password|pass|pwd|passwd)["\']\s*:\s*["\']'
+    r'([^"\'\r\n]{3,80})["\']'
+)
 # pwdump:  [DOMAIN\]user:RID:LM:NT:::    (NT = group 5, LM = group 4)
 _PWDUMP = re.compile(r'(?:([^\s:\\]+)\\)?([^\s:\\]{1,64}):(\d{1,7}):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::')
 # netexec / crackmapexec password line:  [+]/[-] domain\user:password [(Pwn3d!)] [STATUS_...]
@@ -277,6 +297,14 @@ def classify(line):
     if m and _ok_pw(m.group(2)):
         return Cred("cred", user=m.group(1), password=m.group(2),
                     note="MSSQL/ADO.NET connection string")
+
+    # iter-194: JSON login body from Burp captures / audit logs.
+    # {"username":"alice","password":"P@ss"} shape - user + pw quoted +
+    # comma-separated. Also matches the "user"/"pass" short aliases.
+    m = _JSON_LOGIN_BODY.search(s)
+    if m and _ok_pw(m.group(2)):
+        return Cred("cred", user=m.group(1), password=m.group(2),
+                    note="JSON login body")
 
     # ---- plain domain\user:password note line ----
     m = _PLAIN.match(s)
