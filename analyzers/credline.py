@@ -96,9 +96,16 @@ _PLAIN = re.compile(r'^(?P<dom>[A-Za-z0-9.\-]+)\\(?P<user>[^\s:\\]{1,64}):(?P<pw
 #   Login: alice / Sunfl0wer
 #   Creds: alice/Sunfl0wer
 #   Access: alice / Sunfl0wer!
+# iter-204: also handle multi-word anchors:
+#   `login with alice/pw`
+#   `log in with alice / pw`
+#   `login as alice / pw`
 # Anchor on the intent keyword so we don't FP on `10.10.10.10 / 24` etc.
 _SLASH_PAIR = re.compile(
-    r'(?i)\b(?:credentials|login|creds?|access|auth|account)\s*[:=]?\s+'
+    r'(?i)\b(?:credentials?|login|creds?|access|auth|account|'
+    r'log\s+in|sign\s+in)'
+    r'(?:\s+(?:with|as|using|to|into|via))?'
+    r'\s*[:=]?\s+'
     r'([A-Za-z_][A-Za-z0-9._@\\-]{1,60})\s*/\s*'
     r'([^\s"\',][^\s"\',\r\n]{2,79})'
 )
@@ -201,6 +208,13 @@ _GETS = re.compile(
     # verb-phrase branches: separator is optional (word-boundary suffices)
     r"\b(?:gets?\s+password|password\s+set\s+to|"
     r"(?:my|the|default|your)\s+(?:default\s+)?password\s+is|"
+    # iter-204: possessive `X's password is Y`, `has password Y`, and
+    # imperative `set X's password to Y`, `password reset for X: Y`
+    r"\w+['’]s\s+password\s+is|"
+    r"\w+['’]s\s+password\s+to|"
+    r"\bhas\s+password|"
+    r"password\s+reset(?:\s+for\s+\S+)?|"
+    r"password\s+changed(?:\s+for\s+\S+)?\s+to|"
     r"with\s+password)\b"
     r"\s*(?:[:=]|==>|->)?\s*"
     r"|"
