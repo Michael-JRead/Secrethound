@@ -59,10 +59,6 @@ ALLOWLIST_BINARIES = frozenset({
     "impacket-ticketer", "ticketer.py",
     # iter-41: addspn for WriteSPN targeted-kerberoast primitive.
     "impacket-addspn", "addspn.py",
-    # iter-115: reg for remote-registry hive save. Backup/Server Operators
-    # exercise SeBackupPrivilege through this to snapshot HKLM\SAM+SECURITY
-    # +SYSTEM off the DC (still passive; the DC hosts them on disk).
-    "impacket-reg", "reg.py",
     # samba 'net' tool for net rpc password (ForceChangePassword path)
     "net",
     # AD enumeration / abuse (manual)
