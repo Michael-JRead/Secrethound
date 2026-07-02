@@ -57,6 +57,8 @@ ALLOWLIST_BINARIES = frozenset({
     # iter-35: ticketer for silver/golden ticket forgery (offline; the
     # KDC never sees a request).
     "impacket-ticketer", "ticketer.py",
+    # iter-41: addspn for WriteSPN targeted-kerberoast primitive.
+    "impacket-addspn", "addspn.py",
     # samba 'net' tool for net rpc password (ForceChangePassword path)
     "net",
     # AD enumeration / abuse (manual)

