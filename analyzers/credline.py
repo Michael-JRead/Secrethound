@@ -90,9 +90,12 @@ _NOT_USER = frozenset((
     "command", "flag", "hint", "tip", "warn", "fatal", "trace", "level",
     "msg", "message", "data", "json", "xml", "html", "css", "js",
 ))
-_CODE = re.compile(r'(?i)(==\s*[\'"]?\s*$|\bis\s+None\b|\bis\s+null\b|getenv|os\.environ|'
+# iter-179: `password\s*==(?!>)` excludes ==> arrow separator so
+# 'Password ==> RealSecret99' isn't misclassified as code. Same for
+# the leading `==\s*['"]?\s*$` alternative.
+_CODE = re.compile(r'(?i)(==(?!>)\s*[\'"]?\s*$|\bis\s+None\b|\bis\s+null\b|getenv|os\.environ|'
                    r'\bvar\s+\w|\bdef\s+\w|\bfunction\s|\$\(["\']?#|jquery|document\.|'
-                   r'getElementById|Crypt::|->get\(|\.get\(|ConvertFrom|password\s*==)')
+                   r'getElementById|Crypt::|->get\(|\.get\(|ConvertFrom|password\s*==(?!>))')
 _HASHY = re.compile(r'^[a-fA-F0-9]{16,}$')
 
 
@@ -137,11 +140,28 @@ _PGPASS = re.compile(
 #   "gets password X"       (jeffersonian notes shorthand)
 # iter-178: "temp password: X" / "temporary password: X" / "initial password: X"
 # common OSCP+ note pattern (welcome/onboarding emails, HR resets).
+# iter-179: additional walkthrough phrases:
+#   "with password X"           login instructions (colon separator)
+#   "kerberos password: X"      Kerberos-scoped cred
+#   "service/user/admin/root/guest password X"   role-scoped cred
+#   "PW: X"                     short-hand notes (pw abbreviation)
+#   "Password ==> X"            arrow separator (long-arrow variant)
+#   "password set to X"         verb-phrase (no separator needed)
+# Order matters: longer separators before shorter ones so ==> doesn't
+# get chewed by [:=]+ leaving > behind.
 _GETS = re.compile(
-    r'(?i)\b(?:gets?\s+password|password\s+set\s+to|'
-    r'(?:my|the|default|your)\s+(?:default\s+)?password\s+is|'
-    r'(?:temp(?:orary)?|initial|new|reset|welcome)\s+password)\b'
-    r'\s*[:=]?\s*["\']?([^\s"\',;]{3,})')
+    r"(?i)(?:"
+    # verb-phrase branches: separator is optional (word-boundary suffices)
+    r"\b(?:gets?\s+password|password\s+set\s+to|"
+    r"(?:my|the|default|your)\s+(?:default\s+)?password\s+is)\b"
+    r"\s*(?:[:=]|==>|->)?\s*"
+    r"|"
+    # anchor-phrase branches: separator required (colon / equal / arrow)
+    r"\b(?:(?:temp(?:orary)?|initial|new|reset|welcome|kerberos|service|user|admin|root|guest)"
+    r"\s+password|with\s+password|password|pw)"
+    r"\s*(?:==>|->|:=|[:=]+)\s*"
+    r")"
+    r"[\"']?([^\s\"',;]{3,})")
 # English words that *continue* a passive "password is ..." sentence in prose
 # (docs/READMEs/security writeups), so the captured token is NOT the secret.
 # Only consulted for the colon-less _GETS shape, where the separator is absent.
