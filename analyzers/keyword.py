@@ -1607,6 +1607,27 @@ _MONGO_DB_VERSION = re.compile(
     r'\s*["\']?(\d+\.\d+(?:\.\d+)?)["\']?'
 )
 
+# iter-212: Elasticsearch 9200 UNAUTH REST API banner. The tagline
+# "You Know, for Search" is Elasticsearch's dispositive fingerprint -
+# GET / returns it in the JSON body when no auth is required. Captured
+# curl output showing this = confirmed unauth API access, which unlocks:
+#   * dump indices via _cat/indices + _search
+#   * CVE-2015-1427 Groovy sandbox escape (ES <1.4.3) for RCE
+#   * CVE-2014-3120 MVEL scripting RCE (ES <1.2)
+_ES_UNAUTH_TAGLINE = re.compile(
+    r'"tagline"\s*:\s*"You Know, for Search"'
+)
+# Version number from the same banner - `"number":"7.10.2"`.
+_ES_VERSION_NUMBER = re.compile(
+    r'"number"\s*:\s*"(\d+\.\d+(?:\.\d+)?)"'
+)
+# _cat/indices output row shape: `<health> <status> <index> <uuid> ...`
+# where health is green/yellow/red and status is open/close.
+_ES_CAT_INDICES = re.compile(
+    r'(?m)^\s*(green|yellow|red)\s+(open|close)\s+([\w.\-]{1,80})\s+'
+    r'([\w\-]{4,32})\s+\d+\s+\d+\s+\d+'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -3001,6 +3022,87 @@ def _multiline_passes(path, report, store):
                                          "--out /tmp/mongo-loot/  |  "
                                          "check output above for auth "
                                          "errors to confirm unauth"))
+
+    # iter-212: Elasticsearch 9200 UNAUTH REST API. The tagline "You
+    # Know, for Search" is dispositive - it appears ONLY in the JSON
+    # response to `GET /` and only when no auth is required. Captured
+    # curl output showing this = confirmed unauth ES access.
+    _es_gate_skip = (
+        _base_rd in ("elasticsearch.yml", "kibana.yml", "logstash.yml",
+                      "apm-server.yml", "docker-compose.yml",
+                      "docker-compose.yaml", "compose.yaml", "compose.yml",
+                      "dockerfile")
+        or _plow_rd.endswith((".dockerfile", ".containerfile"))
+        or "/elasticsearch/config/" in _plow_rd)
+    if not _es_gate_skip and not filters.is_doc_file(path):
+        # Anti-signal: presence of ES auth errors = auth is on. Two or
+        # more mentions and skip.
+        _es_deny_ct = (
+            text[:16384].count("security_exception")
+            + text[:16384].count("missing authentication credentials")
+            + text[:16384].count("401 Unauthorized")
+            + text[:16384].count("unable to authenticate user"))
+        if _es_deny_ct <= 1:
+            _tm = _ES_UNAUTH_TAGLINE.search(text)
+            if _tm:
+                # Look for version in the same file - it's in the same
+                # JSON body ~200-500 chars from the tagline.
+                _vm = _ES_VERSION_NUMBER.search(text)
+                _ver = _vm.group(1) if _vm else None
+                # Look for host context.
+                _eh = re.search(
+                    r'(?i)https?://([\w][\w\-.]{1,60})(?::(9200|9300))?',
+                    text[:16384])
+                _target = (f"{_eh.group(1)}:{_eh.group(2) or '9200'}"
+                           if _eh else "<es-host>:9200")
+                # CVE hint based on version.
+                _cve_hint = ""
+                if _ver:
+                    try:
+                        _major, _minor, _patch = [
+                            int(x) for x in (_ver.split(".") + ["0", "0"])[:3]
+                        ]
+                        if (_major, _minor, _patch) < (1, 4, 3):
+                            _cve_hint = ("  |  CVE-2015-1427 Groovy "
+                                         "sandbox RCE applies (ES <1.4.3)"
+                                         " - _search with script")
+                        elif (_major, _minor, _patch) < (1, 2, 0):
+                            _cve_hint = ("  |  CVE-2014-3120 MVEL RCE "
+                                         "applies (ES <1.2)")
+                    except (ValueError, IndexError):
+                        pass
+                _ver_str = f" {_ver}" if _ver else ""
+                report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_tm),
+                           f"Elasticsearch{_ver_str} UNAUTH REST API "
+                           f"confirmed ({_target})",
+                           hint=(f"curl -s http://{_target}/_cat/indices?v"
+                                 f"  |  dump index: "
+                                 f"curl -s 'http://{_target}/<index>/_search"
+                                 f"?size=1000&pretty' > loot.json"
+                                 f"{_cve_hint}"))
+
+            # Fallback signal: _cat/indices output rows (>=2) - captured
+            # from `curl _cat/indices` without an auth challenge.
+            if not _tm:
+                _idx_rows = list(_ES_CAT_INDICES.finditer(text))
+                if len(_idx_rows) >= 2:
+                    _first_row = _idx_rows[0]
+                    _eh2 = re.search(
+                        r'(?i)https?://([\w][\w\-.]{1,60})(?::(9200|9300))?',
+                        text[:16384])
+                    _target2 = (f"{_eh2.group(1)}:{_eh2.group(2) or '9200'}"
+                                if _eh2 else "<es-host>:9200")
+                    _idx_names = sorted(
+                        {r.group(3) for r in _idx_rows[:5]})
+                    report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                               _ln(_first_row),
+                               f"Elasticsearch UNAUTH via _cat/indices "
+                               f"({_target2}) - {_idx_names}",
+                               hint=(f"curl -s 'http://{_target2}/"
+                                     f"{_idx_names[0]}/_search?"
+                                     f"size=1000&pretty' > loot.json  |  "
+                                     f"grep dumped indices for password/"
+                                     f"apikey/token fields"))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
