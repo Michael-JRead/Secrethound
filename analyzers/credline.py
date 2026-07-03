@@ -223,7 +223,11 @@ _GETS = re.compile(
     r"(?i)(?:"
     # verb-phrase branches: separator is optional (word-boundary suffices)
     r"\b(?:gets?\s+password|password\s+set\s+to|"
-    r"(?:my|the|default|your)\s+(?:default\s+)?password\s+is|"
+    # iter-206: allow `for <target>` prepositional clause between password
+    # and `is` - `the password for administrator is Passw0rd` (HTB Access
+    # / Bastion HR notes). Also add `our` to the possessive alternation.
+    r"(?:my|the|default|your|our)\s+(?:default\s+)?password"
+    r"(?:\s+for\s+(?:the\s+|my\s+|our\s+)?[\w.@$\-]+)?\s+is|"
     # iter-204: possessive `X's password is Y`, `has password Y`, and
     # imperative `set X's password to Y`, `password reset for X: Y`
     r"\w+['’]s\s+password\s+is|"
@@ -240,6 +244,16 @@ _GETS = re.compile(
     r"\s*(?:==>|->|:=|[:=]+)\s*"
     r")"
     r"[\"']?([^\s\"',;]{3,})")
+
+# iter-206: narrative `SSH/login as X with password Y` (HTB Forest, Return,
+# Sauna, Timelapse post-loot recap prose). Verb-anchored so we don't FP on
+# random mid-sentence `as X with Y`.
+_LOGIN_AS = re.compile(
+    r"(?i)\b(?:log(?:in|on|\s+in)|ssh|sign\s?in|authenticate)\s+as\s+"
+    r"(?:user\s+|the\s+user\s+)?([\w.@$\-]+)\s+"
+    r"(?:with|using)\s+(?:the\s+|a\s+)?password\s+"
+    r"['\"`]?([^\s'\"`,;]{3,60})"
+)
 # English words that *continue* a passive "password is ..." sentence in prose
 # (docs/READMEs/security writeups), so the captured token is NOT the secret.
 # Only consulted for the colon-less _GETS shape, where the separator is absent.
@@ -262,6 +276,11 @@ _GETS_STOP = frozenset((
     "guessable", "public", "compromised", "leaked",
     "trivial", "simple", "easy", "hardcoded", "predictable", "guess",
     "guessed", "shared", "reused",
+    # iter-206: common prose-completion tokens the audit surfaced as
+    # trailing-period FPs. `The default password is admin.` was previously
+    # emitting `admin` as a real cred after the sentence period got stripped.
+    "admin", "root", "yourself", "randomly", "typically", "usually",
+    "commonly", "here", "there", "field", "column", "expected",
 ))
 
 
@@ -422,13 +441,24 @@ def classify(line):
                 and not re.fullmatch(r'-+', p)):
             return Cred("cred", user=u, password=p, note="markdown table")
 
+    # iter-206: narrative `SSH/login as X with password Y` (HTB writeup recap).
+    # Must run BEFORE _GETS since `with password Y` alone would fire _GETS
+    # with an empty user - here we can bind user + pw.
+    m = _LOGIN_AS.search(s)
+    if (m and _ok_pw(m.group(2))
+            and m.group(1).lower() not in _NOT_USER):
+        return Cred("cred", user=m.group(1),
+                    password=m.group(2).strip("'\"`").rstrip(".?"),
+                    note="note login-as prose")
+
     # ---- note shorthand: "GETS PASSWORD: x" / "the password is x" ----
     # iter-180: strip trailing sentence punctuation (.?) for the stopword
     # check so prose tokens like "guessable." (with the sentence period)
-    # don't slip past the stopword set. Preserve the raw token in the
-    # returned value - `!` is a valid password char so we can't rstrip it,
-    # and legit trailing `.` inside a password is extremely rare vs the
-    # prose-period FP savings.
+    # don't slip past the stopword set. iter-206: also strip the trailing
+    # period from the returned value so `The default password is admin.`
+    # doesn't emit `admin.` (still rejected by `admin` being in _GETS_STOP,
+    # but also don't emit the period even if a legitimate stopword-not-in-
+    # set token survives).
     m = _GETS.search(s)
     if m:
         _raw = m.group(1).strip("'\"`")
