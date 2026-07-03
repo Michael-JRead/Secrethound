@@ -2079,7 +2079,11 @@ _SMB_NULL_SESSION = re.compile(
 # Signal (B): nmap `smb-enum-shares` shows `account_used: guest` or
 # empty account_used = guest/anon session accepted.
 _SMB_GUEST_ACCOUNT = re.compile(
-    r'(?im)^\|?\s*account_used\s*:\s*(guest|)\s*$'
+    # iter-231 audit fix: nmap smb-enum-shares prints the LITERAL
+    # string `<blank>` for anonymous enumeration, plus `<empty>` on
+    # some NSE versions. Empty-value case (just whitespace) also
+    # occurs in older versions.
+    r'(?im)^\|?\s*account_used\s*:\s*(guest|<blank>|<empty>|)\s*$'
 )
 # Signal (C): captured `Anonymous access: READ` (or WRITE) on a share
 # OTHER than IPC$ - IPC$ is normally readable via null session, so
@@ -2701,16 +2705,37 @@ def _multiline_passes(path, report, store):
                 # Require the login response to come AFTER the attempt.
                 if _lgm.start() > _atm.start() and (
                         _lgm.start() - _atm.start()) < 500:
-                    report.add("HIGH", "SECRET-SIDECHANNEL", path,
-                               _ln(_lgm),
-                               "FTP anonymous login accepted (captured "
-                               "session with 230 response)",
-                               hint=("cd + ls to enumerate ftp root  |  "
-                                     "curl ftp://<host>/ for a full "
-                                     "listing  |  wget -m ftp://"
-                                     "anonymous:anon@<host>/  |  writable "
-                                     "root = webshell drop if paired with "
-                                     "webroot"))
+                    # iter-231 audit fix: reject when the operator's
+                    # anon attempt was FOLLOWED BY a second Name/USER
+                    # login before the 230 - that means anon was
+                    # REJECTED (e.g. 530 Login incorrect.) and a real
+                    # cred is what actually succeeded. Also reject
+                    # when a `530` failure code appears BETWEEN the
+                    # anon attempt and the 230.
+                    _between = text[_atm.end():_lgm.start()]
+                    _second_login = re.search(
+                        r'(?im)^(?:USER\s+(?!anonymous)\w|'
+                        r'Name\s*\([^)]{0,80}\)\s*:\s*(?!anonymous)\w|'
+                        r'Login\s*:\s*(?!anonymous)\w)',
+                        _between)
+                    _rejected = re.search(
+                        r'(?im)^\s*530\s+(?:Login\s+incorrect|'
+                        r'Login\s+authentication\s+failed|'
+                        r'Anonymous\s+access\s+denied)',
+                        _between)
+                    if _second_login or _rejected:
+                        pass  # anon actually failed
+                    else:
+                        report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                                   _ln(_lgm),
+                                   "FTP anonymous login accepted "
+                                   "(captured session with 230 response)",
+                                   hint=("cd + ls to enumerate ftp root"
+                                         "  |  curl ftp://<host>/ for a "
+                                         "full listing  |  wget -m ftp://"
+                                         "anonymous:anon@<host>/  |  "
+                                         "writable root = webshell drop "
+                                         "if paired with webroot"))
 
     # iter-226: VNC 5900 unauth / weak-auth intel. Signal (A) is the
     # vnc-info NSE block with Security types - dispositive on auth
@@ -2890,8 +2915,17 @@ def _multiline_passes(path, report, store):
         _jh_m = _JENKINS_HEADER.search(text[:16384])
         _jt_m = _JENKINS_TITLE.search(text[:16384])
         _js_m = _JENKINS_SCRIPT_PATH.search(text[:16384])
-        # Any of A/B alone dispositive; C requires A or B or version.
-        _jenkins_fire = bool(_jh_m or _jt_m or (_js_m and _jh_m))
+        # Any of A/B alone dispositive; C fires when the /script URL
+        # is captured AND the file mentions "Jenkins" somewhere in the
+        # first 16 KB (independent corroborator that survives even
+        # when the operator's capture stripped headers/title).
+        # iter-231 audit fix: prior expression `(_js_m and _jh_m)` was
+        # subsumed by the leading `_jh_m` so C was dead code. Now C
+        # contributes independently via the "Jenkins" word check.
+        _js_corroborated = (
+            _js_m is not None
+            and re.search(r'(?i)\bjenkins\b', text[:16384]) is not None)
+        _jenkins_fire = bool(_jh_m or _jt_m or _js_corroborated)
         if _jenkins_fire:
             _jenkins_ver = _jh_m.group(1) if _jh_m else "unknown"
             _jenkins_host_m = re.search(
@@ -4262,7 +4296,16 @@ def _multiline_passes(path, report, store):
     if not filters.is_doc_file(path):
         _snmp_emitted = False
         # Signal C is highest-value (has community + banner) - try first.
-        _oh = _ONESIXTYONE_HIT.search(text)
+        # iter-231 audit fix: pattern `<IP> [<word>] <text>` is too
+        # generic - it FPs on port-scan exports like `10.0.0.1 [ssh]
+        # Port 22 open` where the bracketed word is a service name,
+        # not an SNMP community. Require an snmp-context signal in
+        # the file: `onesixtyone`, `SNMP`, `.1.3.6.` OID prefix, or
+        # `sysDescr`.
+        _snmp_ctx_signal = re.search(
+            r'(?i)\b(?:onesixtyone|SNMP|sysDescr|\.1\.3\.6\.\d)',
+            text[:16384])
+        _oh = _ONESIXTYONE_HIT.search(text) if _snmp_ctx_signal else None
         if _oh:
             _ip = _oh.group(1)
             _comm = _oh.group(2).strip()
