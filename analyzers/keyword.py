@@ -1652,6 +1652,28 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-214: RDP NLA-disabled + rdp-ntlm-info intel from nmap scripts.
+# Two things worth surfacing:
+#
+# Signal A: `Standard RDP Security: SUCCESS` in rdp-enum-encryption
+# output = NLA is NOT required. Means the server accepts pre-auth
+# connects, which unlocks:
+#   * BlueKeep CVE-2019-0708 on Windows 7/Server 2008/Server 2008 R2
+#     without patch (rdp-vuln-ms12-020 is separate)
+#   * Passwd spray with FOUND creds (exam-legal - not brute force)
+#     via netexec `nxc rdp <host> -u <user> -p <pw>` (single try per
+#     found cred; NOT hydra/ncrack/crowbar which are online brute
+#     forcers)
+#
+# Signal B: `rdp-ntlm-info:` script output gives:
+#   * NetBIOS_Domain_Name + DNS_Domain_Name = domain to target
+#   * NetBIOS_Computer_Name + DNS_Computer_Name = host to pivot to
+#   * Product_Version = OS version - 6.1.x=Win7/2008R2, 6.0.x=Vista/
+#     2008, 5.1.x=XP → BlueKeep candidates
+_RDP_ENUM_STANDARD = re.compile(
+    r'(?i)Standard\s+RDP\s+Security\s*:\s*SUCCESS'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -3176,6 +3198,82 @@ def _multiline_passes(path, report, store):
                                  f"targets: Tomcat <=9.0.31/8.5.51/"
                                  f"7.0.100 - grep web.xml for admin "
                                  f"creds + JDBC URLs after LFI"))
+
+    # iter-214: RDP NLA-disabled + rdp-ntlm-info intel from nmap
+    # scripts. Doc-file gate applies; no filename gate because these
+    # signals live in nmap output that has many filename shapes.
+    if not filters.is_doc_file(path):
+        # Signal A: `Standard RDP Security: SUCCESS` = NLA not required.
+        _rdp_std_m = _RDP_ENUM_STANDARD.search(text)
+        if _rdp_std_m:
+            # Try to find target host from surrounding context.
+            _rdp_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _rdp_target = (_rdp_host_m.group(1) if _rdp_host_m
+                            else "<rdp-host>")
+            report.add("MEDIUM", "SECRET-SIDECHANNEL", path,
+                       _ln(_rdp_std_m),
+                       f"RDP NLA disabled on {_rdp_target}:3389 - "
+                       f"Standard RDP Security accepted (pre-auth "
+                       f"connect works)",
+                       hint=(f"cred reuse: xfreerdp /u:<user> "
+                             f"/p:<pw> /v:{_rdp_target}  |  spray "
+                             f"FOUND creds (exam-legal, single try "
+                             f"each): nxc rdp {_rdp_target} -u "
+                             f"users.txt -p 'FoundPw!' --no-bruteforce"
+                             f"  |  BlueKeep check: nmap "
+                             f"--script rdp-vuln-ms12-020,"
+                             f"rdp-enum-encryption -p3389 "
+                             f"{_rdp_target}  |  NO online brute "
+                             f"forcers (hydra/ncrack/crowbar/medusa "
+                             f"are NOT exam-legal)"))
+
+        # Signal B: rdp-ntlm-info fields - just gate on marker presence
+        # and extract fields anywhere in the text (nmap script output
+        # uses `|   Field: Value` line prefixes which broke a strict
+        # block match).
+        if "rdp-ntlm-info" in text[:65536]:
+            _dom = re.search(
+                r'(?i)(?:NetBIOS_Domain_Name|DNS_Domain_Name)\s*:\s*'
+                r'([\w\-.]{1,60})', text[:16384])
+            _cn = re.search(
+                r'(?i)(?:NetBIOS_Computer_Name|DNS_Computer_Name)\s*'
+                r':\s*([\w\-.]{1,60})', text[:16384])
+            _pv = re.search(
+                r'(?i)Product_Version\s*:\s*(\d+\.\d+\.\d+)', text[:16384])
+            _bits = []
+            if _dom:
+                _bits.append(f"DOMAIN={_dom.group(1)}")
+            if _cn:
+                _bits.append(f"HOST={_cn.group(1)}")
+            _bluekeep = ""
+            if _pv:
+                _ver_str = _pv.group(1)
+                _bits.append(f"OS-ver={_ver_str}")
+                try:
+                    _mj, _mn, _bl = [int(x) for x in _ver_str.split(".")]
+                    # 5.1=XP, 5.2=Server 2003, 6.0=Vista/2008,
+                    # 6.1=Win7/2008R2 - all BlueKeep candidates.
+                    if (_mj, _mn) in ((5, 1), (5, 2), (6, 0), (6, 1)):
+                        _bluekeep = (f"  |  BlueKeep CVE-2019-0708 "
+                                     f"candidate (OS {_ver_str}) - "
+                                     f"nmap --script "
+                                     f"rdp-vuln-ms12-020 confirms")
+                except (ValueError, IndexError):
+                    pass
+            if _bits:
+                # Anchor to the ntlm-info marker line.
+                _anchor_m = re.search(r'(?i)rdp-ntlm-info', text)
+                report.add("MEDIUM", "RECON", path, _ln(_anchor_m),
+                           f"RDP host intel: {', '.join(_bits)}",
+                           hint=(f"authenticated pivot: xfreerdp "
+                                 f"/u:<domain>\\\\<user> /p:<pw> "
+                                 f"/v:<rdp-host> /d:"
+                                 f"{_dom.group(1) if _dom else '<domain>'}"
+                                 f"  |  fill <rdp-host> with "
+                                 f"{_cn.group(1) if _cn else 'HOST'}"
+                                 f"{_bluekeep}"))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
