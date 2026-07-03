@@ -1940,6 +1940,24 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-227: LDAP anonymous bind confirmed via rootDSE dump. On AD
+# labs the anonymous bind + rootDSE read gives:
+#   * defaultNamingContext = DC=corp,DC=local        (target domain)
+#   * dnsHostName          = DC01.corp.local          (DC FQDN)
+#   * supportedLDAPVersion / supportedSASLMechanisms  (config intel)
+# From there the operator can pivot to authenticated LDAP queries
+# once a cred is found, or run unauth `impacket-lookupsid` +
+# `windapsearch -u '' -p '' --dc-ip <ip>` for the SID enum.
+_LDAP_NAMING_CTX = re.compile(
+    r'(?im)^\|?\s*namingContexts?\s*:\s*(DC=[\w\-.=,]{1,200})'
+)
+_LDAP_DEFAULT_NC = re.compile(
+    r'(?im)^\|?\s*defaultNamingContext\s*:\s*(DC=[\w\-.=,]{1,200})'
+)
+_LDAP_ROOTDSE_HOSTNAME = re.compile(
+    r'(?im)^\|?\s*dnsHostName\s*:\s*([\w\-.]{1,120})'
+)
+
 # iter-226: VNC 5900 unauth + weak-auth intel from nmap NSE.
 # Three tiers of severity based on the Security types row:
 #   None (1)             → HIGH direct connect, no auth at all
@@ -2709,6 +2727,51 @@ def _multiline_passes(path, report, store):
                                  f"vncviewer {_vnc_target2} to see "
                                  f"prompt  |  common default creds: "
                                  f"password, secret, admin, or empty"))
+
+    # iter-227: LDAP anonymous bind confirmed via rootDSE dump. Fires
+    # when we can see any of the rootDSE attributes (namingContexts,
+    # defaultNamingContext, dnsHostName) in captured output. These
+    # attributes are UNREADABLE without a successful bind, so their
+    # presence = confirmed anonymous bind + rootDSE readable. Doc-file
+    # gate applies.
+    if not filters.is_doc_file(path):
+        _ldap_nc = _LDAP_NAMING_CTX.search(text)
+        _ldap_dnc = _LDAP_DEFAULT_NC.search(text)
+        _ldap_dns = _LDAP_ROOTDSE_HOSTNAME.search(text)
+        # Require any TWO of the three attributes together - a single
+        # `namingContexts:` mention in prose (docs, tests) could be
+        # accidental, but seeing two rootDSE attrs on the same target
+        # is dispositive.
+        _ldap_signals = sum(bool(x) for x in (_ldap_nc, _ldap_dnc,
+                                                _ldap_dns))
+        if _ldap_signals >= 2:
+            _anchor_l = _ldap_dnc or _ldap_nc or _ldap_dns
+            _base_dn = (_ldap_dnc.group(1) if _ldap_dnc
+                         else (_ldap_nc.group(1) if _ldap_nc
+                                else "DC=corp,DC=local"))
+            _dc_fqdn = (_ldap_dns.group(1) if _ldap_dns
+                         else "<dc-host>")
+            # Try to find target IP from surrounding nmap header.
+            _ldap_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _ldap_ip = (_ldap_host_m.group(1) if _ldap_host_m
+                         else _dc_fqdn)
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_anchor_l),
+                       f"LDAP anonymous bind confirmed - rootDSE "
+                       f"dumped ({_dc_fqdn}, base={_base_dn})",
+                       hint=(f"impacket-lookupsid '{_ldap_ip}'/  |  "
+                             f"windapsearch -u '' -p '' --dc-ip "
+                             f"{_ldap_ip} -U (users) -G (groups)  |  "
+                             f"authenticated later: ldapsearch -x "
+                             f"-H ldap://{_ldap_ip} -D "
+                             f"'<user>@{_dc_fqdn.split('.', 1)[-1] if '.' in _dc_fqdn else '<domain>'}' "
+                             f"-w '<pw>' -b '{_base_dn}' "
+                             f"'(objectclass=user)'  |  AS-REP roast: "
+                             f"impacket-GetNPUsers "
+                             f"{_dc_fqdn.split('.', 1)[-1] if '.' in _dc_fqdn else '<domain>'}/ "
+                             f"-dc-ip {_ldap_ip} -request -no-pass"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
