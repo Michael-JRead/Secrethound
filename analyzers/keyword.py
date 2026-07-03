@@ -1940,6 +1940,34 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-225: FTP anonymous login accepted (nmap `ftp-anon` NSE or
+# captured `ftp` client output). Two shapes:
+#   (A) `Anonymous FTP login allowed (FTP code 230)` from nmap
+#   (B) `230 Login successful.` after `USER anonymous` in captured
+#       ftp session output
+# Both = confirmed anon access → direct read of the ftp root, often
+# containing web.config / unattend.xml / backup archives / .kdbx.
+_FTP_ANON_NMAP = re.compile(
+    r'(?i)Anonymous\s+FTP\s+login\s+allowed(?:\s*\(FTP\s+code\s+230\))?'
+)
+# Captured ftp client output:
+#   ftp> USER anonymous
+#   331 Please specify the password.
+#   ftp> PASS anonymous@
+#   230 Login successful.
+_FTP_ANON_LOGIN = re.compile(
+    r'(?im)^(?:230\s+Login\s+(?:successful|OK)|'
+    r'230\s+User\s+\w+\s+logged\s+in)'
+)
+# Weak `USER anonymous` alone doesn't confirm success; require it
+# NEAR a 230 response line. Captured ftp CLIENT output doesn't show
+# raw USER commands - it shows `Name (host:default): anonymous` -
+# so also match that shape.
+_FTP_ANON_ATTEMPT = re.compile(
+    r'(?i)(?:USER\s+anonymous|Name\s*\([^)]{0,80}\)\s*:\s*anonymous|'
+    r'\bLogin\s*:\s*anonymous\b|\bftp\s+-a\b)'
+)
+
 # iter-224: SMB null-session + guest-access + anon-share intel from
 # nmap NSE / smbclient / enum4linux output. These are the classic
 # unauth-SMB primitives that let the operator ENUMERATE the domain +
@@ -2552,6 +2580,49 @@ def _multiline_passes(path, report, store):
                              f"'prompt; recurse; mget *'  |  grep "
                              f"pulled files for .kdbx / .config / "
                              f"web.config / unattend.xml"))
+
+    # iter-225: FTP anonymous login accepted. Two orthogonal signals -
+    # nmap NSE result OR captured client session with 230 code near a
+    # USER anonymous attempt. Emits ONE HIGH per file (dedup).
+    if not filters.is_doc_file(path):
+        _ftp_hit = False
+        # Signal A: nmap `ftp-anon` NSE.
+        _fa_m = _FTP_ANON_NMAP.search(text)
+        if _fa_m:
+            _ftp_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _fh = _ftp_host_m.group(1) if _ftp_host_m else "<ftp-host>"
+            report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_fa_m),
+                       f"FTP anonymous login allowed on {_fh}",
+                       hint=(f"ftp -a {_fh}  |  or: curl -s "
+                             f"ftp://anonymous:anon@{_fh}/  |  bulk "
+                             f"pull: wget -m --no-passive ftp://"
+                             f"anonymous:anon@{_fh}/  |  grep pulled "
+                             f"for web.config, unattend.xml, backup "
+                             f"archives, .kdbx, id_rsa, .pgpass, "
+                             f".my.cnf"))
+            _ftp_hit = True
+
+        # Signal B: captured ftp session with 230 response near USER
+        # anonymous. Both must appear in the first 16 KB.
+        if not _ftp_hit:
+            _atm = _FTP_ANON_ATTEMPT.search(text[:16384])
+            _lgm = _FTP_ANON_LOGIN.search(text[:16384])
+            if _atm and _lgm:
+                # Require the login response to come AFTER the attempt.
+                if _lgm.start() > _atm.start() and (
+                        _lgm.start() - _atm.start()) < 500:
+                    report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                               _ln(_lgm),
+                               "FTP anonymous login accepted (captured "
+                               "session with 230 response)",
+                               hint=("cd + ls to enumerate ftp root  |  "
+                                     "curl ftp://<host>/ for a full "
+                                     "listing  |  wget -m ftp://"
+                                     "anonymous:anon@<host>/  |  writable "
+                                     "root = webshell drop if paired with "
+                                     "webroot"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
