@@ -2202,6 +2202,44 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-245: PowerShell Constrained Language Mode + AMSI status +
+# offensive-framework IOCs from captured .ps1 files / PS transcripts.
+#
+# Signal A: `$ExecutionContext.SessionState.LanguageMode` output
+# reveals CLM status. `ConstrainedLanguage` = restricted, needs
+# bypass. `FullLanguage` = unrestricted (bypass unneeded).
+_PS_CLM_STATE = re.compile(
+    r'(?i)(?:LanguageMode\s*:?\s*|LanguageMode\s*=\s*|'
+    r'\$ExecutionContext\.SessionState\.LanguageMode[^\r\n]{0,50}?\s*)'
+    r'(ConstrainedLanguage|FullLanguage|RestrictedLanguage|NoLanguage)'
+)
+# Signal B: AMSI bypass patterns from captured .ps1 / transcript.
+# Presence of these = AMSI-bypass attempt captured, so the
+# operator's next AMSI-tickled command may still be blocked.
+_PS_AMSI_BYPASS = re.compile(
+    r'(?i)(?:'
+    r'\[Ref\]\.Assembly\.GetType\s*\(\s*[\'"][^\'"]{20,80}Amsi[^\'"]{0,50}[\'"]\s*\)|'
+    r'System\.Management\.Automation\.AmsiUtils|'
+    r'AmsiScanBuffer|'
+    r'amsiInitFailed|'
+    r'\[System\.Runtime\.InteropServices\.Marshal\]::WriteInt32'
+    r')'
+)
+# Signal C: known-BANNED offensive-framework strings. Detecting
+# these in loot = red-team artifacts the operator MUST NOT rerun
+# on the exam (they'd violate the framework ban). Emit INFO with
+# an explicit compliance callout so the operator recognizes them.
+_PS_FRAMEWORK_IOC = re.compile(
+    r'(?i)\b(?:'
+    r'Invoke-Empire|Empire\s+(?:C2|agent|stager)|Empire\.exe|'
+    r'Covenant\s+(?:Grunt|C2)|GruntStager|'
+    r'Nishang|Invoke-PowerShellTcp|Invoke-PsUACme|'
+    r'PoshC2|Posh_C2|Get-PoshInfo|'
+    r'PowerSploit|Invoke-DllInjection|Invoke-Shellcode|'
+    r'Cobalt\s*Strike|beacon\.exe|artifact\.exe'
+    r')\b'
+)
+
 # iter-244: AS-REP-eligible user extraction from captured ldapsearch
 # LDIF text. JSON ldapdomaindump output is handled by the dedicated
 # ingester; this catches raw `ldapsearch` text output shape:
@@ -3168,6 +3206,74 @@ def _multiline_passes(path, report, store):
                              f"impacket-GetNPUsers "
                              f"{_dc_fqdn.split('.', 1)[-1] if '.' in _dc_fqdn else '<domain>'}/ "
                              f"-dc-ip {_ldap_ip} -request -no-pass"))
+
+    # iter-245: PowerShell CLM / AMSI / offensive-framework IOCs from
+    # captured .ps1 files, PS transcripts, and command-history dumps.
+    # Doc-file gate applies. Each signal is single-shot per file
+    # (dedup).
+    if not filters.is_doc_file(path):
+        _clm_m = _PS_CLM_STATE.search(text[:32768])
+        if _clm_m:
+            _mode = _clm_m.group(1)
+            if _mode.lower() == "constrainedlanguage":
+                report.add("MEDIUM", "RECON", path, _ln(_clm_m),
+                           "PowerShell ConstrainedLanguage mode "
+                           "detected - .NET member access + Add-Type "
+                           "blocked",
+                           hint=("CLM bypass paths:  |  1. downgrade "
+                                 "to PS v2 if installed: powershell "
+                                 "-Version 2 -Command <payload>  |  "
+                                 "2. Runspace via COM: Get-Item "
+                                 "cannot instantiate; try "
+                                 "InvokeExpression on JEA-scoped "
+                                 "endpoint  |  3. GPO bypass: "
+                                 "$ExecutionContext.SessionState."
+                                 "LanguageMode = 'FullLanguage' "
+                                 "(only if not enforced via LSA)  |"
+                                 "  4. use signed binaries "
+                                 "(installutil.exe, msbuild.exe) "
+                                 "with inline C# for TrustedFile "
+                                 "path  |  5. C# binary via "
+                                 "csc.exe + Add-Type CLM-safe "
+                                 "compile is BLOCKED; use "
+                                 "windows/wine wrapper"))
+            else:
+                report.add("INFO", "RECON", path, _ln(_clm_m),
+                           f"PowerShell LanguageMode: {_mode} "
+                           "(unrestricted; direct .NET works)")
+
+        _amsi_m = _PS_AMSI_BYPASS.search(text[:32768])
+        if _amsi_m:
+            report.add("MEDIUM", "RECON", path, _ln(_amsi_m),
+                       "AMSI bypass pattern captured - operator "
+                       "already attempted AMSI subversion",
+                       hint=("if the bypass was successful, subsequent "
+                             "malicious PS commands went through; "
+                             "check the transcript for what ran AFTER "
+                             "the bypass  |  common patterns: "
+                             "AmsiUtils reflection + AmsiScanBuffer "
+                             "patching  |  IF operator is on Defender-"
+                             "guarded box and wants own bypass, use "
+                             "the CVE-2024-1709 patch approach or "
+                             "AMSIFail.ps1 - both single-file, "
+                             "framework-free (exam-legal)"))
+
+        _fw_m = _PS_FRAMEWORK_IOC.search(text[:32768])
+        if _fw_m:
+            _fw_name = _fw_m.group(0)
+            report.add("HIGH", "INTERESTING FILES", path, _ln(_fw_m),
+                       f"BANNED offensive framework IOC: {_fw_name}",
+                       hint=("this is a RED-TEAM tool captured in "
+                             "loot - Empire/Covenant/PoshC2/PowerSploit"
+                             "/CobaltStrike are ALL banned on OSCP+  |"
+                             "  do NOT re-run these files even if "
+                             "found on the target - use exam-legal "
+                             "equivalents:  |  Empire equivalent: "
+                             "manual reverse shells + impacket  |  "
+                             "PowerSploit equivalent: raw C# via "
+                             "csc.exe compile  |  CobaltStrike "
+                             "equivalent: msfvenom (one-target "
+                             "quota) OR nc reverse shells"))
 
     # iter-228: Apache Tomcat web-manager exposure. Emit HIGH RECON
     # when we see EITHER (a) the Tomcat version banner AND some
