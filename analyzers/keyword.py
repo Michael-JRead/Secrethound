@@ -1516,6 +1516,27 @@ _TASK_SCHED_XML = re.compile(
     r'<LogonType>(Password|InteractiveTokenOrPassword|S4U)</LogonType>'
 )
 
+# iter-207: Postfix SMTP relay auth (/etc/postfix/sasl_passwd).
+# Format: `[relay-host]:port user:password`  OR  `[host] user:pw`.
+# Common on Linux mail-relay lab boxes (HTB Bart / Reel / mail-forwarding).
+# Filename-gated at dispatch to avoid matching `[host]:port user:tag` in
+# nmap output.
+_POSTFIX_SASL = re.compile(
+    r'(?m)^\s*\[([\w.\-]+)\](?::(\d{1,5}))?\s+'
+    r'([^\s:@]{1,60})(?:@[\w.\-]+)?:'
+    r'([^\s#\r\n]{3,80})\s*$'
+)
+
+# iter-207: OpenLDAP admin credential in slapd.conf (`rootpw <value>`) OR
+# cn=config LDIF (`olcRootPW: <value>`). Value can be cleartext or a
+# {SSHA}base64 / {CRYPT}$6$... hash. Very common on OpenLDAP-backed lab
+# boxes (TryHackMe LDAP labs, INE eJPT Directory Services labs).
+# Two shapes because slapd.conf uses whitespace and LDIF uses `:` / `::`.
+_LDAP_ROOTPW = re.compile(
+    r'(?im)^\s*(?:rootpw|olcRootPW)\s*(::?|\s+)\s*'
+    r'([^\s#\r\n]{3,200})\s*$'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -2465,6 +2486,112 @@ def _multiline_passes(path, report, store):
                              f"input line: '{u}:{realm}:{h}'  (JBoss digest "
                              f"format)  |  admin console: <jboss>/console"))
             HASHES.append(("501", "JBoss DIGEST-MD5", h, path, _ln(m)))
+
+    # iter-207: Postfix /etc/postfix/sasl_passwd relay auth. Filename-gated
+    # to `sasl_passwd` / `sasl_passwd.map` / `smtp_sasl_password_maps` OR
+    # path segment `/postfix/` to avoid FP on nmap output containing
+    # `[host]:port` shapes.
+    _plow_pfx = path.lower().replace("\\", "/")
+    _base_pfx = os.path.basename(_plow_pfx)
+    _pfx_gate = (_base_pfx in ("sasl_passwd", "sasl_passwd.map",
+                                "smtp_sasl_password_maps",
+                                "smtp_sasl_password_maps.map")
+                 or "/postfix/" in _plow_pfx)
+    if _pfx_gate and not filters.is_doc_file(path):
+        for m in _POSTFIX_SASL.finditer(text):
+            host, port = m.group(1).strip(), (m.group(2) or "").strip()
+            user, pw = m.group(3).strip(), m.group(4).strip()
+            # NOTE: filters.is_placeholder treats 'admin'/'root'/etc as
+            # placeholders because they're default-config seed words. In a
+            # sasl_passwd file those ARE real SMTP relay users, so we skip
+            # the user check and rely on pw placeholder + doc-file gate.
+            if filters.is_placeholder(pw):
+                continue
+            _u_sh_pfx = user.replace("'", "'\\''")
+            _p_sh_pfx = pw.replace("'", "'\\''")
+            _target = host + (f":{port}" if port else "")
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                       f"Postfix SMTP relay auth ({_target}): {user}:{pw}",
+                       hint=(f"swaks --to test@target --server {_target} "
+                             f"-au '{_u_sh_pfx}' -ap '{_p_sh_pfx}'  |  also "
+                             f"try SMB/IMAP/webmail reuse; SMTP creds often "
+                             f"shared with mailbox creds"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=user, plaintext=pw,
+                                   host=host, source=path, line=_ln(m)))
+
+    # iter-207: OpenLDAP admin credential (slapd.conf `rootpw` or
+    # cn=config `olcRootPW`). Filename-gated to slapd.conf / *.ldif /
+    # path segment `/openldap/` / `/slapd.d/` to avoid FP on generic
+    # `rootpw:` mentions in prose.
+    _ldap_gate = (_base_pfx in ("slapd.conf", "olcdatabase.ldif")
+                  or _plow_pfx.endswith((".ldif", ".ldap"))
+                  or "/openldap/" in _plow_pfx
+                  or "/slapd.d/" in _plow_pfx
+                  or "olcRootPW" in text[:8000]
+                  or re.search(r'(?im)^\s*rootpw\s+\S', text[:8000]))
+    if _ldap_gate and not filters.is_doc_file(path):
+        _ldap_seen = set()
+        for m in _LDAP_ROOTPW.finditer(text):
+            sep = m.group(1) or ""
+            raw_val = m.group(2).strip()
+            if raw_val in _ldap_seen:
+                continue
+            _ldap_seen.add(raw_val)
+            if filters.is_placeholder(raw_val):
+                continue
+            # `::` in LDIF signals base64 - try to decode.
+            val = raw_val
+            if sep == "::":
+                try:
+                    import base64 as _b64
+                    val = _b64.b64decode(raw_val, validate=False).decode(
+                        "utf-8", errors="replace")
+                except Exception:
+                    val = raw_val
+            if val.startswith(("{SSHA}", "{SHA}", "{SMD5}", "{MD5}",
+                                "{CRYPT}", "{ARGON2}", "{PBKDF2}")):
+                _mode, _algo = "", "LDAP-hashed"
+                if val.startswith("{SSHA}"):
+                    _mode, _algo = "111", "SSHA (LDAP)"
+                elif val.startswith("{SHA}"):
+                    _mode, _algo = "101", "SHA-1 (LDAP)"
+                elif val.startswith("{SMD5}"):
+                    _mode, _algo = "121", "SMD5 (LDAP)"
+                elif val.startswith("{MD5}"):
+                    _mode, _algo = "100", "MD5"
+                elif val.startswith("{CRYPT}"):
+                    _sub = val[len("{CRYPT}"):]
+                    if _sub.startswith("$6$"):
+                        _mode, _algo = "1800", "sha512crypt ({CRYPT})"
+                    elif _sub.startswith("$5$"):
+                        _mode, _algo = "7400", "sha256crypt ({CRYPT})"
+                    elif _sub.startswith("$1$"):
+                        _mode, _algo = "500", "md5crypt ({CRYPT})"
+                    else:
+                        _mode, _algo = "1500", "descrypt ({CRYPT})"
+                report.add("CRITICAL", "PASSWORD HASHES", path, _ln(m),
+                           f"OpenLDAP directory-manager hash ({_algo}): "
+                           f"{val[:60]}{'...' if len(val) > 60 else ''}",
+                           hint=(f"hashcat -m {_mode} <hash.txt> rockyou.txt"
+                                 f"  |  OpenLDAP directory admin - `ldapsearch"
+                                 f" -x -H ldap://<host> -D 'cn=admin,dc=corp"
+                                 f",dc=local' -W` uses this"))
+                if _mode:
+                    HASHES.append((_mode, _algo, val, path, _ln(m)))
+            else:
+                # cleartext rootpw
+                _val_sh_ldap = val.replace("'", "'\\''")
+                report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                           f"OpenLDAP directory-manager cleartext: {val}",
+                           hint=(f"ldapsearch -x -H ldap://<host> "
+                                 f"-D 'cn=admin,dc=corp,dc=local' "
+                                 f"-w '{_val_sh_ldap}' -b 'dc=corp,dc=local'"
+                                 f"  |  read every LDAP entry; often reused "
+                                 f"as admin OS cred"))
+                if store is not None:
+                    store.add(Evidence(kind="plaintext", plaintext=val,
+                                       source=path, line=_ln(m)))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
