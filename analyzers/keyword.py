@@ -1585,6 +1585,28 @@ _REDIS_CLI_PROMPT = re.compile(
     r'(?m)^([\w\-.]{1,60}):(\d{2,5})>\s'
 )
 
+# iter-211: MongoDB 27017 UNAUTH scan/loot capture. Signals:
+#   (A) `show dbs` output rows like `admin  0.000GB` - only appears when
+#       unauth `show dbs` succeeded (auth'd shell needs `use admin` +
+#       auth first).
+#   (B) `MongoDB shell version v<X>` banner + a `>` prompt following.
+#   (C) `db.version()` returned a real semver like `"4.4.6"`.
+# Anti-signals in same file → skip:
+#   * `not authorized on <db>` (mongo auth error)
+#   * `Authentication failed`
+#   * `requires authentication`
+_MONGO_SHOW_DBS_ROW = re.compile(
+    r'(?im)^\s*(admin|local|config)\s+'
+    r'(\d+(?:\.\d+)?)\s*(?:B|KB|MB|GB|TB)\s*$'
+)
+_MONGO_SHELL_BANNER = re.compile(
+    r'(?im)MongoDB\s+shell\s+version\s+v?(\d+\.\d+(?:\.\d+)?)'
+)
+_MONGO_DB_VERSION = re.compile(
+    r'(?is)>\s*db\.version\s*\(\s*\)\s*[\r\n]+'
+    r'\s*["\']?(\d+\.\d+(?:\.\d+)?)["\']?'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -2891,6 +2913,94 @@ def _multiline_passes(path, report, store):
                                        hint=(f"redis-cli -h {_host_p} -p "
                                              f"{_port_p}  |  see INFO "
                                              f"hint above for RCE chain"))
+
+    # iter-211: MongoDB 27017 UNAUTH scan/loot capture. Mirror of the
+    # Redis unauth pattern - captured mongo/mongosh output showing a
+    # command succeeded without auth is a HIGH intel item because it
+    # unlocks mongodump extraction + user-collection reads that often
+    # contain reused OS/webapp creds.
+    _mongo_gate_skip = (
+        _base_rd in ("mongod.conf", "mongo.conf", "docker-compose.yml",
+                      "docker-compose.yaml", "compose.yaml", "compose.yml",
+                      "dockerfile")
+        or _plow_rd.endswith((".dockerfile", ".containerfile"))
+        or "/mongod.conf" in _plow_rd)
+    if not _mongo_gate_skip and not filters.is_doc_file(path):
+        # Anti-signal: presence of mongo auth errors means the target IS
+        # auth-gated. Two or more mentions and we skip entirely.
+        _mongo_deny_ct = (
+            text[:16384].count("not authorized")
+            + text[:16384].count("Authentication failed")
+            + text[:16384].count("requires authentication")
+            + text[:16384].count("Unauthorized"))
+        if _mongo_deny_ct <= 1:
+            # Signal (A): `show dbs` output rows. Need >=2 of admin/local/
+            # config to be confident this is captured output (not just a
+            # single word appearing in prose).
+            _dbs_rows = list(_MONGO_SHOW_DBS_ROW.finditer(text))
+            _dbs_names = {r.group(1).lower() for r in _dbs_rows}
+            _emitted_mongo = False
+            if len(_dbs_names) >= 2:
+                _first_row = _dbs_rows[0]
+                # Try to find host:port context in the first 16 KB.
+                _mh = re.search(
+                    r'(?im)(?:mongodb://|Connected\s+to:|>\s*)'
+                    r'([\w\-.]{2,60}):(2701[7-9])', text[:16384])
+                _target = (f"{_mh.group(1)}:{_mh.group(2)}"
+                           if _mh else "<mongo-host>:27017")
+                report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                           _ln(_first_row),
+                           f"MongoDB UNAUTH access confirmed via `show dbs` "
+                           f"({_target}) - {sorted(_dbs_names)}",
+                           hint=(f"mongodump --host {_target} "
+                                 f"--out /tmp/mongo-loot/  |  read users: "
+                                 f"mongosh --host {_target} --eval "
+                                 f"'db.getSiblingDB(\"admin\").system."
+                                 f"users.find().pretty()'  |  webapp creds "
+                                 f"in Mongo often reused as OS/SSH; "
+                                 f"grep loot for password fields"))
+                _emitted_mongo = True
+
+            # Signal (B): `db.version()` returned a semver. Only emit when
+            # (A) didn't already fire.
+            if not _emitted_mongo:
+                _dv = _MONGO_DB_VERSION.search(text)
+                if _dv:
+                    _ver = _dv.group(1)
+                    _mh2 = re.search(
+                        r'(?im)(?:mongodb://|Connected\s+to:|>\s*)'
+                        r'([\w\-.]{2,60}):(2701[7-9])', text[:16384])
+                    _target2 = (f"{_mh2.group(1)}:{_mh2.group(2)}"
+                                if _mh2 else "<mongo-host>:27017")
+                    report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                               _ln(_dv),
+                               f"MongoDB {_ver} UNAUTH via db.version() "
+                               f"({_target2})",
+                               hint=(f"mongodump --host {_target2} "
+                                     f"--out /tmp/mongo-loot/  |  see "
+                                     f"above hint for user-collection read"))
+                    _emitted_mongo = True
+
+            # Signal (C): `MongoDB shell version` banner - only emit if
+            # neither (A) nor (B) fired AND we can also see a subsequent
+            # `>` prompt with real commands (not just the banner alone).
+            if not _emitted_mongo:
+                _mb = _MONGO_SHELL_BANNER.search(text)
+                if _mb:
+                    _after_mb = text[_mb.end():_mb.end() + 4096]
+                    if re.search(r'(?m)^>\s*(?:show|use|db\.)', _after_mb):
+                        # We saw the banner AND a subsequent command entered
+                        # at the `>` prompt - the shell was interactive
+                        # without auth challenge.
+                        report.add("MEDIUM", "SECRET-SIDECHANNEL", path,
+                                   _ln(_mb),
+                                   f"MongoDB {_mb.group(1)} interactive "
+                                   f"shell captured (unauth or auth'd - "
+                                   f"check output rows for `show dbs`)",
+                                   hint=("mongodump --host <host>:27017 "
+                                         "--out /tmp/mongo-loot/  |  "
+                                         "check output above for auth "
+                                         "errors to confirm unauth"))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
