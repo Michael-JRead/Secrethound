@@ -1537,6 +1537,19 @@ _LDAP_ROOTPW = re.compile(
     r'([^\s#\r\n]{3,200})\s*$'
 )
 
+# iter-208: Dovecot passwd-file passdb (IMAP/POP3 mailbox creds).
+# Format: `user:{SCHEME}hash_or_pw[:uid:gid:home:shell:extra]`. Common on
+# Linux mail lab boxes (HTB Popcorn/Mail forwarding, THM Overpass mail).
+# Also captures plaintext (no `{SCHEME}` prefix, defaults to configured
+# default_pass_scheme which is often PLAIN on tutorials). Filename-gated
+# at dispatch to prevent FP on `/etc/passwd` and generic `user:hash` logs.
+_DOVECOT_PASSWD = re.compile(
+    r'(?m)^([\w.\-]{1,40}(?:@[\w.\-]{1,60})?):'
+    r'(\{[A-Z0-9\-.]{2,32}\})?'
+    r'([^\s:][^\r\n:]{2,200})'
+    r'(?::\d{1,10}:\d{1,10}(?::[^\r\n]{0,300})?)?\s*$'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -2592,6 +2605,128 @@ def _multiline_passes(path, report, store):
                 if store is not None:
                     store.add(Evidence(kind="plaintext", plaintext=val,
                                        source=path, line=_ln(m)))
+
+    # iter-208: Dovecot passwd-file (IMAP/POP3 mailbox creds). Filename-
+    # gated so /etc/passwd and htpasswd files never trigger this branch;
+    # a content-signal fallback catches oddly-named dovecot dumps.
+    _dov_gate = (_base_pfx in ("dovecot-users", "dovecot.users",
+                                "dovecot-passwd", "passwd-file",
+                                "users.db", "virtual-users")
+                 or "/dovecot/" in _plow_pfx
+                 or "/vmail/" in _plow_pfx
+                 or (_base_pfx == "users" and "/dovecot" in _plow_pfx)
+                 or ("dovecot" in text[:2048].lower()
+                     and "passdb" in text[:4096].lower()))
+    if _dov_gate and not filters.is_doc_file(path):
+        _dov_seen = set()
+        for m in _DOVECOT_PASSWD.finditer(text):
+            user = m.group(1).strip()
+            scheme = (m.group(2) or "").strip("{}").upper()
+            val = m.group(3).strip()
+            # dedupe on (user, first-32-of-val)
+            _k = (user, val[:32])
+            if _k in _dov_seen:
+                continue
+            _dov_seen.add(_k)
+            if filters.is_placeholder(val):
+                continue
+            # Reject lines where val is clearly a shell/false marker.
+            if val in ("x", "!", "*", "!!"):
+                continue
+            _u_sh_dov = user.replace("'", "'\\''")
+            if scheme:
+                # Hashed - map scheme to hashcat mode.
+                _mode, _algo = "", f"Dovecot-{scheme}"
+                if scheme in ("PLAIN", "CLEARTEXT", "CLEAR"):
+                    _mode = ""  # not a hash - falls through
+                elif scheme == "CRYPT":
+                    _mode, _algo = "1500", "descrypt (Dovecot)"
+                elif scheme == "MD5-CRYPT":
+                    _mode, _algo = "500", "md5crypt (Dovecot)"
+                elif scheme == "SHA256-CRYPT":
+                    _mode, _algo = "7400", "sha256crypt (Dovecot)"
+                elif scheme == "SHA512-CRYPT":
+                    _mode, _algo = "1800", "sha512crypt (Dovecot)"
+                elif scheme == "SSHA":
+                    _mode, _algo = "111", "SSHA (Dovecot)"
+                elif scheme in ("SHA", "SHA1"):
+                    _mode, _algo = "101", "SHA-1 (Dovecot)"
+                elif scheme == "SHA256":
+                    _mode, _algo = "1400", "SHA-256 (Dovecot)"
+                elif scheme == "SHA512":
+                    _mode, _algo = "1700", "SHA-512 (Dovecot)"
+                elif scheme in ("MD5", "PLAIN-MD5"):
+                    _mode, _algo = "100", "MD5 (Dovecot)"
+                elif scheme == "SSHA256":
+                    _mode, _algo = "1420", "salted SHA-256 (Dovecot SSHA256)"
+                elif scheme == "SSHA512":
+                    _mode, _algo = "1740", "salted SHA-512 (Dovecot SSHA512)"
+                if _mode:
+                    # Reconstruct hash including scheme prefix for hashcat.
+                    _full_hash = "{" + scheme + "}" + val
+                    report.add("CRITICAL", "PASSWORD HASHES", path, _ln(m),
+                               f"Dovecot mailbox hash [{user}] ({_algo}): "
+                               f"{_full_hash[:60]}"
+                               f"{'...' if len(_full_hash) > 60 else ''}",
+                               hint=(f"hashcat -m {_mode} <hash.txt> "
+                                     f"rockyou.txt  |  IMAP: `curl -k "
+                                     f"imaps://<host> -u '{_u_sh_dov}:<pw>'`"
+                                     f"  |  mail creds commonly reused for "
+                                     f"OS login / SMB / webmail"))
+                    HASHES.append((_mode, _algo, _full_hash, path, _ln(m)))
+                elif scheme in ("PLAIN", "CLEARTEXT", "CLEAR"):
+                    # Explicit-plaintext scheme.
+                    _p_sh_dov = val.replace("'", "'\\''")
+                    report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                               f"Dovecot mailbox cleartext [{user}]: {val}",
+                               hint=(f"curl -k imaps://<host> -u "
+                                     f"'{_u_sh_dov}:{_p_sh_dov}'  |  also "
+                                     f"try SMB/OS reuse - mail passwords "
+                                     f"commonly recycled"))
+                    if store is not None:
+                        store.add(Evidence(kind="plaintext", user=user,
+                                           plaintext=val, source=path,
+                                           line=_ln(m)))
+            else:
+                # No scheme prefix - default is whatever default_pass_scheme
+                # is set to (often CRYPT). We can't tell without seeing the
+                # config, so treat as cleartext ONLY when it looks like
+                # cleartext (not a $-crypt-style hash string).
+                if val.startswith("$") and val.count("$") >= 3:
+                    # crypt(3) format - inherit sha512crypt as most common.
+                    _mode, _algo = "", "crypt (Dovecot default)"
+                    if val.startswith("$6$"):
+                        _mode, _algo = "1800", "sha512crypt (Dovecot default)"
+                    elif val.startswith("$5$"):
+                        _mode, _algo = "7400", "sha256crypt (Dovecot default)"
+                    elif val.startswith("$1$"):
+                        _mode, _algo = "500", "md5crypt (Dovecot default)"
+                    elif val.startswith("$2"):
+                        _mode, _algo = "3200", "bcrypt (Dovecot default)"
+                    if _mode:
+                        report.add("CRITICAL", "PASSWORD HASHES", path,
+                                   _ln(m),
+                                   f"Dovecot mailbox hash [{user}] ({_algo}): "
+                                   f"{val[:60]}"
+                                   f"{'...' if len(val) > 60 else ''}",
+                                   hint=(f"hashcat -m {_mode} <hash.txt> "
+                                         f"rockyou.txt  |  IMAP: `curl -k "
+                                         f"imaps://<host> -u "
+                                         f"'{_u_sh_dov}:<pw>'`"))
+                        HASHES.append((_mode, _algo, val, path, _ln(m)))
+                else:
+                    # Looks like cleartext.
+                    _p_sh_dov = val.replace("'", "'\\''")
+                    report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                               f"Dovecot mailbox cleartext [{user}]: {val}",
+                               hint=(f"curl -k imaps://<host> -u "
+                                     f"'{_u_sh_dov}:{_p_sh_dov}'  |  also "
+                                     f"try SMB/OS reuse - mail passwords "
+                                     f"commonly recycled"))
+                    if store is not None:
+                        store.add(Evidence(kind="plaintext", user=user,
+                                           plaintext=val, source=path,
+                                           line=_ln(m)))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
