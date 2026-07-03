@@ -1628,6 +1628,30 @@ _ES_CAT_INDICES = re.compile(
     r'([\w\-]{4,32})\s+\d+\s+\d+\s+\d+'
 )
 
+# iter-213: AJP Ghostcat (CVE-2020-1938) - Apache Tomcat AJP connector
+# on port 8009 is exploitable for LFI + RCE on all Tomcat 6/7/8/9 up
+# to 9.0.31 / 8.5.51 / 7.0.100 / 6.0.53. The AJP protocol has no
+# authentication of its own, so any 8009/tcp open + AJP13 = exam-legal
+# manual exploit path. Two dispositive signals:
+#
+# Signal (A): `Apache Jserv (Protocol v1.3)` - the nmap service scan
+# fingerprint when it identifies Tomcat's AJP connector. Cannot appear
+# outside AJP scan output.
+#
+# Signal (B): `8009/tcp open ajp13` - port+service alone, weaker (a
+# firewalled port could also show this), but dispositive when combined
+# with the port number.
+_AJP_JSERV = re.compile(
+    r'(?i)Apache\s+Jserv\s*\(\s*Protocol\s+v?1\.3\s*\)'
+)
+_AJP_PORT_LINE = re.compile(
+    r'(?im)^\s*8009/tcp\s+open\s+ajp'
+)
+# gnmap-style row: `Host: <ip> ... 8009/open/tcp//ajp13//Apache Jserv/`
+_AJP_GNMAP = re.compile(
+    r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -3103,6 +3127,55 @@ def _multiline_passes(path, report, store):
                                      f"size=1000&pretty' > loot.json  |  "
                                      f"grep dumped indices for password/"
                                      f"apikey/token fields"))
+
+    # iter-213: AJP Ghostcat (CVE-2020-1938). Captured nmap output
+    # showing 8009/tcp + AJP13 = exam-legal LFI/RCE target on Tomcat.
+    # No filename gate - Ghostcat can show up in operator notes, nmap
+    # output, gnmap files, greppable scan captures. Doc-file gate
+    # applies to avoid tutorial mentions.
+    if not filters.is_doc_file(path):
+        _ajp_targets = set()
+        # Signal A: Apache Jserv fingerprint = confident Tomcat AJP.
+        _jserv_m = _AJP_JSERV.search(text)
+        # Signal B: 8009/tcp open ajp line - broader.
+        _port_ms = list(_AJP_PORT_LINE.finditer(text))
+        # Signal C: gnmap format `8009/open/tcp//ajp13/`
+        _gnmap_ms = list(_AJP_GNMAP.finditer(text))
+        # Deduplicate targets extracted from all signals.
+        for _g in _gnmap_ms:
+            _ajp_targets.add(_g.group(1).strip())
+        # If we have any signal, emit one HIGH per target (or one
+        # generic if no host known).
+        _has_signal = bool(_jserv_m or _port_ms or _gnmap_ms)
+        if _has_signal:
+            # Try to find host from other patterns (nmap normal output
+            # has `Nmap scan report for <host>`).
+            _nm_hosts = re.findall(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            for _h in _nm_hosts:
+                _ajp_targets.add(_h)
+            if not _ajp_targets:
+                _ajp_targets.add("<tomcat-host>")
+            # Anchor line for the finding - prefer Jserv match, then
+            # port line, then gnmap.
+            _anchor = _jserv_m or (_port_ms[0] if _port_ms else _gnmap_ms[0])
+            for _tgt in sorted(_ajp_targets)[:5]:
+                report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                           _ln(_anchor),
+                           f"AJP Ghostcat CVE-2020-1938 on {_tgt}:8009 "
+                           f"(Tomcat AJP LFI+RCE, no auth)",
+                           hint=(f"LFI (exam-legal manual): "
+                                 f"ajpShooter.py {_tgt} 8009 "
+                                 f"/WEB-INF/web.xml read  |  RCE via "
+                                 f"file upload + eval: ajpShooter.py "
+                                 f"{_tgt} 8009 /uploaded.jsp eval  |  "
+                                 f"msf `auxiliary/admin/http/tomcat_"
+                                 f"ghostcat` counts toward one-target "
+                                 f"exam quota - prefer manual path  |  "
+                                 f"targets: Tomcat <=9.0.31/8.5.51/"
+                                 f"7.0.100 - grep web.xml for admin "
+                                 f"creds + JDBC URLs after LFI"))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
