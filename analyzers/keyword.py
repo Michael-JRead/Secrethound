@@ -2202,6 +2202,49 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-247: SMB share listing high-value file detector. Prior
+# `smbmap -R sensitive file` pattern handles the smbmap output
+# format but MISSES the smbclient ls output shape:
+#   smbclient //<host>/<share> -N -c 'ls'
+#   passwords.txt   A     1024   Mon Nov 20 09:00:00 2023
+# and Windows `dir /s` output:
+#   11/20/2023  09:00 AM         1,024 passwords.txt
+# Both share the sensitive-file class list.
+_SMB_LOOT_FILENAMES = (
+    r'passwd(?:s|word|words)?\.(?:txt|xlsx|xls|csv|docx?)|'
+    r'password(?:s)?\.(?:txt|xlsx|xls|csv|docx?)|'
+    r'user(?:s|name(?:s)?)?\.(?:txt|xlsx|xls|csv)|'
+    r'cred(?:s|entials?)?\.(?:txt|xlsx|xls|csv)|'
+    r'secret(?:s)?\.(?:txt|xlsx|xls|csv|docx?)|'
+    r'backup(?:s)?\.(?:zip|tar|gz|7z|rar|tar\.gz|sql)|'
+    r'unattend\.(?:xml|txt)|Autounattend\.xml|sysprep\.(?:xml|inf)|'
+    r'\w+\.kdbx|\w+\.pfx|\w+\.p12|\w+\.jks|\w+\.pem|\w+\.key|'
+    r'\w+\.kirbi|\w+\.ccache|\w+\.keytab|'
+    r'id_rsa|id_ed25519|id_dsa|id_ecdsa|authorized_keys|known_hosts|'
+    r'\.bash_history|\.zsh_history|\.psql_history|\.mysql_history|'
+    r'wp-config\.php|web\.config|app\.config|config\.php|'
+    r'groups\.xml|scheduledtasks\.xml|drives\.xml|services\.xml|'
+    r'ntds\.dit|SAM|SECURITY|SYSTEM|SOFTWARE|'
+    r'\.env|\.env\.local|\.env\.production|'
+    r'\.pgpass|\.my\.cnf|my\.ini|'
+    r'settings\.py|local_settings\.py|'
+    r'\.aws/credentials|\.docker/config\.json|'
+    r'firefox\.profile|Login\s+Data'
+)
+# smbclient ls output row: `<name>   A     <size>   <date>`
+_SMB_CLIENT_LS = re.compile(
+    r'(?im)^\s*(' + _SMB_LOOT_FILENAMES + r')\s+'
+    r'[AHRSDNn]{1,7}\s+\d+\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+'
+    r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+)
+# Windows dir /s output row:
+#   `MM/DD/YYYY  HH:MM AM         1,024 filename.ext`
+_WIN_DIR_LS = re.compile(
+    r'(?im)^\s*\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+'
+    r'(?:\d+|<DIR>|\d{1,3}(?:,\d{3})*)?\s+(' + _SMB_LOOT_FILENAMES
+    + r')\s*$'
+)
+
 # iter-245: PowerShell Constrained Language Mode + AMSI status +
 # offensive-framework IOCs from captured .ps1 files / PS transcripts.
 #
@@ -3241,6 +3284,54 @@ def _multiline_passes(path, report, store):
                                  f" -request -outputfile {_sam_s}.tgs"
                                  f"  |  hashcat -m 13100 {_sam_s}.tgs "
                                  f"rockyou.txt -r rules/best64.rule"))
+
+    # iter-247: SMB share / Windows dir listing high-value files.
+    # Emits HIGH per unique filename (capped at 10 per file) with
+    # smbget pull command. Doc-file gate applies.
+    if not filters.is_doc_file(path):
+        _smb_ls_seen = set()
+        _smb_ls_ct = 0
+        _SMB_LOOT_CAP = 10
+        _combined_iter = list(_SMB_CLIENT_LS.finditer(text[:65536])) \
+                         + list(_WIN_DIR_LS.finditer(text[:65536]))
+        # Extract host + share from surrounding context.
+        _sh_ctx = re.search(
+            r'(?i)(?:smbclient|smbmap)[^\r\n]*//([\w.\-]{1,60})/'
+            r'([\w.\-$]{1,40})',
+            text[:16384])
+        _sh_host = _sh_ctx.group(1) if _sh_ctx else "<host>"
+        _sh_share = _sh_ctx.group(2) if _sh_ctx else "<share>"
+        for _fm in _combined_iter:
+            _fname = _fm.group(1).strip()
+            if _fname in _smb_ls_seen:
+                continue
+            _smb_ls_seen.add(_fname)
+            if _smb_ls_ct >= _SMB_LOOT_CAP:
+                break
+            _smb_ls_ct += 1
+            # Score by loot value - registry hives + kdbx + id_rsa
+            # + ntds.dit are CRITICAL.
+            _fnl = _fname.lower()
+            _crit = ("ntds.dit" in _fnl or _fname in ("SAM", "SYSTEM",
+                                                        "SECURITY",
+                                                        "SOFTWARE")
+                     or _fnl.endswith((".kdbx", ".pfx", ".p12",
+                                        ".jks", ".key", ".pem"))
+                     or "id_rsa" in _fnl or "id_ed25519" in _fnl
+                     or ".env" in _fnl or "wp-config.php" == _fnl
+                     or "web.config" == _fnl or "unattend.xml" == _fnl
+                     or "autounattend.xml" == _fnl.replace(" ", "")
+                     or "groups.xml" == _fnl)
+            _sev = "CRITICAL" if _crit else "HIGH"
+            report.add(_sev, "INTERESTING FILES", path, _ln(_fm),
+                       f"SMB share loot: {_fname} (on "
+                       f"//{_sh_host}/{_sh_share})",
+                       hint=(f"pull: smbclient //{_sh_host}/{_sh_share} "
+                             f"-N -c 'get \"{_fname}\"'  |  or: "
+                             f"smbmap -H {_sh_host} -R {_sh_share} "
+                             f"-A '{_fname}' -q  |  after pull, "
+                             f"check contents for creds, keys, and "
+                             f"config chains"))
 
     # iter-245: PowerShell CLM / AMSI / offensive-framework IOCs from
     # captured .ps1 files, PS transcripts, and command-history dumps.
