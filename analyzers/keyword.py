@@ -1999,6 +1999,25 @@ _DRUPAL_META = re.compile(
     r'[\'"]Drupal\s+(\d+(?:\.\d+)?)'
 )
 
+# iter-239: LFI / path-traversal captured response - the operator
+# has performed an LFI and captured the response body containing
+# system-file content. Dispositive signals:
+#   (A) /etc/passwd shape: `root:x:0:0:root:/root:/bin/bash` etc
+#   (B) Windows boot.ini: `[boot loader]` + `default=multi(0)disk(0)`
+#   (C) Windows Win.ini: `[fonts]` and `[extensions]` sections
+# Filename gate: skip when file IS /etc/passwd (real system file
+# from a forensic dump, not an LFI capture) and skip .conf files
+# that legitimately contain these substrings.
+_LFI_ETC_PASSWD = re.compile(
+    r'(?m)^root:[x*!]?:0:0:[^:\r\n]{0,60}:/root:'
+)
+_LFI_BOOT_INI = re.compile(
+    r'(?im)^\[boot\s+loader\][^\[]{0,500}?default=multi\(\d+\)disk\(\d+\)'
+)
+_LFI_WIN_INI = re.compile(
+    r'(?im)^\[fonts\][^\[]{0,2000}?\[(?:extensions|mci extensions)\]'
+)
+
 # iter-238: PHP exposure signals.
 #   (A) Captured phpinfo() page → HIGH RCE-recon (extremely
 #       revealing: PHP version, loaded extensions, disable_functions,
@@ -3437,6 +3456,58 @@ def _multiline_passes(path, report, store):
                              "passwords; try php://filter/convert."
                              "base64-encode/resource=<path> LFI to "
                              "pull other .php files"))
+
+        # iter-239: LFI captured response body. Filename gate: skip
+        # /etc/passwd, /etc/shadow, /boot.ini paths (real system-file
+        # dumps, not LFI captures).
+        _plow_lfi = path.lower().replace("\\", "/")
+        _lfi_gate_skip = (
+            _plow_lfi.endswith(("/etc/passwd", "/etc/shadow",
+                                  "/etc/group", "/boot.ini",
+                                  "/win.ini", "win.ini", "boot.ini"))
+            or "/passwd.bak" in _plow_lfi
+            or _plow_lfi.endswith(".passwd"))
+        if not _lfi_gate_skip:
+            _lfi_pw = _LFI_ETC_PASSWD.search(text[:32768])
+            _lfi_bt = _LFI_BOOT_INI.search(text[:32768])
+            _lfi_wi = _LFI_WIN_INI.search(text[:32768])
+            _lfi_anchor = _lfi_pw or _lfi_bt or _lfi_wi
+            if _lfi_anchor:
+                _tgt_desc = ("/etc/passwd" if _lfi_pw
+                              else ("boot.ini" if _lfi_bt
+                                     else "Win.ini"))
+                _is_win = _lfi_bt or _lfi_wi
+                # Different LFI2RCE chains for Linux vs Windows.
+                if _is_win:
+                    _rce_hint = (
+                        "  |  LFI2RCE chains for Windows: "
+                        "log-poison IIS logs at "
+                        "C:\\inetpub\\logs\\LogFiles\\W3SVC1\\ex*.log"
+                        "  |  session poison C:\\Windows\\Temp\\sess_*"
+                        "  |  SMB share mount + PHP exec if writable")
+                else:
+                    _rce_hint = (
+                        "  |  LFI2RCE chains for Linux: /proc/self/"
+                        "environ (User-Agent poisoning); "
+                        "/var/log/apache2/access.log + User-Agent "
+                        "log-poison; /var/log/auth.log + SSH "
+                        "log-poison (ssh 'PAYLOAD'@target); "
+                        "PHP_SESSION_UPLOAD_PROGRESS + session-file "
+                        "poison at /var/lib/php/sessions/sess_*")
+                report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                           _ln(_lfi_anchor),
+                           f"LFI confirmed - captured response body "
+                           f"contains {_tgt_desc}",
+                           hint=(f"next reads: /etc/shadow (if root "
+                                 f"context), /home/*/.ssh/id_rsa, "
+                                 f"/home/*/.bash_history, /root/."
+                                 f"bash_history, /var/www/*/config."
+                                 f"php, /var/www/*/wp-config.php, "
+                                 f"/etc/mysql/*.cnf; Windows: "
+                                 f"C:\\inetpub\\wwwroot\\web.config, "
+                                 f"C:\\Windows\\System32\\config\\SAM "
+                                 f"(via VSS), C:\\Windows\\Panther\\"
+                                 f"Unattend.xml{_rce_hint}"))
 
         # iter-235: Drupal fingerprint (banner-side, complements
         # iter-22 pre-7.59/8.5.1 payload-marker detector).
