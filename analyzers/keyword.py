@@ -1940,6 +1940,30 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-232: DNS zone transfer captured output (dig / dnsrecon / host).
+# Successful AXFR gives the operator a full internal-DNS listing:
+# hostnames, IPs, SRV records pointing at every service (KDC, LDAP,
+# smtp, etc). Highest-value pivot intel on any AD lab where the DC
+# forgot to restrict AXFR.
+#
+# Signal (A): dig header `; <<>> DiG` combined with AXFR in the
+# command line or the SOA response.
+_DIG_HEADER = re.compile(
+    r'(?i)^;\s*<<>>\s*DiG\s+[\d.]+[^\r\n]*<<>>[^\r\n]{0,200}\baxfr\b',
+    re.MULTILINE
+)
+# Signal (B): captured A / CNAME record rows in the AXFR reply.
+# Format: `<name>.\t<ttl>\tIN\tA\t<ip>` (bind style) OR from Windows
+# DNS: `<name>.<domain>\tA\t<ip>`.
+_DNS_A_RECORD_ROW = re.compile(
+    r'(?im)^([\w.\-]{2,80})\.\s+(?:\d+\s+)?IN\s+(A|AAAA|CNAME)\s+'
+    r'([\w.:\-]{3,80})'
+)
+_DNS_SRV_RECORD_ROW = re.compile(
+    r'(?im)^(_[\w.\-]{2,80})\.\s+(?:\d+\s+)?IN\s+SRV\s+'
+    r'\d+\s+\d+\s+(\d+)\s+([\w.\-]{2,80})'
+)
+
 # iter-229: Jenkins /script Groovy console exposure. Prior coverage
 # handled the credentials.xml encrypted blob and $_JOB_PASSWORD env
 # vars, but the LIVE Jenkins UI is the primary OSCP+ Jenkins path -
@@ -2962,6 +2986,45 @@ def _multiline_passes(path, report, store):
                              f"credentials.xml: /var/lib/jenkins/"
                              f"credentials.xml + master.key + "
                              f"hudson.util.Secret for offline decrypt"))
+
+    # iter-232: DNS zone transfer captured output. Fires when we see
+    # BOTH the dig header with axfr AND at least 1 record row, OR
+    # 3+ record rows on their own (dnsrecon / manual capture without
+    # the dig banner). Doc-file gate applies.
+    if not filters.is_doc_file(path):
+        _dig_hdr = _DIG_HEADER.search(text[:8192])
+        _a_rows = list(_DNS_A_RECORD_ROW.finditer(text[:65536]))
+        _srv_rows = list(_DNS_SRV_RECORD_ROW.finditer(text[:65536]))
+        _rec_total = len(_a_rows) + len(_srv_rows)
+        if (_dig_hdr and _rec_total >= 1) or _rec_total >= 3:
+            _hosts_found = {}
+            for _a in _a_rows[:10]:
+                _hn, _rt, _ip = _a.group(1), _a.group(2), _a.group(3)
+                if _rt.upper() in ("A", "AAAA"):
+                    _hosts_found[_hn] = _ip
+            _srv_targets = set()
+            for _s in _srv_rows[:10]:
+                _svc = _s.group(1).strip("_")
+                _port = _s.group(2)
+                _tgt = _s.group(3).rstrip(".")
+                _srv_targets.add(f"{_svc}({_tgt}:{_port})")
+            _sample_hosts = ", ".join(
+                f"{h}={i}" for h, i in list(
+                    _hosts_found.items())[:5])
+            _sample_srv = ", ".join(list(_srv_targets)[:3])
+            _anchor_d = _dig_hdr or (_a_rows[0] if _a_rows
+                                       else _srv_rows[0])
+            report.add("HIGH", "RECON", path, _ln(_anchor_d),
+                       f"DNS zone transfer captured - {len(_hosts_found)} "
+                       f"A + {len(_srv_rows)} SRV records extracted "
+                       f"({_sample_hosts[:80]})",
+                       hint=("write /etc/hosts entries for the pulled "
+                             "hostnames  |  target each host individually"
+                             + (f"  |  SRV records reveal services: "
+                                f"{_sample_srv}" if _sample_srv else "")
+                             + "  |  next: nmap --script *-enum,"
+                               "smb-enum-* against each new host in the "
+                               "listing"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
