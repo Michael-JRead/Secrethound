@@ -1940,6 +1940,30 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-226: VNC 5900 unauth + weak-auth intel from nmap NSE.
+# Three tiers of severity based on the Security types row:
+#   None (1)             → HIGH direct connect, no auth at all
+#   VNC Authentication (2) → MEDIUM weak DES challenge crackable via
+#                            vncauth crack utility
+#   Ultra (17) / TLS (18) / VeNCrypt (19) → INFO baseline
+_VNC_PORT_LINE = re.compile(
+    r'(?im)^\s*5900/tcp\s+open\s+vnc'
+)
+# vnc-info NSE block:
+#   | vnc-info:
+#   |   Protocol version: 3.8
+#   |   Security types:
+#   |     None (1)
+#   |     VNC Authentication (2)
+_VNC_INFO_BLOCK = re.compile(
+    r'(?is)\|\s*vnc-info\s*:\s*\r?\n'
+    r'(?:\|\s*Protocol\s+version\s*:\s*(\d+\.\d+)\s*\r?\n)?'
+    r'\|\s*Security\s+types\s*:\s*\r?\n'
+    r'((?:\|(?:_|\s)*[^\r\n]+\r?\n){1,10})'
+)
+_VNC_SEC_NONE = re.compile(r'(?i)\bNone\s*\(1\)')
+_VNC_SEC_VNCAUTH = re.compile(r'(?i)VNC\s+Authentication\s*\(2\)')
+
 # iter-225: FTP anonymous login accepted (nmap `ftp-anon` NSE or
 # captured `ftp` client output). Two shapes:
 #   (A) `Anonymous FTP login allowed (FTP code 230)` from nmap
@@ -2623,6 +2647,68 @@ def _multiline_passes(path, report, store):
                                      "anonymous:anon@<host>/  |  writable "
                                      "root = webshell drop if paired with "
                                      "webroot"))
+
+    # iter-226: VNC 5900 unauth / weak-auth intel. Signal (A) is the
+    # vnc-info NSE block with Security types - dispositive on auth
+    # mode. Signal (B) is the bare `5900/tcp open vnc` port line
+    # for MEDIUM baseline. Doc-file gate applies.
+    if not filters.is_doc_file(path):
+        _vnc_emitted = False
+        _vim = _VNC_INFO_BLOCK.search(text)
+        if _vim:
+            _proto = _vim.group(1) or "?"
+            _sec_block = _vim.group(2) or ""
+            _vnc_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _vnc_target = (_vnc_host_m.group(1) if _vnc_host_m
+                            else "<vnc-host>")
+            if _VNC_SEC_NONE.search(_sec_block):
+                # None (1) = no auth. Highest severity.
+                report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                           _ln(_vim),
+                           f"VNC {_vnc_target}:5900 NO AUTH (RFB "
+                           f"protocol {_proto}, Security None) - "
+                           f"direct desktop access",
+                           hint=(f"vncviewer {_vnc_target}  |  or: "
+                                 f"vncviewer {_vnc_target}::5900  |  "
+                                 f"snapshot: xvfb + vncsnapshot  |  "
+                                 f"if headless: check for pw file at "
+                                 f"~/.vnc/passwd for reuse elsewhere"))
+                _vnc_emitted = True
+            elif _VNC_SEC_VNCAUTH.search(_sec_block):
+                # VNC Authentication (2) = weak DES challenge.
+                report.add("MEDIUM", "SECRET-SIDECHANNEL", path,
+                           _ln(_vim),
+                           f"VNC {_vnc_target}:5900 weak auth type 2 "
+                           f"(DES challenge, RFB {_proto}) - "
+                           f"credential-crackable",
+                           hint=(f"snap pw with tightvncviewer + "
+                                 f"tcpdump then crack with john/"
+                                 f"hashcat -m 5850 (VNC Auth)  |  or "
+                                 f"try FOUND-cred reuse: vncviewer "
+                                 f"-passwd <file> {_vnc_target}  |  "
+                                 f"NO online brute forcers (hydra "
+                                 f"vnc-form is NOT exam-legal)"))
+                _vnc_emitted = True
+
+        # Fallback: bare 5900/tcp open vnc line → MEDIUM baseline.
+        if not _vnc_emitted:
+            _vpm = _VNC_PORT_LINE.search(text)
+            if _vpm:
+                _vnc_host_m2 = re.search(
+                    r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                    text[:16384])
+                _vnc_target2 = (_vnc_host_m2.group(1)
+                                 if _vnc_host_m2 else "<vnc-host>")
+                report.add("MEDIUM", "RECON", path, _ln(_vpm),
+                           f"VNC 5900 open on {_vnc_target2} - "
+                           f"check auth mode",
+                           hint=(f"nmap --script vnc-info -p 5900 "
+                                 f"{_vnc_target2}  |  or: "
+                                 f"vncviewer {_vnc_target2} to see "
+                                 f"prompt  |  common default creds: "
+                                 f"password, secret, admin, or empty"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
