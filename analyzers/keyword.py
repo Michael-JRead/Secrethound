@@ -1965,9 +1965,16 @@ _WORDPRESS_PATH = re.compile(
     # request line) never matched. Split per-alternative: wp-admin
     # + wp-content need `/` after; wp-login.php just needs
     # whitespace / query / end.
+    # iter-242 audit fix: `wp-login.php` lookahead was too narrow -
+    # rejected `"`, `'`, `<`, `#`, `)` etc so HTML `href="..."`
+    # references and JSON strings missed. Widened to any non-word
+    # boundary: whitespace, quote, angle bracket, paren, ampersand,
+    # question mark, hash, end-of-string, or capital letter (HTTP
+    # verb). Word-char (letter/digit) as next char = something like
+    # `wp-login.php.bak` and is correctly rejected.
     r'(?i)(?:https?://[^/\s]+)?/'
     r'(?:wp-admin/|wp-content/(?:plugins|themes|uploads)/|'
-    r'wp-login\.php(?=[\s?&]|$|[A-Z]))'
+    r'wp-login\.php(?=[\s?&"\'<>#)]|$|[A-Z]))'
 )
 
 # Joomla version signals:
@@ -2026,13 +2033,19 @@ _SQLI_ORACLE_ERR = re.compile(
     r'(?i)ORA-\d{5}[^\r\n]{0,80}|'
     r'quoted\s+string\s+not\s+properly\s+terminated'
 )
-# Boolean-blind indicator: captured `information_schema` output OR
-# `@@version` reflection in response.
+# iter-242 audit fix: prior alternation included `GROUP BY..HAVING`
+# (matches legit aggregate SQL) and bare `information_schema.tables`
+# (matches DB tutorials/pgAdmin dumps). Both classes of FP dropped.
+# Kept only ATTACK-SPECIFIC shapes:
+#   * `@@version` reflection in response context (real UNION payloads
+#     often expose this)
+#   * `CONCAT(0x...)` hex-encoded payload marker (unique to attack)
+#   * `UNION SELECT` + `information_schema` in close proximity (both
+#     required = SQLi UNION attack, either alone is legit).
 _SQLI_UNION_OUTPUT = re.compile(
-    r'(?i)(?:information_schema\.tables|'
-    r'@@version\s*[|,]\s*|'
-    r'GROUP\s+BY\s+.{1,60}\s+HAVING|'
-    r'CONCAT\s*\(\s*[\'"]?0x[0-9a-f]{4,}[\'"]?)'
+    r'(?i)(?:@@version\s*[|,]\s*|'
+    r'CONCAT\s*\(\s*[\'"]?0x[0-9a-f]{4,}[\'"]?|'
+    r'UNION\s+(?:ALL\s+)?SELECT[^\r\n]{0,300}?information_schema\.)'
 )
 
 # iter-239: LFI / path-traversal captured response - the operator
@@ -2045,7 +2058,11 @@ _SQLI_UNION_OUTPUT = re.compile(
 # from a forensic dump, not an LFI capture) and skip .conf files
 # that legitimately contain these substrings.
 _LFI_ETC_PASSWD = re.compile(
-    r'(?m)^root:[x*!]?:0:0:[^:\r\n]{0,60}:/root:'
+    # iter-242 audit fix: also match /etc/shadow-style rows where
+    # the pw field is a crypt-format hash (`root:$6$salt$hash:...`).
+    # Prior regex assumed only /etc/passwd shape (`root:x:...`).
+    # Now the pw field is any non-colon chars up to 150.
+    r'(?m)^root:[^:\r\n]{0,150}:0:0:[^:\r\n]{0,60}:/root:'
 )
 _LFI_BOOT_INI = re.compile(
     r'(?im)^\[boot\s+loader\][^\[]{0,500}?default=multi\(\d+\)disk\(\d+\)'
@@ -2071,7 +2088,11 @@ _PHPINFO_PHP_VERSION = re.compile(
     r'(?i)PHP\s+Version\s+(\d+\.\d+\.\d+)'
 )
 _PHP_XPB = re.compile(
-    r'(?im)^X-Powered-By\s*:\s*PHP/(\d+\.\d+\.\d+)'
+    # iter-242 audit fix: `X-Powered-By: PHP/8.1` (two-component)
+    # missed because prior required three components. Made 3rd
+    # component optional. `_vtuple` already pads to (major, minor,
+    # 0) so version-window math still works.
+    r'(?im)^X-Powered-By\s*:\s*PHP/(\d+\.\d+(?:\.\d+)?)'
 )
 # Source leak - `<?php` in a captured HTTP body that shouldn't have
 # executable code. Very narrow: `<?php\s+` on a line boundary (real
@@ -3434,6 +3455,22 @@ def _multiline_passes(path, report, store):
                 text[:16384])
             _phost = (_pinfo_host_m.group(1) if _pinfo_host_m
                        else "<php-host>")
+            # iter-242 audit fix: CVE-2019-11043 version-window check
+            # ALSO applies when phpinfo() confirms the version - prior
+            # impl only fired the CVE hint from the X-Powered-By branch
+            # (which was `not _pinfo_m` gated), so phpinfo hits lost
+            # the CVE line even when the extracted version was in
+            # the vulnerable window.
+            _pinfo_cve = ""
+            if _pver_m:
+                _pvt = _vtuple(_pv)
+                if ((_pvt >= (7, 1, 0) and _pvt < (7, 1, 33))
+                        or (_pvt >= (7, 2, 0) and _pvt < (7, 2, 24))
+                        or (_pvt >= (7, 3, 0) and _pvt < (7, 3, 11))):
+                    _pinfo_cve = ("  |  CVE-2019-11043 PHP-FPM RCE "
+                                   "candidate (needs nginx + "
+                                   "fastcgi_split_path_info): "
+                                   "phuip-fpizdam.py <target>")
             report.add("HIGH", "SECRET-SIDECHANNEL", path,
                        _ln(_pinfo_m),
                        f"phpinfo() page exposed on {_phost} - PHP "
@@ -3445,7 +3482,8 @@ def _multiline_passes(path, report, store):
                              "doc_root + include_path → LFI target "
                              "list  |  session.save_path → session "
                              "poison + LFI = RCE  |  allow_url_include "
-                             "= On → direct RFI RCE via php://input"))
+                             "= On → direct RFI RCE via php://input"
+                             + _pinfo_cve))
 
         # X-Powered-By PHP header (banner-only, less info than
         # phpinfo but still surfaces the version).
