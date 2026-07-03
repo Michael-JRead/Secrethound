@@ -1550,6 +1550,24 @@ _DOVECOT_PASSWD = re.compile(
     r'(?::\d{1,10}:\d{1,10}(?::[^\r\n]{0,300})?)?\s*$'
 )
 
+# iter-209: FreeRADIUS clients.conf shared secret. Format:
+#   client <name> {
+#       ipaddr = ...
+#       secret = <shared-secret>
+#       ...
+#   }
+# Shared secrets are the RADIUS network-auth pivot - APs, switches,
+# firewalls, VPN concentrators all use this exact string to auth against
+# the RADIUS server; frequently reused as the wifi/console admin password
+# on lab boxes (THM Enterprise, HTB corporate RADIUS labs).
+# Bounded `.{0,500}?` between `client` block start and `secret` to prevent
+# catastrophic backtracking; a real client block is well under that.
+_RADIUS_CLIENT = re.compile(
+    r'(?is)\bclient\s+([^\s{]{1,60})\s*\{'
+    r'[^{}]{0,500}?'
+    r'\bsecret\s*=\s*[\'"]?([^\'"\s#\r\n]{3,80})[\'"]?'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -2727,6 +2745,56 @@ def _multiline_passes(path, report, store):
                         store.add(Evidence(kind="plaintext", user=user,
                                            plaintext=val, source=path,
                                            line=_ln(m)))
+
+    # iter-209: FreeRADIUS clients.conf shared secrets. Filename-gated so
+    # `secret = <value>` prose in any other file doesn't fire. The
+    # content-signal fallback catches oddly-named RADIUS config dumps.
+    _rad_gate = (_base_pfx in ("clients.conf", "clients.d",
+                                "radiusd.conf", "raddb.conf")
+                 or "/freeradius/" in _plow_pfx
+                 or "/raddb/" in _plow_pfx
+                 or "/radius/" in _plow_pfx
+                 or ("client " in text[:8192]
+                     and re.search(r'(?i)\bradiusd\b|\bfreeradius\b',
+                                    text[:8192])))
+    if _rad_gate and not filters.is_doc_file(path):
+        _rad_seen = set()
+        for m in _RADIUS_CLIENT.finditer(text):
+            cname = m.group(1).strip().strip('"\'')
+            secret = m.group(2).strip()
+            if (cname, secret) in _rad_seen:
+                continue
+            _rad_seen.add((cname, secret))
+            # Reject default/sample secrets that ship with FreeRADIUS.
+            # `testing123` is the literal example in the shipped config -
+            # if we see it, either it's the untouched default (still worth
+            # flagging as LOW misconfig) OR it's a tutorial paste. Skip.
+            if filters.is_placeholder(secret):
+                continue
+            if secret.lower() in ("testing123", "radiuspass", "secret",
+                                   "password", "changeme"):
+                # Still flag as HIGH - default secrets ARE a lateral vector
+                # but they're not exam credentials. Report at HIGH severity
+                # with a "default secret" note.
+                report.add("HIGH", "CRED PAIRS", path, _ln(m),
+                           f"FreeRADIUS default/weak client secret "
+                           f"[{cname}]: {secret}",
+                           hint=(f"default secret in shipped FreeRADIUS - "
+                                 f"AP/switch/VPN concentrators reusing this "
+                                 f"can be auth'd to via any tool; try `nxc "
+                                 f"ssh <ap-mgmt> -u admin -p '{secret}'`"))
+                continue
+            _sec_sh_rad = secret.replace("'", "'\\''")
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                       f"FreeRADIUS client secret [{cname}]: {secret}",
+                       hint=(f"radclient -x <radius-host>:1812 auth "
+                             f"'{_sec_sh_rad}'  |  RADIUS shared secrets "
+                             f"commonly reused as AP/switch/firewall "
+                             f"console admin password - try SSH/HTTPS "
+                             f"admin panel of {cname} with this value"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", plaintext=secret,
+                                   host=cname, source=path, line=_ln(m)))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
