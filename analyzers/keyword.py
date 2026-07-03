@@ -4585,6 +4585,25 @@ def analyze(path, report, store=None):
     ext = os.path.splitext(path)[1].lower()
     require_quote = ext in _CODE_EXT
     seen_svc = set()
+    # iter-218: per-file (user, pw) dedupe cache. A single URL query-string
+    # cred that repeats across 2000 nginx access-log lines used to emit 2000
+    # findings; now the same tuple emits once. Also caps total unique creds
+    # per file at 40 (raised only when the file is a genuine cred store).
+    _cred_seen_this_file = set()
+    _plow_analyze = path.lower().replace("\\", "/")
+    _is_log_file = (
+        _plow_analyze.endswith((".log", ".log.gz", ".log.1", ".log.2",
+                                  ".access", ".error", ".request", ".har"))
+        or "/logs/" in _plow_analyze
+        or "/log/" in _plow_analyze
+        or "access.log" in _plow_analyze
+        or "error.log" in _plow_analyze
+        or "access_log" in _plow_analyze)
+    # For genuine log files, cap CRED PAIRS emissions harder to keep the
+    # report readable. For everything else (config, secretsdump output,
+    # notes, walkthroughs), keep the generous cap.
+    _cred_cap_this_file = 5 if _is_log_file else 40
+    _cred_emit_ct = 0
     try:
         with open(path, "r", errors="ignore") as f:
             for lineno, line in enumerate(f, 1):
@@ -4601,6 +4620,29 @@ def analyze(path, report, store=None):
                 c = credline.classify(line)
                 if c and c.kind in ("cred", "failed"):
                     who = (c.user or "<user>")
+                    # iter-218: dedupe on (user, password, kind) tuple.
+                    # A repeated log entry with the same cred emits once.
+                    _cred_key = (who, c.password or "", c.kind)
+                    if _cred_key in _cred_seen_this_file:
+                        continue
+                    if _cred_emit_ct >= _cred_cap_this_file:
+                        # Hit the per-file cap. Log one summary marker on
+                        # the first line that would exceed the cap, then
+                        # silently drop everything after.
+                        if _cred_emit_ct == _cred_cap_this_file:
+                            report.add("INFO", "CRED PAIRS", path, lineno,
+                                       f"iter-218: hit per-file CRED PAIRS "
+                                       f"cap ({_cred_cap_this_file}) - "
+                                       f"further unique pairs suppressed",
+                                       hint=("log file dedupe active; "
+                                             "raise cap if this file "
+                                             "genuinely has more than "
+                                             f"{_cred_cap_this_file} "
+                                             "unique credentials"))
+                            _cred_emit_ct += 1
+                        continue
+                    _cred_seen_this_file.add(_cred_key)
+                    _cred_emit_ct += 1
                     tag = " (FAILED auth)" if c.kind == "failed" else ""
                     sev = "HIGH" if c.kind == "failed" else "CRITICAL"
                     label = (f"{c.note}: {c.password}" if c.note == "PowerShell SecureString"
