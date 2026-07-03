@@ -1940,6 +1940,45 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-224: SMB null-session + guest-access + anon-share intel from
+# nmap NSE / smbclient / enum4linux output. These are the classic
+# unauth-SMB primitives that let the operator ENUMERATE the domain +
+# read shares WITHOUT any credentials. All three are exam-legal
+# because they use built-in unauth SMB dialects; the exam ban applies
+# to relay (Responder/ntlmrelayx), not to null-session reads.
+#
+# Signal (A): captured null-session success from enum4linux or smb
+# scanner. Common shapes:
+#   [+] Server X allows sessions using username '', password ''
+#   [+] Session (NULL) successful
+#   [*] Successfully authenticated as anonymous
+_SMB_NULL_SESSION = re.compile(
+    r'(?i)(?:'
+    r'session\s+\(?null\)?\s+successful|'
+    r'allows?\s+sessions?\s+using\s+username\s+[\'"]{2},\s*password\s+[\'"]{2}|'
+    r'anonymous\s+login\s+(?:accepted|succeeded|allowed)|'
+    r'authenticated\s+as\s+anonymous'
+    r')'
+)
+# Signal (B): nmap `smb-enum-shares` shows `account_used: guest` or
+# empty account_used = guest/anon session accepted.
+_SMB_GUEST_ACCOUNT = re.compile(
+    r'(?im)^\|?\s*account_used\s*:\s*(guest|)\s*$'
+)
+# Signal (C): captured `Anonymous access: READ` (or WRITE) on a share
+# OTHER than IPC$ - IPC$ is normally readable via null session, so
+# hitting IPC$ is not intel-worthy; hitting ADMIN$ / C$ / a custom
+# share IS.
+_SMB_ANON_ACCESS = re.compile(
+    r'(?im)\\\\[^\\]+\\([^\\\r\n:]+):[^\r\n]*\r?\n'
+    # Intermediate continuation lines must NOT start with `\\` (that
+    # would be another share header - the regex would otherwise span
+    # across shares and attribute IPC$'s READ to whichever share
+    # sits ABOVE it).
+    r'(?:\|(?!\s*\\\\)[^\r\n]*\r?\n){0,4}'
+    r'\|[_\s]*Anonymous\s+access\s*:\s*(READ(?:/WRITE)?|WRITE)'
+)
+
 # iter-223: SNMP v1/v2c intel. Three signals:
 #   (A) `161/udp open snmp` in nmap output → MEDIUM baseline with
 #       community-guess hint (`onesixtyone` + top-community wordlist).
@@ -2453,6 +2492,66 @@ def _multiline_passes(path, report, store):
                              "Note the target for post-exam followup / "
                              "compliance report."))
             break  # dedup - one signing check per file is enough
+
+        # iter-224: SMB null-session confirmed. One per file (dedup).
+        _null_m = _SMB_NULL_SESSION.search(text)
+        if _null_m:
+            # Try to find the target host in nearby context.
+            _null_host = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)|'
+                r'(?:Server|Target)\s+([\w.\-]+)\s+allows',
+                text[:16384])
+            _nh = ((_null_host.group(1) or _null_host.group(2))
+                    if _null_host else "<smb-host>")
+            report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_null_m),
+                       f"SMB null session accepted on {_nh} - unauth "
+                       f"enumeration open",
+                       hint=(f"impacket-lookupsid '{_nh}'/  |  nxc smb "
+                             f"{_nh} -u '' -p ''  |  enum4linux-ng -A "
+                             f"{_nh}  |  smbclient -N -L //{_nh}  |  "
+                             f"impacket-samrdump -no-pass '{_nh}'  "
+                             f"|  extract users + password policy "
+                             f"WITHOUT credentials (exam-legal - "
+                             f"built-in unauth SMB dialects, not "
+                             f"Responder/relay which are banned)"))
+
+        # iter-224: SMB guest account accepted (nmap smb-enum-shares
+        # `account_used: guest` line or empty).
+        _guest_m = _SMB_GUEST_ACCOUNT.search(text)
+        if _guest_m:
+            _guest_val = _guest_m.group(1) or "(anonymous)"
+            report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_guest_m),
+                       f"SMB guest/anon session accepted ({_guest_val}) "
+                       f"- enumerate shares without creds",
+                       hint=("nxc smb <host> -u guest -p ''  |  "
+                             "smbclient -U 'guest%' -L //<host>  |  "
+                             "smbmap -u guest -p '' -H <host>  |  read "
+                             "any share showing READ perms - guest "
+                             "access frequently allows access to file "
+                             "shares intended for domain users"))
+
+        # iter-224: Anonymous READ on a non-IPC$ share = direct loot.
+        _anon_ms = list(_SMB_ANON_ACCESS.finditer(text))
+        _anon_shares = set()
+        for _am in _anon_ms:
+            _share_name = _am.group(1).strip()
+            _access = _am.group(2).strip()
+            if _share_name.upper() == "IPC$":
+                continue  # IPC$ null-read is normal
+            if _share_name in _anon_shares:
+                continue
+            _anon_shares.add(_share_name)
+            report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_am),
+                       f"SMB anonymous {_access} on share `{_share_name}` "
+                       f"- direct read/write without creds",
+                       hint=(f"smbclient -N //<host>/{_share_name}  |  "
+                             f"recursive: smbclient -N "
+                             f"//<host>/{_share_name} -c "
+                             f"'recurse; ls'  |  bulk pull: "
+                             f"smbclient -N //<host>/{_share_name} -c "
+                             f"'prompt; recurse; mget *'  |  grep "
+                             f"pulled files for .kdbx / .config / "
+                             f"web.config / unattend.xml"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
