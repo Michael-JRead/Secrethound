@@ -104,8 +104,11 @@ _PLAIN = re.compile(r'^(?P<dom>[A-Za-z0-9.\-]+)\\(?P<user>[^\s:\\]{1,64}):(?P<pw
 # Anchor on the intent keyword so we don't FP on `10.10.10.10 / 24` etc.
 _SLASH_PAIR = re.compile(
     r'(?i)\b(?:credentials?|login|creds?|access|auth|account|'
-    r'log\s+in|sign\s+in)'
-    r'(?:\s+(?:with|as|using|to|into|via))?'
+    r'log\s+in|sign\s+in|'
+    # iter-217: success-phrase verbs from walkthrough recap prose.
+    r'authenticated|authenticate|signed\s+in|'
+    r'access\s+granted|login\s+successful|authenticated\s+successfully)'
+    r'(?:\s+(?:with|as|using|to|into|via|for))?'
     r'\s*[:=]?\s+["\']?'
     r'([A-Za-z_][A-Za-z0-9._@\\-]{1,60})["\']?\s*/\s*["\']?'
     r'([^\s"\',][^\s"\',\r\n]{2,79}?)["\']?(?=$|\s|,|\.)'
@@ -118,8 +121,16 @@ _SLASH_PAIR = re.compile(
 # allows `with the credential(s)` / `with credentials` as multi-word
 # forms since they appear in walkthrough prose.
 _IMPERATIVE_PAIR = re.compile(
-    r'(?i)\b(?:try|use|attempt|logged\s+in|log\s+in|sign\s+in|reuse)'
-    r'(?:\s+(?:with\s+(?:the\s+)?credentials?|with|the\s+credentials?|using))?'
+    r'(?i)\b(?:try|use|attempt|logged\s+in|log\s+in|sign\s+in|reuse|'
+    # iter-217: success-phrase verbs. `authenticated (with|using)
+    # X:Y`, `access granted for X:Y`, `login successful for X:Y` are
+    # extremely common in enum4linux success lines and HTB writeup
+    # recap prose (`Sauna: authenticated with credentials fsmith:
+    # Sunfl0wer`).
+    r'authenticated|authenticate|signed\s+in|'
+    r'access\s+granted|login\s+successful|authenticated\s+successfully)'
+    r'(?:\s+(?:with\s+(?:the\s+)?credentials?|with|the\s+credentials?|'
+    r'using|as|for))?'
     r'\s+["\']?'
     r'([A-Za-z_][A-Za-z0-9._@\\-]{1,60})["\']?'
     r'\s*[:=]\s*["\']?'
