@@ -1940,6 +1940,25 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-223: SNMP v1/v2c intel. Three signals:
+#   (A) `161/udp open snmp` in nmap output → MEDIUM baseline with
+#       community-guess hint (`onesixtyone` + top-community wordlist).
+#   (B) Captured snmpwalk output with `SNMPv2-MIB::sysDescr.0 = STRING:
+#       <banner>` → HIGH confirmation the community works AND an OS
+#       banner for BlueKeep / MS17-010 / kernel-CVE routing.
+#   (C) onesixtyone output row `<host> [<community>] <banner>` →
+#       HIGH with the actual community string surfaced.
+_SNMP_PORT_LINE = re.compile(
+    r'(?im)^\s*161/udp\s+open\s+snmp'
+)
+_SNMP_SYS_DESCR = re.compile(
+    r'(?i)SNMPv2-MIB::sysDescr\.0\s*=\s*STRING:\s*([^\r\n]{5,300})'
+)
+_ONESIXTYONE_HIT = re.compile(
+    r'(?im)^(\d{1,3}(?:\.\d{1,3}){3})\s+\[([\w.\-]{1,60})\]\s+'
+    r'([^\r\n]{5,200})'
+)
+
 # iter-216: Docker socket exposure = direct root. Two shapes:
 #   (A) `id` / `groups` output showing membership in `docker` group -
 #       any member can bind-mount the host root into a container:
@@ -3758,6 +3777,89 @@ def _multiline_passes(path, report, store):
                        f"wildcard-injection candidate: {_line_txt}",
                        hint=(f"if this runs as a higher-priv user in a "
                              f"dir YOU can write: {_atk}"))
+
+    # iter-223: SNMP UDP 161 intel. Three signals:
+    #   (A) 161/udp open → MEDIUM baseline (community guess needed)
+    #   (B) sysDescr.0 in snmpwalk output → HIGH confirmed community
+    #   (C) onesixtyone hit row → HIGH with community + banner surfaced
+    # Doc-file gate applies. No filename gate - captured SNMP output
+    # can live in .txt / .nmap / .log / operator notes.
+    if not filters.is_doc_file(path):
+        _snmp_emitted = False
+        # Signal C is highest-value (has community + banner) - try first.
+        _oh = _ONESIXTYONE_HIT.search(text)
+        if _oh:
+            _ip = _oh.group(1)
+            _comm = _oh.group(2).strip()
+            _banner = _oh.group(3).strip()[:100]
+            _comm_sh = _comm.replace("'", "'\\''")
+            report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_oh),
+                       f"SNMP community `{_comm}` on {_ip} (onesixtyone) "
+                       f"- banner: {_banner[:60]}",
+                       hint=(f"snmpwalk -v2c -c '{_comm_sh}' -mALL {_ip}  "
+                             f"|  extract users: snmpwalk -v2c -c "
+                             f"'{_comm_sh}' {_ip} .1.3.6.1.4.1.77.1.2.25"
+                             f"  |  running procs: snmpwalk -v2c -c "
+                             f"'{_comm_sh}' {_ip} .1.3.6.1.2.1.25.4.2  "
+                             f"|  if rw: snmpset -v2c -c '{_comm_sh}' "
+                             f"{_ip} <OID> i 1"))
+            _snmp_emitted = True
+
+        # Signal B: sysDescr.0 output = confirmed community.
+        if not _snmp_emitted:
+            _sd = _SNMP_SYS_DESCR.search(text)
+            if _sd:
+                _banner_b = _sd.group(1).strip()[:150]
+                # Try to find target host + community from context.
+                _snmp_ctx = re.search(
+                    r'(?i)snmpwalk[^\r\n]*?-c\s+[\'"]?([\w.\-]{1,60})[\'"]?'
+                    r'[^\r\n]*?([\d.]{7,15})',
+                    text[:8192])
+                if _snmp_ctx:
+                    _comm_b = _snmp_ctx.group(1)
+                    _host_b = _snmp_ctx.group(2)
+                else:
+                    _comm_b = "public"
+                    _host_b = "<snmp-host>"
+                _kernel_hint = ""
+                if "Linux" in _banner_b:
+                    _kernel_hint = (
+                        "  |  kernel CVE hunt: match this Linux version "
+                        "vs searchsploit `linux kernel <ver>`")
+                elif "Windows" in _banner_b or "Microsoft" in _banner_b:
+                    _kernel_hint = (
+                        "  |  Windows CVE hunt: MS17-010, BlueKeep "
+                        "CVE-2019-0708 depending on version")
+                _comm_b_sh = _comm_b.replace("'", "'\\''")
+                report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_sd),
+                           f"SNMP community confirmed via sysDescr on "
+                           f"{_host_b}: {_banner_b[:80]}",
+                           hint=(f"snmpwalk -v2c -c '{_comm_b_sh}' "
+                                 f"-mALL {_host_b}  |  users OID: "
+                                 f".1.3.6.1.4.1.77.1.2.25  |  procs OID: "
+                                 f".1.3.6.1.2.1.25.4.2  |  installed "
+                                 f"software: .1.3.6.1.2.1.25.6.3.1.2"
+                                 f"{_kernel_hint}"))
+                _snmp_emitted = True
+
+        # Signal A: bare 161/udp open → MEDIUM baseline.
+        if not _snmp_emitted:
+            _sp = _SNMP_PORT_LINE.search(text)
+            if _sp:
+                _snmp_host_m = re.search(
+                    r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                    text[:16384])
+                _snmp_target = (_snmp_host_m.group(1) if _snmp_host_m
+                                 else "<snmp-host>")
+                report.add("MEDIUM", "RECON", path, _ln(_sp),
+                           f"SNMP UDP 161 open on {_snmp_target} - "
+                           f"try v1/v2c community guess",
+                           hint=(f"onesixtyone -c /usr/share/wordlists/"
+                                 f"snmp/common-communities.txt "
+                                 f"{_snmp_target}  |  or: for c in public "
+                                 f"private manager cisco community; do "
+                                 f"snmpwalk -v2c -c $c -t 1 {_snmp_target}"
+                                 f" && echo FOUND:$c; done"))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
