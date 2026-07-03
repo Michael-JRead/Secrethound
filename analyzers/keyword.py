@@ -4708,7 +4708,17 @@ def analyze(path, report, store=None):
                                             "Ansible Vault header",
                                             "PowerShell -enc payload",
                                             "GPP cpassword inline",
-                                            "browser password CSV"):
+                                            "browser password CSV",
+                                            # iter-219: tutorial .md pages
+                                            # for Grafana provisioning YAML
+                                            # and docker-compose env vars
+                                            # showed up as FPs in wf_ff710e72
+                                            # audit - the pattern examples
+                                            # in tutorials look identical to
+                                            # real configs but are teaching
+                                            # content, not loot.
+                                            "Grafana basicAuth",
+                                            "docker env secret"):
                         continue
                     # iter-11 FP audit: MongoDB BSON shell output has TWO groups
                     # (user, pass) but no dedicated dispatch branch existed -
