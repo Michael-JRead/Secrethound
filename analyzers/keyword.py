@@ -1806,7 +1806,11 @@ _LINUX_CAPS = {
 # Filename-gated at dispatch to avoid matching `[host]:port user:tag` in
 # nmap output.
 _POSTFIX_SASL = re.compile(
-    r'(?m)^\s*\[([\w.\-]+)\](?::(\d{1,5}))?\s+'
+    # iter-222 audit fix: extend host char-class to `:` so bracketed
+    # IPv6 relays `[2001:db8::1]:587` match. IPv6 hosts inside `[...]`
+    # brackets can't collide with the port separator because the port
+    # sits OUTSIDE the brackets in the sasl_passwd format.
+    r'(?m)^\s*\[([\w.:\-]+)\](?::(\d{1,5}))?\s+'
     r'([^\s:@]{1,60})(?:@[\w.\-]+)?:'
     r'([^\s#\r\n]{3,80})\s*$'
 )
@@ -1946,8 +1950,15 @@ _DOCKER_GROUP_ID = re.compile(
     r'(?im)^\s*uid=\d+\([\w\-.]+\)\s+gid=\d+\([\w\-.]+\)\s+'
     r'groups=[^\r\n]*?\b\d+\(docker\)'
 )
-_DOCKER_GROUP_GROUPS = re.compile(
-    r'(?m)^\s*\S+\s*:\s*[^\r\n]*\bdocker\b[^\r\n]*$'
+# iter-222 audit fix: prior `_DOCKER_GROUP_GROUPS` was a dead-code
+# pattern - defined but never referenced by any dispatcher. Replaced
+# with a specific `groups` command output shape that matches BOTH:
+#   $ groups                 → `user docker wheel`
+#   $ groups alice           → `alice : alice docker sudo`
+# Anchored on the `groups` command line so we don't FP on random
+# `X : Y docker Z` prose.
+_DOCKER_GROUPS_CMD = re.compile(
+    r'(?im)^(?:\$\s+)?groups(?:\s+\S+)?\s*(?::\s*)?[^\r\n]*?\bdocker\b'
 )
 _DOCKER_SOCK_LS = re.compile(
     r'(?im)^s\S{9,10}\s+\d+\s+root\s+(?:root|docker)\s+\d+\s+'
@@ -1961,7 +1972,11 @@ _DOCKER_SOCK_LS = re.compile(
 # chown) into the glob dir; when the root task runs, tar/chown
 # interprets the filenames as CLI flags.
 _WILDCARD_TAR = re.compile(
-    r'(?i)\btar\s+[-]?[cvfzjJx]+\s+\S+\s+\*(?:\s|$)'
+    # iter-222 audit fix: allow flags between the archive path and the
+    # wildcard (`tar cf backup.tar -C /somedir *` is the most common
+    # cron form). Prior regex required `\S+\s+\*` back-to-back so any
+    # additional flags dropped the match.
+    r'(?i)\btar\s+[-]?[cvfzjJx]+\s+\S+(?:\s+-\S+(?:\s+\S+)?)*\s+\*(?:\s|$)'
 )
 _WILDCARD_CHOWN = re.compile(
     r'(?i)\bchown\s+(?:-R\s+)?[\w:.\-]+\s+(?:/\S+/)?\*(?:\s|$)'
@@ -2967,7 +2982,12 @@ def _multiline_passes(path, report, store):
                 continue
             _u_sh_pfx = user.replace("'", "'\\''")
             _p_sh_pfx = pw.replace("'", "'\\''")
-            _target = host + (f":{port}" if port else "")
+            # iter-222 audit fix: IPv6 hosts get bracket-wrapped so the
+            # printed target is unambiguous: `[2001:db8::1]:587` not
+            # `2001:db8::1:587` where the trailing :587 is confused for
+            # a hextet.
+            _host_disp = f"[{host}]" if ":" in host else host
+            _target = _host_disp + (f":{port}" if port else "")
             report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                        f"Postfix SMTP relay auth ({_target}): {user}:{pw}",
                        hint=(f"swaks --to test@target --server {_target} "
@@ -3291,8 +3311,17 @@ def _multiline_passes(path, report, store):
                                   r'FLUSHALL|SAVE|CLIENT|ACL)\b', _after):
                         _host_p, _port_p = _pm.group(1), _pm.group(2)
                         # Ignore obviously-fake hosts.
-                        if not (_host_p in ("localhost", "127.0.0.1")
-                                and _port_p == "22"):
+                        # iter-222 audit fix: MongoDB shell prompt has
+                        # the SAME shape (`<host>:27017>`), and captured
+                        # loot may include uppercase SET/GET as part of
+                        # mongodb setter/getter calls or comments. Reject
+                        # when the port is a canonical Mongo port so the
+                        # Mongo-unauth detector handles it instead.
+                        _is_mongo_port = _port_p in ("27017", "27018", "27019")
+                        _is_ssh_localhost = (
+                            _host_p in ("localhost", "127.0.0.1")
+                            and _port_p == "22")
+                        if not _is_mongo_port and not _is_ssh_localhost:
                             report.add("HIGH", "SECRET-SIDECHANNEL", path,
                                        _ln(_pm),
                                        f"Redis interactive session on "
@@ -3652,6 +3681,18 @@ def _multiline_passes(path, report, store):
                                      "alpine chroot /mnt sh  |  as any "
                                      f"of: {_members[:60]}"))
                     _docker_hit = True
+        # iter-222 audit fix: `groups` command output detector was
+        # defined but never wired. Now consulted when `id` output isn't
+        # present but a captured `groups` line shows docker membership.
+        if not _docker_hit:
+            _gcm = _DOCKER_GROUPS_CMD.search(text)
+            if _gcm:
+                report.add("HIGH", "INTERESTING FILES", path, _ln(_gcm),
+                           "docker group membership via `groups` cmd "
+                           "output - direct root escape",
+                           hint=("docker run --rm -it -v /:/mnt "
+                                 "alpine chroot /mnt sh"))
+                _docker_hit = True
         if not _docker_hit:
             _sm = _DOCKER_SOCK_LS.search(text)
             if _sm:
@@ -6758,8 +6799,19 @@ def analyze(path, report, store=None):
                         # iter-13: intel-only - HIGH
                         # iter-215: consult _LINUX_CAPS for per-cap
                         # escape; fall back to python setuid recipe.
-                        _cap_name = cap.split("+")[0].split("=")[0]
-                        _cap_hint = _LINUX_CAPS.get(_cap_name)
+                        # iter-222: handle comma-separated multi-caps
+                        # `cap_setuid,cap_setgid+ep` - the prior split
+                        # yielded the whole `cap_a,cap_b` string as
+                        # the lookup key so no dict entry ever matched.
+                        _caps_raw = cap.split("+")[0].split("=")[0]
+                        _caps_list = [c.strip() for c in _caps_raw.split(",")]
+                        _cap_name = _caps_raw
+                        _cap_hint = None
+                        for _cn in _caps_list:
+                            _cap_hint = _LINUX_CAPS.get(_cn)
+                            if _cap_hint:
+                                _cap_name = _cn
+                                break
                         if _cap_hint:
                             _hint = (_cap_hint.replace("<bin>", binary)
                                      + f"  |  ref: /usr/sbin/capsh --decode="
