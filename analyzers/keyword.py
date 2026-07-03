@@ -1999,6 +1999,32 @@ _DRUPAL_META = re.compile(
     r'[\'"]Drupal\s+(\d+(?:\.\d+)?)'
 )
 
+# iter-238: PHP exposure signals.
+#   (A) Captured phpinfo() page → HIGH RCE-recon (extremely
+#       revealing: PHP version, loaded extensions, disable_functions,
+#       session location, doc_root, install path).
+#   (B) X-Powered-By: PHP/X.Y.Z header → HIGH with version-window CVE
+#       hints.
+#   (C) PHP source-code disclosure (captured `<?php ... ?>` in raw
+#       HTTP response) = interpreter misconfig, direct source leak.
+_PHPINFO_PAGE = re.compile(
+    r'(?i)(?:<title>\s*phpinfo\(\)|'
+    r'<h1[^>]*>\s*PHP\s+Version\s+\d+\.\d+\.\d+|'
+    r'Loaded\s+Configuration\s+File.{0,50}?php\.ini)'
+)
+_PHPINFO_PHP_VERSION = re.compile(
+    r'(?i)PHP\s+Version\s+(\d+\.\d+\.\d+)'
+)
+_PHP_XPB = re.compile(
+    r'(?im)^X-Powered-By\s*:\s*PHP/(\d+\.\d+\.\d+)'
+)
+# Source leak - `<?php` in a captured HTTP body that shouldn't have
+# executable code. Very narrow: `<?php\s+` on a line boundary (real
+# response) NOT preceded by any script-tag prose context.
+_PHP_SRC_LEAK = re.compile(
+    r'(?m)^\s*<\?php\s+(?:\$|echo|include|require|declare|namespace)'
+)
+
 # iter-234: modern web-app version-banner CVE hints. Payload IOCs
 # for Log4Shell/Spring4Shell/Confluence OGNL are already covered by
 # per-line matchers; missing was the DEFENDER-side signal - captured
@@ -3342,6 +3368,75 @@ def _multiline_passes(path, report, store):
                              f"RCE: template editor at /administrator/"
                              f"index.php?option=com_templates - "
                              f"inject PHP into a template file"))
+
+        # iter-238: PHP exposure signals.
+        _pinfo_m = _PHPINFO_PAGE.search(text[:32768])
+        if _pinfo_m:
+            _pver_m = _PHPINFO_PHP_VERSION.search(text[:32768])
+            _pv = _pver_m.group(1) if _pver_m else "unknown"
+            _pinfo_host_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _phost = (_pinfo_host_m.group(1) if _pinfo_host_m
+                       else "<php-host>")
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_pinfo_m),
+                       f"phpinfo() page exposed on {_phost} - PHP "
+                       f"{_pv} + config disclosed",
+                       hint=("EXTREMELY revealing intel:  |  loaded "
+                             "modules → find RCE via loaded exts "
+                             "(imap, ssh2, exif)  |  disable_functions "
+                             "→ know which bypass path applies  |  "
+                             "doc_root + include_path → LFI target "
+                             "list  |  session.save_path → session "
+                             "poison + LFI = RCE  |  allow_url_include "
+                             "= On → direct RFI RCE via php://input"))
+
+        # X-Powered-By PHP header (banner-only, less info than
+        # phpinfo but still surfaces the version).
+        _pxpb_m = _PHP_XPB.search(text[:16384])
+        if _pxpb_m and not _pinfo_m:
+            _pxv = _pxpb_m.group(1)
+            _pxvt = _vtuple(_pxv)
+            _php_cve = ""
+            # PHP-FPM CVE-2019-11043 affects 7.1.x < 7.1.33, 7.2.x <
+            # 7.2.24, 7.3.x < 7.3.11.
+            if ((_pxvt >= (7, 1, 0) and _pxvt < (7, 1, 33))
+                    or (_pxvt >= (7, 2, 0) and _pxvt < (7, 2, 24))
+                    or (_pxvt >= (7, 3, 0) and _pxvt < (7, 3, 11))):
+                _php_cve = ("  |  CVE-2019-11043 PHP-FPM RCE "
+                            "candidate (needs nginx + "
+                            "fastcgi_split_path_info): "
+                            "phuip-fpizdam.py <target>")
+            elif _pxvt < (5, 6, 30) and _pxvt >= (5, 0, 0):
+                _php_cve = ("  |  ancient PHP 5.x - many public "
+                            "CVEs; check searchsploit php " + _pxv)
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_pxpb_m),
+                       f"PHP {_pxv} exposed via X-Powered-By header",
+                       hint=(f"remove-me: header('X-Powered-By: ') "
+                             f"in bootstrap  |  common test paths: "
+                             f"/info.php, /phpinfo.php, /test.php, "
+                             f"/i.php, /pinfo.php (many devs leave "
+                             f"debug endpoints){_php_cve}"))
+
+        # PHP source code leak (interpreter misconfig).
+        _psrc_m = _PHP_SRC_LEAK.search(text[:32768])
+        if _psrc_m:
+            report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                       _ln(_psrc_m),
+                       "PHP source code disclosure - interpreter "
+                       "returned raw `<?php` code instead of "
+                       "executing",
+                       hint=("intepreter misconfig or file-handler "
+                             "confusion  |  common cause: bad "
+                             ".htaccess AddType or nginx location "
+                             "block missing php_admin_flag  |  "
+                             "operator win: grep leaked source for "
+                             "DB creds, API keys, hardcoded "
+                             "passwords; try php://filter/convert."
+                             "base64-encode/resource=<path> LFI to "
+                             "pull other .php files"))
 
         # iter-235: Drupal fingerprint (banner-side, complements
         # iter-22 pre-7.59/8.5.1 payload-marker detector).
