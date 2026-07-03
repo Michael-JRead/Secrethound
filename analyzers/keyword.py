@@ -3735,6 +3735,61 @@ def _multiline_passes(path, report, store):
                                  "agent to a compromised box, RCE against "
                                  "the operator - warn, don't enable "
                                  "ForwardAgent on untrusted hosts"))
+            # iter-243: Terrapin CVE-2023-48795 for < 9.6. Prefix-truncation
+            # via SSH extension negotiation - MITM strips messages. Since
+            # MITM isn't exam-legal and the operator can't MITM the exam
+            # lab, this is INTEL-only.
+            if (maj, minn) < (9, 6):
+                report.add("INFO", "RECON", path, _ln(m),
+                           f"OpenSSH {vsz} < 9.6 - CVE-2023-48795 Terrapin "
+                           f"(intel only - requires MITM position)",
+                           hint=("prefix-truncation attack on SSH extension "
+                                 "negotiation; only applicable if the operator "
+                                 "is between two hosts on the SAME wire - "
+                                 "OSCP+ exam usually isolates the tester so "
+                                 "this doesn't apply; note the target for "
+                                 "post-exam engagements"))
+
+        # iter-243: SSH auth-method disclosure in captured verbose output
+        # `ssh -v <host>` or `Authentications that can continue:` line
+        # tells the operator which auth methods work. Password = try
+        # FOUND-cred spray (exam-legal). publickey-only = we need a key.
+        _ssh_auth_m = re.search(
+            r'(?im)Authentications\s+that\s+can\s+continue\s*:\s*'
+            r'([\w,\-]+)',
+            text[:16384])
+        if _ssh_auth_m:
+            _methods = _ssh_auth_m.group(1).strip()
+            _has_pw = "password" in _methods.lower()
+            _has_kbi = "keyboard-interactive" in _methods.lower()
+            _has_pk = "publickey" in _methods.lower()
+            _ssh_h_m = re.search(
+                r'(?im)^Nmap\s+scan\s+report\s+for\s+([\w.\-:]+)',
+                text[:16384])
+            _ssh_host = (_ssh_h_m.group(1) if _ssh_h_m else "<ssh-host>")
+            if _has_pw or _has_kbi:
+                # Password auth is enabled → spray with found creds.
+                report.add("MEDIUM", "RECON", path, _ln(_ssh_auth_m),
+                           f"SSH {_ssh_host} accepts "
+                           f"{'password' if _has_pw else 'keyboard-interactive'}"
+                           f" auth (methods: {_methods})",
+                           hint=(f"try FOUND-cred spray (exam-legal, single "
+                                 f"attempt per cred): for user in $(cat "
+                                 f"users.txt); do sshpass -p 'FoundPw!' ssh "
+                                 f"-o StrictHostKeyChecking=no -o "
+                                 f"UserKnownHostsFile=/dev/null "
+                                 f"-o PubkeyAuthentication=no "
+                                 f"$user@{_ssh_host} 'id' && echo VALID:"
+                                 f"$user; done  |  NO hydra/ncrack/medusa "
+                                 f"(exam-BANNED brute forcers)"))
+            elif _has_pk:
+                report.add("INFO", "RECON", path, _ln(_ssh_auth_m),
+                           f"SSH {_ssh_host} publickey-ONLY (methods: "
+                           f"{_methods})",
+                           hint=("need SSH key from filesystem loot; check "
+                                 "~/.ssh/id_rsa, /root/.ssh/id_rsa, or "
+                                 "any keys discovered via LFI/SMB share "
+                                 "reads"))
 
     # iter-198: Sudo version detection + Baron Samedit range flag. Runs
     # BEFORE the kernel block because both blocks are cheap and independent.
