@@ -9174,6 +9174,85 @@ def _multiline_passes(path, report, store):
                                          "spec": _spec,
                                          "mode": _mode}))
 
+    # iter-308: Windows-native netsh portproxy + Linux socat pivot.
+    # Companion to iter-307 (chisel/ligolo/ssh) — these are the two
+    # LOLBAS-style pivots that don't require dropping any external
+    # binary. Very common on OSCP+ AD-set: Windows box with no SSH,
+    # no ability to drop chisel due to Defender, but netsh is
+    # already there. Same for Linux socat — often present via
+    # netcat-openbsd or apt-installed on jump hosts.
+    #
+    # netsh portproxy ADD (command capture):
+    #   netsh interface portproxy add v4tov4 listenport=8080
+    #     listenaddress=0.0.0.0 connectport=445 connectaddress=10.20.30.40
+    # netsh portproxy SHOW (verification):
+    #   Listen on ipv4:              Connect to ipv4:
+    #   Address         Port        Address         Port
+    #   --------------- ----------  --------------- ----------
+    #   0.0.0.0         8080        10.20.30.40     445
+    #
+    # Socat listener-forward:
+    #   socat TCP4-LISTEN:8080,fork TCP4:10.20.30.40:445
+    #   socat TCP-LISTEN:1234,fork,reuseaddr TCP:internal:22
+    _NETSH_PORTPROXY_ADD = re.compile(
+        r'(?i)\bnetsh\s+(?:interface\s+)?portproxy\s+add\s+v4tov4'
+        r'[^\r\n]*?listenport\s*=\s*(\d{1,5})'
+        r'[^\r\n]*?connectport\s*=\s*(\d{1,5})'
+        r'[^\r\n]*?connectaddress\s*=\s*([\w.\-:]{3,80})')
+    _SOCAT_LISTEN = re.compile(
+        r'(?i)\bsocat\s+TCP4?-LISTEN\s*:\s*(\d{1,5})'
+        r'[^\r\n]*?TCP4?\s*:\s*([\w.\-:]{3,80})\s*:\s*(\d{1,5})')
+    if not filters.is_doc_file(path):
+        _pivot2_seen = set()
+        for _np in _NETSH_PORTPROXY_ADD.finditer(text[:65536]):
+            _lp = _np.group(1)
+            _cp = _np.group(2)
+            _ca = _np.group(3)
+            _sig = ("netsh-pp", _lp, _cp, _ca.lower())
+            if _sig in _pivot2_seen:
+                continue
+            _pivot2_seen.add(_sig)
+            report.add("HIGH", "PIVOT", path, _ln(_np),
+                       f"netsh portproxy ADD: listen :{_lp} -> "
+                       f"{_ca}:{_cp} - Windows LOLBAS pivot",
+                       hint=(f"Windows-native port-forward, no "
+                             f"binary drop needed  |  attacker "
+                             f"reaches {_ca}:{_cp} via <pivot>:{_lp}"
+                             f"  |  cleanup on exam exit: netsh "
+                             f"interface portproxy reset  |  "
+                             f"detection: reg query HKLM\\SYSTEM\\"
+                             f"CurrentControlSet\\Services\\"
+                             f"PortProxy\\v4tov4\\tcp"))
+            if store is not None:
+                store.add(Evidence(kind="pivot_landed",
+                                   source=path, line=_ln(_np),
+                                   meta={"tool": "netsh_portproxy",
+                                         "listen_port": _lp,
+                                         "connect_addr": _ca,
+                                         "connect_port": _cp}))
+        for _sc in _SOCAT_LISTEN.finditer(text[:65536]):
+            _lp = _sc.group(1)
+            _dst = _sc.group(2)
+            _dp = _sc.group(3)
+            _sig = ("socat", _lp, _dst.lower(), _dp)
+            if _sig in _pivot2_seen:
+                continue
+            _pivot2_seen.add(_sig)
+            report.add("HIGH", "PIVOT", path, _ln(_sc),
+                       f"socat TCP-LISTEN pivot: :{_lp} -> "
+                       f"{_dst}:{_dp} - Linux LOLBAS forward",
+                       hint=(f"socat forwarder active  |  attacker "
+                             f"connects to <pivot>:{_lp} to reach "
+                             f"{_dst}:{_dp}  |  runs in foreground, "
+                             f"backgrounded with `&` in shell"))
+            if store is not None:
+                store.add(Evidence(kind="pivot_landed",
+                                   source=path, line=_ln(_sc),
+                                   meta={"tool": "socat",
+                                         "listen_port": _lp,
+                                         "dest_addr": _dst,
+                                         "dest_port": _dp}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
