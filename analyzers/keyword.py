@@ -7316,6 +7316,42 @@ def _multiline_passes(path, report, store):
                                meta={"encoding": "utf-16-le-hex",
                                      "machine_account": True}))
 
+    # iter-268: `ntdsutil ifm` offline NTDS.dit + SYSTEM + SECURITY hive
+    # capture success marker. This is the DA-level post-compromise move:
+    # once the operator has run `ntdsutil "activate instance ntds" "ifm"
+    # "create full C:\temp\dump" quit quit` on a DC, the resulting IFM
+    # media contains ntds.dit + registry hives that unlock EVERY domain
+    # user's NT hash via offline impacket-secretsdump - no need to run
+    # DCSync live against the DC (which is noisier). Also comes up on
+    # OSCP+ retired boxes where a DA/backup-op runs it into a share.
+    _NTDSUTIL_IFM = re.compile(
+        r'(?im)^\s*IFM\s+media\s+(?:successfully\s+)?created\s+(?:successfully\s+)?'
+        r'(?:in\s+)?[\'"]?([^\r\n\'"]{2,240}?)[\'"]?\s*$')
+    if not filters.is_doc_file(path):
+        _ifm_seen = set()
+        for _im in _NTDSUTIL_IFM.finditer(text):
+            _ifm_path = _im.group(1).strip()
+            if _ifm_path in _ifm_seen:
+                continue
+            _ifm_seen.add(_ifm_path)
+            _ifm_path_sh = _ifm_path.replace("'", "'\\''")
+            report.add("CRITICAL", "INTERESTING FILES", path, _ln(_im),
+                       f"ntdsutil IFM offline dump captured at {_ifm_path}"
+                       f" - contains ntds.dit + SYSTEM + SECURITY hives",
+                       hint=(f"pull IFM tree, then: impacket-secretsdump "
+                             f"-ntds '{_ifm_path_sh}/Active Directory/"
+                             f"ntds.dit' -system '{_ifm_path_sh}/registry"
+                             f"/SYSTEM' -security '{_ifm_path_sh}/"
+                             f"registry/SECURITY' LOCAL  |  dumps ALL "
+                             f"domain user NT + LM hashes offline - "
+                             f"including krbtgt for golden ticket forge"
+                             f"  |  also LSA secrets ($MACHINE.ACC, "
+                             f"DPAPI_SYSTEM) and cached domain creds"))
+            if store is not None:
+                store.add(Evidence(kind="ntds_dump", source=path,
+                                   line=_ln(_im),
+                                   meta={"path": _ifm_path}))
+
     # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
     # (impacket secretsdump.py LSASecrets output)
     _LSA_SC = re.compile(
