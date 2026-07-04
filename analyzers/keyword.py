@@ -7750,11 +7750,18 @@ def _multiline_passes(path, report, store):
         for _tm in _NLTEST_TRUST.finditer(text):
             _target = _tm.group(1).strip()
             _dir_raw = _tm.group("dir")
-            if _dir_raw in ("Primary Domain", "Forest Tree Root", "Native"):
-                # marker for our OWN domain, not a real cross-forest trust
+            # iter-281 audit fix: whitespace-normalize the own-domain
+            # check. Previously the tuple used single spaces but the
+            # regex captured `\s+` so `Primary\tDomain` (tab) or double-
+            # space variants slipped through the exact-string filter
+            # and emitted spurious MEDIUM trust findings against our
+            # OWN domain.
+            _dir_norm = re.sub(r'\s+', ' ', _dir_raw).strip()
+            if _dir_norm in ("Primary Domain", "Forest Tree Root",
+                             "Native"):
                 continue
-            _dir = ("Bidirectional" if "Bidirectional" in _dir_raw
-                    else ("Outbound" if "Outbound" in _dir_raw
+            _dir = ("Bidirectional" if "Bidirectional" in _dir_norm
+                    else ("Outbound" if "Outbound" in _dir_norm
                           else "Inbound"))
             _sig = ("nltest", _target.lower(), _dir)
             if _sig in _trust_seen:
@@ -7873,11 +7880,24 @@ def _multiline_passes(path, report, store):
     _PV_UNCONS_B = re.compile(
         r'(?im)^useraccountcontrol\s*:([^\r\n]{0,300})[\s\S]{0,600}?'
         r'^samaccountname\s*:\s*([\w.\-$]{1,60}\$)')
+    # iter-281 audit fix: cross-block bleed guards. Without these, if a
+    # PowerView block N misses its useraccountcontrol line, the lazy
+    # `[\s\S]{0,600}?` walks into block N+1's UAC line and CRITICAL fires
+    # against WRONG hostname (samaccountname[N] paired with UAC[N+1]).
+    _PV_UNCONS_SAM_BLEED = re.compile(r'(?im)^samaccountname\s*:')
+    _PV_UNCONS_UAC_BLEED = re.compile(r'(?im)^useraccountcontrol\s*:')
     if not filters.is_doc_file(path):
         _unc_seen = set()
-        for _rx, _sam_grp, _uac_grp in ((_PV_UNCONS_A, 1, 2),
-                                          (_PV_UNCONS_B, 2, 1)):
+        # For pattern A the span starts at samaccountname line so it
+        # counts as 1; two sam lines in the span = bleed. For pattern B
+        # the span starts at UAC line; two UAC lines = bleed.
+        for _rx, _sam_grp, _uac_grp, _bleed_rx in (
+                (_PV_UNCONS_A, 1, 2, _PV_UNCONS_SAM_BLEED),
+                (_PV_UNCONS_B, 2, 1, _PV_UNCONS_UAC_BLEED)):
             for _um in _rx.finditer(text):
+                _span = text[_um.start():_um.end()]
+                if len(_bleed_rx.findall(_span)) > 1:
+                    continue
                 _uac_str = _um.group(_uac_grp)
                 if "TRUSTED_FOR_DELEGATION" not in _uac_str.upper():
                     continue
