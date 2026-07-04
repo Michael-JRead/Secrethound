@@ -8057,6 +8057,67 @@ def _multiline_passes(path, report, store):
                                    source=path, line=_ln(_rm),
                                    meta={"raw_value": _val[:400]}))
 
+    # iter-284: BloodHound collection completion markers. Two collectors
+    # in OSCP+ workflow: SharpHound.exe (C# in-domain from Windows shell)
+    # and bloodhound-python (from Kali). Both emit distinctive completion
+    # lines that tell operator "collection done, ingest the zip now".
+    #
+    # SharpHound: `SharpHound Enumeration Completed at ... Happy Graphing!`
+    # bh-python:  `INFO: Compressing output into TIMESTAMP_bloodhound.zip`
+    _BH_SHARPHOUND_DONE = re.compile(
+        r'(?i)SharpHound\s+Enumeration\s+Completed[^\r\n]*?'
+        r'Happy\s+Graphing!?')
+    _BH_PYTHON_DONE = re.compile(
+        r'(?i)Compressing\s+output\s+into\s+'
+        r'(?P<zip>[\w./\\\-]{1,240}\.zip)')
+    if not filters.is_doc_file(path):
+        _sh_m = _BH_SHARPHOUND_DONE.search(text[:65536])
+        if _sh_m:
+            report.add("HIGH", "RECON", path, _ln(_sh_m),
+                       "SharpHound collection completed - AD graph "
+                       "ready to ingest",
+                       hint=("output zip in current dir (default) or "
+                             "--OutputDirectory path; upload to "
+                             "BloodHound GUI: `bloodhound-cli import "
+                             "<zip>` OR drag+drop into the neo4j-"
+                             "backed BH desktop  |  key queries: "
+                             "'Shortest Paths to Domain Admins', "
+                             "'Kerberoastable Users with Path to DA',"
+                             " 'Find AS-REP Roastable Users' - the "
+                             "operator's post-collection playbook"))
+            if store is not None:
+                store.add(Evidence(kind="bh_collection",
+                                   source=path, line=_ln(_sh_m),
+                                   meta={"collector": "sharphound"}))
+        _bh_seen = set()
+        for _bp_m in _BH_PYTHON_DONE.finditer(text[:65536]):
+            _zip = _bp_m.group("zip")
+            # Only real BloodHound zips have the bh-python timestamp
+            # prefix or literal 'bloodhound' in the filename.
+            if "bloodhound" not in _zip.lower() and not re.match(
+                    r'^\d{14}_', _zip.rsplit("/", 1)[-1]
+                    .rsplit("\\", 1)[-1]):
+                continue
+            if _zip in _bh_seen:
+                continue
+            _bh_seen.add(_zip)
+            _zip_sh = _zip.replace("'", "'\\''")
+            report.add("HIGH", "RECON", path, _ln(_bp_m),
+                       f"BloodHound-python collection completed: "
+                       f"{_zip}",
+                       hint=(f"pull the zip to Kali, then: bloodhound-"
+                             f"cli import '{_zip_sh}'  |  or the "
+                             f"neo4j-backed BH desktop drag+drop  |  "
+                             f"queries: 'Shortest Paths to Domain "
+                             f"Admins', 'Kerberoastable Users with "
+                             f"Path to DA', 'AS-REP Roastable Users'"))
+            if store is not None:
+                store.add(Evidence(kind="bh_collection",
+                                   source=path, line=_ln(_bp_m),
+                                   meta={"collector":
+                                         "bloodhound-python",
+                                         "zip": _zip}))
+
     # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
     # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
     # host. credline.py captures the cred pair itself but doesn't
