@@ -7872,6 +7872,48 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_ln(_am),
                                        meta={"source": "powerview"}))
 
+    # iter-288: PowerView `Get-DomainUser -PasswordNotRequired | fl` block.
+    # PASSWD_NOTREQD accounts have no password requirement:
+    #   (a) Any GenericWrite on the account = reset pw to blank + login.
+    #   (b) Empty-password accounts login directly with just the sam.
+    # ldapdomaindump.py JSON ingester handles the 0x20 UAC bit; this
+    # detector covers the flat PowerView text form. Same two-orderings
+    # pattern as iter-278 (samaccountname first vs uac first).
+    _PV_PWDNR_A = re.compile(
+        r'(?im)^samaccountname\s*:\s*([\w.\-$]{1,60})[\s\S]{0,400}?'
+        r'^useraccountcontrol\s*:[^\r\n]*?\bPASSWD_NOTREQD\b')
+    _PV_PWDNR_B = re.compile(
+        r'(?im)^useraccountcontrol\s*:[^\r\n]*?\bPASSWD_NOTREQD\b'
+        r'[\s\S]{0,400}?^samaccountname\s*:\s*([\w.\-$]{1,60})')
+    if not filters.is_doc_file(path):
+        _pwdnr_seen = set()
+        for _rx in (_PV_PWDNR_A, _PV_PWDNR_B):
+            for _pm in _rx.finditer(text):
+                _span = text[_pm.start():_pm.end()]
+                if len(_PV_ASREP_BLEED.findall(_span)) > 1:
+                    continue
+                _sam = _pm.group(1).strip()
+                if _sam.lower() in _pwdnr_seen:
+                    continue
+                _pwdnr_seen.add(_sam.lower())
+                _sam_sh = _sam.replace("'", "'\\''")
+                report.add("HIGH", "RECON", path, _ln(_pm),
+                           f"PASSWD_NOTREQD user: {_sam} - no-password"
+                           f" login candidate",
+                           hint=(f"try direct login (empty pw): nxc smb"
+                                 f" <dc> -u '{_sam_sh}' -p ''  |  or "
+                                 f"kinit {_sam_sh}  (press enter at "
+                                 f"password)  |  if we hold GenericAll/"
+                                 f"GenericWrite: net rpc password "
+                                 f"'{_sam_sh}' '' -U '<abuse>%<pw>' -S"
+                                 f" <dc> then login as {_sam_sh} with "
+                                 f"empty pw"))
+                if store is not None:
+                    store.add(Evidence(kind="user", user=_sam,
+                                       fact="passwd_notreqd",
+                                       source=path, line=_ln(_pm),
+                                       meta={"source": "powerview"}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
