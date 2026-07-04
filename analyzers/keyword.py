@@ -1192,6 +1192,15 @@ _NXC_SVC = re.compile(r'^(SMB|WINRM|LDAPS?|MSSQL|SSH|FTP|RDP|WMI|NFS|VNC)\s+'
 _NXC_PROTO = {"smb": "smb", "winrm": "winrm", "ldap": "ldap", "ldaps": "ldaps",
               "mssql": "mssql", "ssh": "ssh", "ftp": "ftp", "rdp": "rdp",
               "wmi": "smb", "nfs": "nfs", "vnc": "vnc"}
+# iter-283: kerbrute passwordspray output. Distinct from userenum
+# (VALID USERNAME) because it carries a full user:domain:pass triple
+# CONFIRMED at KDC (AS-REQ w/preauth succeeded). Checked BEFORE
+# credline in analyze() so the generic user:pass claim doesn't
+# preempt the kerbrute-flavored emission with its concrete spray+PtH
+# chain hints.
+_KERBRUTE_VALID_LOGIN = re.compile(
+    r'(?i)\[\+\]\s+VALID\s+LOGIN\s*:\s*'
+    r'([\w.\-$]{1,60})@([\w.\-]{1,60}):(\S{1,100})')
 
 
 def _learn_nxc_service(line, path, store, seen):
@@ -8401,6 +8410,41 @@ def analyze(path, report, store=None):
                 if store is not None and _NXC_SVC.match(line):
                     _learn_nxc_service(line, path, store, seen_svc)
                     # fall through: credline may still pull a cred off this line
+
+                # ---- pass 0.5: kerbrute passwordspray marker (iter-283)
+                # runs BEFORE credline so the generic `user:pass` claim
+                # doesn't preempt the kerbrute-flavored emission. Real
+                # shape: `[+] VALID LOGIN: svc_backup@corp.local:pw`.
+                _kbm = _KERBRUTE_VALID_LOGIN.search(line)
+                if _kbm:
+                    _kb_u = _kbm.group(1).strip()
+                    _kb_dom = _kbm.group(2).strip()
+                    _kb_pw = _kbm.group(3).strip()
+                    if not filters.is_placeholder(_kb_pw):
+                        _u_sh = _kb_u.replace("'", "'\\''")
+                        _pw_sh = _kb_pw.replace("'", "'\\''")
+                        report.add("HIGH", "CRED PAIRS", path, lineno,
+                                   f"kerbrute passwordspray hit: "
+                                   f"{_kb_dom}\\{_kb_u}:{_kb_pw} - "
+                                   f"CONFIRMED VALID at KDC",
+                                   hint=(f"lateral movement: nxc smb "
+                                         f"<target-cidr> -u '{_u_sh}' "
+                                         f"-p '{_pw_sh}' --continue-on-"
+                                         f"success  |  impacket-psexec "
+                                         f"'{_kb_dom}/{_u_sh}:{_pw_sh}'"
+                                         f"@<host>  |  same-pw spray: "
+                                         f"nxc smb <dc> -u users.txt "
+                                         f"-p '{_pw_sh}'"))
+                        if store is not None:
+                            from analyzers.ingest.evidence import Evidence
+                            store.add(Evidence(kind="plaintext",
+                                               user=_kb_u,
+                                               plaintext=_kb_pw,
+                                               domain=_kb_dom,
+                                               source=path, line=lineno,
+                                               meta={"source":
+                                                     "kerbrute"}))
+                    continue  # don't let credline re-emit
 
                 # ---- pass 1: the credential-line classifier ----
                 c = credline.classify(line)
