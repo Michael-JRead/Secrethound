@@ -8865,6 +8865,93 @@ def _multiline_passes(path, report, store):
                                          "outfile": _outfile,
                                          "count_in_file": str(_msf_count)}))
 
+    # iter-305: Rubeus asktgt captured TGT-landing detector. Critical
+    # OSCP+ AD lateral marker: operator went from captured
+    # hash/password to holding a fresh TGT that opens every Kerberos-
+    # authenticated service the principal has access to. This is the
+    # bridge between LSASS/DPAPI harvest and Kerberos-based pivot.
+    #
+    # Real Rubeus asktgt success shape:
+    #   [*] Action: Ask TGT
+    #
+    #   [*] Using rc4_hmac hash: E19CCF75EE54E06B06A5907AF13CEF42
+    #   [*] Building AS-REQ (w/ preauth) for: 'CORP.LOCAL\svc_backup'
+    #   [+] TGT request successful!
+    #   [*] base64(ticket.kirbi):
+    #
+    #         doIF7jCCBeqgAwIBBaEDAgEWoo...
+    #
+    #     ServiceName              :  krbtgt/CORP.LOCAL
+    #     ServiceRealm             :  CORP.LOCAL
+    #     UserName                 :  svc_backup
+    #     UserRealm                :  CORP.LOCAL
+    #     ...
+    #
+    # Distinctive signal cluster:
+    #   1. `Action: Ask TGT` header
+    #   2. `TGT request successful!` success marker
+    #   3. `ServiceName ... : krbtgt/...` confirms it IS a TGT
+    #      (vs a Rubeus s4u service ticket which has a different
+    #      ServiceName)
+    #   4. UserName field carries the principal now compromised
+    #
+    # Cross-block bleed prevented by requiring all three markers
+    # within a 2 KB window from the Action line.
+    _RUBEUS_ASKTGT_HDR = re.compile(
+        r'(?im)^\s*\[\*\]\s*Action\s*:\s*Ask\s+TGT\s*$')
+    _RUBEUS_ASKTGT_OK = re.compile(
+        r'(?im)^\s*\[\+\]\s*TGT\s+request\s+successful')
+    _RUBEUS_ASKTGT_SVC = re.compile(
+        r'(?im)^\s*ServiceName\s*:\s*krbtgt/([\w.\-]{2,80})')
+    _RUBEUS_ASKTGT_USER = re.compile(
+        r'(?im)^\s*UserName\s*:\s*([\w.\-$]{1,60})')
+    _RUBEUS_ASKTGT_HASH = re.compile(
+        r'(?im)^\s*\[\*\]\s*Using\s+(?:rc4_hmac|aes256_cts_hmac_sha1|'
+        r'aes128_cts_hmac_sha1|des_cbc_md5)\s+(?:hash|key)\s*:\s*'
+        r'([a-fA-F0-9]{16,64})')
+    if not filters.is_doc_file(path):
+        _rubeus_seen = set()
+        for _rt in _RUBEUS_ASKTGT_HDR.finditer(text[:65536]):
+            _win = text[_rt.start():_rt.start() + 2048]
+            _ok = _RUBEUS_ASKTGT_OK.search(_win)
+            if not _ok:
+                continue
+            _svc = _RUBEUS_ASKTGT_SVC.search(_win)
+            if not _svc:
+                continue
+            _user_m = _RUBEUS_ASKTGT_USER.search(_win)
+            if not _user_m:
+                continue
+            _user = _user_m.group(1).strip()
+            _realm = _svc.group(1).strip()
+            _sig = (_user.lower(), _realm.lower())
+            if _sig in _rubeus_seen:
+                continue
+            _rubeus_seen.add(_sig)
+            _hash_m = _RUBEUS_ASKTGT_HASH.search(_win)
+            _keymat = ("hash=" + _hash_m.group(1)[:16] + "..."
+                       if _hash_m else "cert/password (no hash captured)")
+            _user_sh = _user.replace("'", "'\\''")
+            report.add("HIGH", "AD_ATTACK", path, _ln(_rt),
+                       f"Rubeus asktgt SUCCESS: TGT held for "
+                       f"{_user}@{_realm} ({_keymat}) - lateral "
+                       f"Kerberos pivot ready",
+                       hint=(f"operator holds live TGT for "
+                             f"'{_user_sh}' in {_realm}  |  next: "
+                             f"Rubeus.exe ptt /ticket:<b64> to inject"
+                             f" into current session then "
+                             f"dir \\\\<target>\\C$  |  or Rubeus s4u"
+                             f" /impersonateuser:Administrator to "
+                             f"pivot to DA via constrained-deleg  |  "
+                             f"OSCP+ Kerberos-only lateral - no NTLM"
+                             f" auth needed"))
+            if store is not None:
+                store.add(Evidence(kind="tgt_landed",
+                                   user=_user, domain=_realm,
+                                   source=path, line=_ln(_rt),
+                                   meta={"tool": "rubeus_asktgt",
+                                         "key_material": _keymat}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
