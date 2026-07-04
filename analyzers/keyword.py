@@ -2202,6 +2202,36 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-260: Reverse-shell landing captured in operator listener
+# output. Surfaces confirmed footholds from loot files so the
+# report tells the operator which targets have active shells
+# instead of scrolling the raw listener log.
+#
+# Signal A: netcat listener + connect line
+# `Listening on 0.0.0.0 4444`  +  `connect to [10.0.0.1] from
+# (UNKNOWN) [10.10.10.10] 54321`
+_NC_LISTENER = re.compile(
+    # `nc -lvnp` prints `listening on [any] 4444 ...` (trailing
+    # ellipsis). Don't anchor at end of line - the trailing `...`
+    # broke `\\s*$`.
+    r'(?im)^\s*listening\s+on\s+(?:\S+\s+)?(\d{1,5})\b'
+)
+_NC_CONNECT = re.compile(
+    r'(?im)connect\s+to\s+\[([\d.:a-fA-F]{3,45})\]\s+from\s+'
+    r'\S+\s+\[([\d.:a-fA-F]{3,45})\]\s+(\d{1,5})'
+)
+# Signal B: evil-winrm success banner
+_EVILWINRM_BANNER = re.compile(
+    r'(?i)Evil-WinRM\s+shell\s+v[\d.]+|'
+    r'Info:\s+Establishing\s+connection\s+to\s+remote\s+endpoint'
+)
+# Signal C: impacket-psexec / wmiexec success shell prompt
+_IMPACKET_SHELL_PROMPT = re.compile(
+    r'(?im)^\[!\]\s+Launching\s+semi-interactive\s+shell|'
+    r'^\s*C:\\Windows\\system32>\s|'
+    r'^\s*C:\\Users\\[\w.\-$]+>\s'
+)
+
 # iter-257: Windows autorun / scheduled task privesc detectors.
 # Complements iter-256 (unquoted service) + AlwaysInstallElevated
 # with two more Windows-privesc paths.
@@ -3582,6 +3612,67 @@ def _multiline_passes(path, report, store):
                                      f"hashcat -m 13100 {_sam}.tgs "
                                      f"rockyou.txt -r rules/best64."
                                      f"rule"))
+
+    # iter-260: Reverse-shell landing captured. Emits HIGH RECON
+    # so operator sees active-foothold intel in the report. Doc-file
+    # gate applies.
+    if not filters.is_doc_file(path):
+        # Signal A: nc listener + connect line together.
+        _nc_conn_m = _NC_CONNECT.search(text[:32768])
+        _nc_list_m = _NC_LISTENER.search(text[:32768])
+        if _nc_conn_m:
+            _attacker, _victim, _victim_port = (
+                _nc_conn_m.group(1), _nc_conn_m.group(2),
+                _nc_conn_m.group(3))
+            report.add("HIGH", "RECON", path, _ln(_nc_conn_m),
+                       f"Reverse shell landed: {_victim} → attacker "
+                       f"{_attacker} (victim src port {_victim_port})",
+                       hint=(f"active foothold captured; check "
+                             f"surrounding lines for the shell prompt"
+                             f" and commands run; use this as a "
+                             f"pivot host for post-exploit enum  |  "
+                             f"upgrade tty: python3 -c 'import pty;"
+                             f"pty.spawn(\"/bin/bash\")' then Ctrl-Z"
+                             f", stty raw -echo, fg, export TERM="
+                             f"xterm-256color"))
+        elif _nc_list_m:
+            _port = _nc_list_m.group(1)
+            report.add("MEDIUM", "RECON", path, _ln(_nc_list_m),
+                       f"nc listener on port {_port} - no connection "
+                       f"line captured (listener waited but no shell "
+                       f"landed in the loot)",
+                       hint=("listener was set up; either the payload "
+                             "didn't fire or the connection log was "
+                             "truncated  |  check target for AV "
+                             "blocking, egress filtering, or if the "
+                             "target IP even reached the listener"))
+
+        # Signal B: evil-winrm banner
+        _ew_m = _EVILWINRM_BANNER.search(text[:32768])
+        if _ew_m:
+            report.add("HIGH", "RECON", path, _ln(_ew_m),
+                       "Evil-WinRM connection established (captured "
+                       "banner)",
+                       hint=("post-shell: `net user; net localgroup "
+                             "Administrators; whoami /priv` for "
+                             "context  |  upload via `upload /path/"
+                             "local /path/remote`  |  post-shell "
+                             "history: `Get-History` for prior "
+                             "commands"))
+
+        # Signal C: impacket / windows shell prompt
+        _imp_m = _IMPACKET_SHELL_PROMPT.search(text[:32768])
+        if _imp_m:
+            report.add("HIGH", "RECON", path, _ln(_imp_m),
+                       "Windows shell prompt captured - active session"
+                       " on target",
+                       hint=("check surrounding text for commands "
+                             "run + their output; extract creds, "
+                             "hash dumps, mimikatz output for reuse"
+                             "  |  session may be from impacket-"
+                             "psexec / wmiexec / smbexec / evil-"
+                             "winrm - if IIS/webshell, upgrade via "
+                             "nc reverse shell first"))
 
     # iter-257: Windows autorun / scheduled task privesc from
     # captured reg query + schtasks /query output. Doc-file gate.
