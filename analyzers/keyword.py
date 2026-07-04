@@ -7955,7 +7955,11 @@ def _multiline_passes(path, report, store):
                                      f"/reverse_tcp; set LHOST <me>; "
                                      f"run'  |  manual: python2 "
                                      f"AutoBlue-MS17-010/scan_win7_"
-                                     f"win2k8_win2008r2.py {_sam_sh}"))
+                                     # iter-293 audit fix: wrap _sam_sh
+                                     # in single quotes - it still carries
+                                     # the trailing `$` (from HOST$) which
+                                     # bash would var-expand.
+                                     f"win2k8_win2008r2.py '{_sam_sh}'"))
                 elif _OS_BLUEKEEP.search(_os_str):
                     report.add("HIGH", "RECON", path, _ln(_om),
                                f"EOL Windows on {_sam}: {_os_str[:60]}"
@@ -7994,7 +7998,10 @@ def _multiline_passes(path, report, store):
         r'(?:(?!APPPOOL\s+["\']).){0,600}?'
         r'processModel\.userName\s*:\s*["\']([^"\'\r\n]{1,80})["\']'
         r'(?:(?!APPPOOL\s+["\']).){0,200}?'
-        r'processModel\.password\s*:\s*["\']([^"\'\r\n]{1,120})["\']')
+        # iter-293 audit fix: min 4 chars on password to drop tutorial
+        # snippets like `processModel.password:"x"` matching from docs
+        # `.txt`/`.log` cheatsheets that leak past is_doc_file scope.
+        r'processModel\.password\s*:\s*["\']([^"\'\r\n]{4,120})["\']')
     if not filters.is_doc_file(path):
         _pool_seen = set()
         for _pm in _APPCMD_APPPOOL.finditer(text):
@@ -8043,10 +8050,24 @@ def _multiline_passes(path, report, store):
         _mp_seen = set()
         for _mr in _MPPREF_READ.finditer(text[:65536]):
             _paths_str = _mr.group(1)
+            # iter-293 audit fix: skip when the brace value looks like
+            # a JSON blob / PS hashtable (inner braces / quotes / square
+            # brackets). Real `Get-MpPreference | fl` emits a flat comma-
+            # separated brace list, no inner structure. Do NOT check for
+            # `:` here - Windows drive-letter paths (C:\, D:\) contain
+            # colons legitimately.
+            if any(c in _paths_str for c in ('{', '"', '[')):
+                continue
             # comma-separated list; strip each
             for _pth in _paths_str.split(","):
                 _pth = _pth.strip().strip('"\'')
                 if not _pth or len(_pth) < 3:
+                    continue
+                # iter-293 audit fix: require path-shape (drive letter
+                # + colon + slash, OR UNC prefix `\\`). A bare token
+                # like `paths` (from a mis-matched JSON structure)
+                # would slip through the delimiter check otherwise.
+                if not re.match(r'^(?:[A-Za-z]:[\\/]|\\\\)', _pth):
                     continue
                 if _pth.lower() in _mp_seen:
                     continue
