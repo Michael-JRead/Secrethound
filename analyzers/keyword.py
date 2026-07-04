@@ -8639,6 +8639,105 @@ def _multiline_passes(path, report, store):
                                    source=path, line=_ln(_rm),
                                    meta={"method": "psremoting"}))
 
+    # iter-302: Get-NetLoggedOn (PowerView) / PsLoggedon (Sysinternals)
+    # captured output. Reveals users currently logged onto remote hosts
+    # = lateral movement targeting intel. If a Domain Admin session is
+    # active on a host we can compromise, mimikatz sekurlsa::logon
+    # passwords dumps their cleartext / NT hash / TGT.
+    #
+    # Get-NetLoggedOn / PowerView tabular:
+    #   UserName    UserDomain  LogonServer  ComputerName
+    #   --------    ----------  -----------  ------------
+    #   alice       CORP        DC01         WEB01
+    #   svc_backup  CORP        DC01         WEB01
+    #
+    # PsLoggedon.exe (Sysinternals):
+    #   Users logged on locally:
+    #        1/15/2024 3:15:22 PM     CORP\alice
+    #        1/15/2024 3:20:00 PM     CORP\svc_backup
+    #   Users logged on via resource shares:
+    #        1/15/2024 3:25:00 PM     CORP\svc_web
+    _PV_LOGGEDON_HEADER = re.compile(
+        r'(?im)^UserName\s+UserDomain\s+LogonServer\s+ComputerName'
+        r'\s*$')
+    _PV_LOGGEDON_ROW = re.compile(
+        r'(?im)^([\w.\-$]{1,60})\s+([\w.\-]{1,60})\s+'
+        r'([\w.\-]{1,60})\s+([\w.\-]{1,60})\s*$')
+    _PSLOGGEDON_HEADER = re.compile(
+        r'(?im)^Users\s+logged\s+on\s+locally\s*:?\s*$')
+    _PSLOGGEDON_ROW = re.compile(
+        r'(?im)^\s+\d+/\d+/\d+\s+\d+:\d+:\d+\s+(?:AM|PM)?\s+'
+        r'([\w.\-]{1,60})\\([\w.\-$]{1,60})\s*$')
+    if not filters.is_doc_file(path):
+        _loggedon_seen = set()
+        _pv_hdr = _PV_LOGGEDON_HEADER.search(text[:65536])
+        if _pv_hdr:
+            _after_pv = text[_pv_hdr.end():_pv_hdr.end() + 8192]
+            for _row in _PV_LOGGEDON_ROW.finditer(_after_pv):
+                _user = _row.group(1).strip()
+                _dom = _row.group(2).strip()
+                _comp = _row.group(4).strip()
+                # Skip separator dashes row (matches as tokens of `-`)
+                if _user.startswith("-") or _user in (
+                        "UserName", "usersessionname"):
+                    continue
+                _sig = (_user.lower(), _comp.lower())
+                if _sig in _loggedon_seen:
+                    continue
+                _loggedon_seen.add(_sig)
+                _user_sh = _user.replace("'", "'\\''")
+                report.add("MEDIUM", "RECON", path, _ln(_pv_hdr),
+                           f"Logged-on session: {_dom}\\{_user} on "
+                           f"{_comp} - mimikatz target if we own "
+                           f"{_comp}",
+                           hint=(f"if we land admin on {_comp}: "
+                                 f"mimikatz privilege::debug; sekurlsa"
+                                 f"::logonpasswords  |  captures "
+                                 f"'{_user_sh}' cleartext/NT/TGT from"
+                                 f" LSASS  |  session-based cred "
+                                 f"harvest bypasses password policy"))
+                if store is not None:
+                    store.add(Evidence(kind="logged_on_session",
+                                       user=_user, host=_comp,
+                                       domain=_dom,
+                                       source=path, line=_ln(_pv_hdr),
+                                       meta={"source": "get-netloggedon"}))
+        _psl_hdr = _PSLOGGEDON_HEADER.search(text[:65536])
+        if _psl_hdr:
+            _after_psl = text[_psl_hdr.end():_psl_hdr.end() + 4096]
+            # Stop at next blank-line-followed-by-heading or another
+            # PsLoggedon section header.
+            _next_section = re.search(
+                r'(?im)^Users\s+logged\s+on\s+via\s+resource\s+shares',
+                _after_psl)
+            _scan_text = (_after_psl[:_next_section.start()]
+                          if _next_section else _after_psl[:2048])
+            for _row in _PSLOGGEDON_ROW.finditer(_scan_text):
+                _dom = _row.group(1).strip()
+                _user = _row.group(2).strip()
+                # PsLoggedon on a workstation doesn't emit ComputerName
+                # column; the session is by-definition local to that
+                # box. Use `<local>` as placeholder.
+                _sig = (_user.lower(), "<local>")
+                if _sig in _loggedon_seen:
+                    continue
+                _loggedon_seen.add(_sig)
+                _user_sh = _user.replace("'", "'\\''")
+                report.add("MEDIUM", "RECON", path, _ln(_psl_hdr),
+                           f"Logged-on locally: {_dom}\\{_user} "
+                           f"(PsLoggedon) - mimikatz target on THIS "
+                           f"host",
+                           hint=(f"if we escalate to SYSTEM on this "
+                                 f"box: mimikatz privilege::debug; "
+                                 f"sekurlsa::logonpasswords  |  "
+                                 f"captures '{_user_sh}' cred material"
+                                 f" from LSASS"))
+                if store is not None:
+                    store.add(Evidence(kind="logged_on_session",
+                                       user=_user, domain=_dom,
+                                       source=path, line=_ln(_psl_hdr),
+                                       meta={"source": "psloggedon"}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
