@@ -8523,6 +8523,83 @@ def _multiline_passes(path, report, store):
                                    source=path, line=_rbcd_line,
                                    meta={"attack_type": "rbcd_write"}))
 
+    # iter-300: Machine Account Quota (MAQ) abuse - operator creates
+    # an attacker-controlled computer object via bloodyAD/impacket-
+    # addcomputer. Default MAQ=10 lets ANY authenticated user create
+    # up to 10 computer objects. That new computer is the PRINCIPAL
+    # for follow-up RBCD (iter-297) or shadow-cred (iter-297) chains
+    # against high-priv targets.
+    #
+    # bloodyAD success line:
+    #   [+] alice added new computer attacker_pc$ to the domain
+    # impacket-addcomputer:
+    #   Successfully added machine account attacker_pc$ with password
+    # rpc-add-machine-account (impacket):
+    #   [+] Adding Computer Account
+    #   [+] MachineAccount: attacker_pc$
+    _MAQ_BLOODYAD = re.compile(
+        r'(?i)\[[+*]\]\s+[\w.\-]{1,60}\s+added\s+new\s+computer\s+'
+        r'([\w.\-$]{1,40})\s+to\s+the\s+domain')
+    _MAQ_IMPACKET = re.compile(
+        r'(?i)Successfully\s+added\s+machine\s+account\s+'
+        r'([\w.\-$]{1,40})(?:\s+with\s+password\s+([^\r\n\s]{3,100}))?')
+    if not filters.is_doc_file(path):
+        _maq_seen = set()
+        for _bm in _MAQ_BLOODYAD.finditer(text[:65536]):
+            _newmach = _bm.group(1).strip().rstrip("$")
+            if _newmach.lower() in _maq_seen:
+                continue
+            _maq_seen.add(_newmach.lower())
+            _mach_sh = _newmach.replace("'", "'\\''")
+            report.add("HIGH", "RECON", path, _ln(_bm),
+                       f"Machine Account Quota abuse: attacker created"
+                       f" '{_newmach}$' - RBCD/shadow-cred principal",
+                       hint=(f"pair with iter-297 RBCD/shadow-cred: "
+                             f"impacket-getST -impersonate Administrator"
+                             f" -spn CIFS/<target-fqdn> '<dom>/"
+                             f"{_mach_sh}$:<newmachine-pw>'  |  or "
+                             f"certipy shadow auto -account "
+                             f"<victim> -u '<dom>/{_mach_sh}$' -hashes "
+                             f":<NT>  |  cleanup: bloodyAD remove "
+                             f"object '{_mach_sh}$'"))
+            if store is not None:
+                store.add(Evidence(kind="attack_landed",
+                                   user=f"{_newmach}$",
+                                   source=path, line=_ln(_bm),
+                                   meta={"attack_type": "maq_abuse",
+                                         "created_computer": _newmach}))
+        for _im in _MAQ_IMPACKET.finditer(text[:65536]):
+            _newmach = _im.group(1).strip().rstrip("$")
+            _pw = (_im.group(2) or "").strip()
+            if _newmach.lower() in _maq_seen:
+                continue
+            _maq_seen.add(_newmach.lower())
+            _mach_sh = _newmach.replace("'", "'\\''")
+            _pw_hint = (f" (pw: {_pw})" if _pw and
+                        not filters.is_placeholder(_pw) else "")
+            report.add("HIGH", "RECON", path, _ln(_im),
+                       f"Machine Account Quota abuse (impacket-"
+                       f"addcomputer): '{_newmach}$' created"
+                       f"{_pw_hint}",
+                       hint=(f"pair with RBCD write target user: "
+                             f"impacket-rbcd -action write -delegate-to"
+                             f" '{_mach_sh}$' '<dom>/<abuse-user>' "
+                             f"<target-victim>  |  then impacket-getST"
+                             f" -impersonate Administrator -spn CIFS/"
+                             f"<victim-fqdn>"))
+            if store is not None:
+                _meta = {"attack_type": "maq_abuse",
+                         "created_computer": _newmach}
+                if _pw and not filters.is_placeholder(_pw):
+                    _meta["computer_pw"] = _pw
+                store.add(Evidence(kind="attack_landed",
+                                   user=f"{_newmach}$",
+                                   plaintext=(_pw if _pw and
+                                              not filters.is_placeholder(_pw)
+                                              else ""),
+                                   source=path, line=_ln(_im),
+                                   meta=_meta))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
