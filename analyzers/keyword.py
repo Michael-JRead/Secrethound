@@ -6418,6 +6418,68 @@ def _multiline_passes(path, report, store):
                                    source=path, line=_ln(_tm),
                                    meta={"path": _ccache}))
 
+    # iter-265: Certipy ADCS attack-landed markers. Certipy uses a
+    # different verbiage than impacket-getST so iter-264 doesn't catch:
+    #   [*] Saving certificate and private key to 'user.pfx'   (ESC1/4/6)
+    #   [*] Wrote certificate and private key to 'user.pfx'
+    #   [*] Saving credential cache to 'user.ccache'           (Certipy auth)
+    #   [*] Wrote credential cache to 'user.ccache'
+    # PFX = the user's PKINIT certificate = permanent auth primitive
+    # until template rotation. If the PFX belongs to Administrator/
+    # krbtgt, it's game-over CRITICAL.
+    _CERTIPY_PFX_SAVE = re.compile(
+        r'(?im)^\s*\[\*\]\s*(?:Saving|Wrote)\s+certificate(?:\s+and\s+'
+        r'private\s+key)?\s+to\s+[\'"]([^\r\n\'"]{1,120}\.pfx)[\'"]?\s*$')
+    _CERTIPY_CCACHE_SAVE = re.compile(
+        r'(?im)^\s*\[\*\]\s*(?:Saving|Wrote)\s+credential\s+cache\s+'
+        r'to\s+[\'"]([^\r\n\'"]{1,120}\.ccache)[\'"]?\s*$')
+    if not filters.is_doc_file(path):
+        _pfx_seen = set()
+        for _pm in _CERTIPY_PFX_SAVE.finditer(text):
+            _pfx = _pm.group(1)
+            if _pfx in _pfx_seen:
+                continue
+            _pfx_seen.add(_pfx)
+            _pfx_user = _pfx.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            _pfx_user = _pfx_user.removesuffix(".pfx").split("@", 1)[0]
+            _sev = "CRITICAL" if _pfx_user.lower() in (
+                "administrator", "krbtgt", "admin", "domainadmin") else "HIGH"
+            _pfx_user_sh = _pfx_user.replace("'", "'\\''")
+            _pfx_sh = _pfx.replace("'", "'\\''")
+            report.add(_sev, "CRED PAIRS", path, _ln(_pm),
+                       f"Certipy PFX captured: {_pfx} ({_pfx_user}) - "
+                       f"ADCS attack landed",
+                       hint=(f"auth via PKINIT: certipy auth -pfx "
+                             f"'{_pfx_sh}' -domain <dom> -dc-ip <dc-ip>"
+                             f"  |  then export KRB5CCNAME=<ccache> + "
+                             f"impacket-psexec -k -no-pass '{_pfx_user_sh}'"
+                             f"@<host-fqdn>  |  or extract NT hash from "
+                             f"the pfx auth output for PtH"))
+            if store is not None:
+                store.add(Evidence(kind="pfx", user=_pfx_user,
+                                   source=path, line=_ln(_pm),
+                                   meta={"path": _pfx}))
+        _cc_seen = set()
+        for _cm in _CERTIPY_CCACHE_SAVE.finditer(text):
+            _cc = _cm.group(1)
+            if _cc in _cc_seen:
+                continue
+            _cc_seen.add(_cc)
+            _cc_user = _cc.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            _cc_user = _cc_user.removesuffix(".ccache").split("@", 1)[0]
+            _cc_user_sh = _cc_user.replace("'", "'\\''")
+            _cc_sh = _cc.replace("'", "'\\''")
+            report.add("HIGH", "RECON", path, _ln(_cm),
+                       f"Certipy ccache saved: {_cc} - PKINIT TGT ready",
+                       hint=(f"export KRB5CCNAME='{_cc_sh}'  |  impacket-"
+                             f"psexec -k -no-pass '{_cc_user_sh}'"
+                             f"@<host-fqdn>  |  or impacket-secretsdump "
+                             f"-k -no-pass '{_cc_user_sh}'@<dc-fqdn>"))
+            if store is not None:
+                store.add(Evidence(kind="ccache", user=_cc_user,
+                                   source=path, line=_ln(_cm),
+                                   meta={"path": _cc, "source": "certipy"}))
+
     # Mimikatz dpapi::cred typed
     for m in _MK_DPAPI_CRED.finditer(text):
         if not _no_bleed(m, 1, 3, _MK_CRED_BLEED):
