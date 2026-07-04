@@ -7978,6 +7978,56 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_ln(_om),
                                        meta={"os": _os_str[:80]}))
 
+    # iter-290: `appcmd list apppool /text:*password*` captured output.
+    # IIS app pool identity + plaintext password is a classic OSCP+
+    # Windows web-server post-exploitation loot - operator lands as
+    # web user via web shell, runs appcmd to enumerate service creds,
+    # gets the pool identity to hop laterally. Real output:
+    #   APPPOOL "MyAppPool"
+    #     processModel.userName:"corp\svc_iis"
+    #     processModel.password:"P@ssw0rd123"
+    # The .userName + .password pair is per-pool; a session can carry
+    # multiple pools. Bounded block match with negative lookahead to
+    # prevent crossing APPPOOL boundaries.
+    _APPCMD_APPPOOL = re.compile(
+        r'(?is)APPPOOL\s+["\']([^"\'\r\n]{1,80})["\']'
+        r'(?:(?!APPPOOL\s+["\']).){0,600}?'
+        r'processModel\.userName\s*:\s*["\']([^"\'\r\n]{1,80})["\']'
+        r'(?:(?!APPPOOL\s+["\']).){0,200}?'
+        r'processModel\.password\s*:\s*["\']([^"\'\r\n]{1,120})["\']')
+    if not filters.is_doc_file(path):
+        _pool_seen = set()
+        for _pm in _APPCMD_APPPOOL.finditer(text):
+            _pool = _pm.group(1).strip()
+            _u = _pm.group(2).strip()
+            _pw = _pm.group(3).strip()
+            if filters.is_placeholder(_pw) or _pw.startswith("[enc:"):
+                continue
+            _sig = (_pool, _u.lower())
+            if _sig in _pool_seen:
+                continue
+            _pool_seen.add(_sig)
+            _u_sh = _u.replace("'", "'\\''")
+            _pw_sh = _pw.replace("'", "'\\''")
+            _pool_sh = _pool.replace("'", "'\\''")
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(_pm),
+                       f"IIS app pool '{_pool}' identity: {_u}:{_pw}",
+                       hint=(f"the pool user is a domain (or local) "
+                             f"account often reused elsewhere - test "
+                             f"lateral: nxc smb <target-cidr> -u "
+                             f"'{_u_sh}' -p '{_pw_sh}' --continue-on-"
+                             f"success  |  or impacket-psexec '{_u_sh}"
+                             f":{_pw_sh}'@<host>  |  if pool runs as"
+                             f" corp\\svc_iis, spray same pw across"
+                             f" other svc_* accounts (very common"
+                             f" reuse pattern on IIS boxes)"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=_u,
+                                   plaintext=_pw,
+                                   source=path, line=_ln(_pm),
+                                   meta={"source": "iis_apppool",
+                                         "pool": _pool}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
