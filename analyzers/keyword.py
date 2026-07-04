@@ -8616,11 +8616,14 @@ def _multiline_passes(path, report, store):
                 continue
             _psr_seen.add(_host)
             # Skip cases where the "hostname" looks placeholder-ish or
-            # is a common non-host token seen in tutorials.
+            # is a common non-host token seen in tutorials. iter-304
+            # audit-fix: also skip loopback IPs (127.*) and IPv6 ::1
+            # since these are never legitimate remote landings.
             if _host in ("localhost", "hostname", "computer", "target",
                          "server", "example", "server01"):
                 continue
-            _host_sh = _host.replace("'", "'\\''")
+            if _host.startswith("127.") or _host == "::1":
+                continue
             report.add("HIGH", "RECON", path, _ln(_rm),
                        f"PSRemoting session landed on {_host} - "
                        f"interactive WinRM/PowerShell foothold",
@@ -8660,19 +8663,27 @@ def _multiline_passes(path, report, store):
     _PV_LOGGEDON_HEADER = re.compile(
         r'(?im)^UserName\s+UserDomain\s+LogonServer\s+ComputerName'
         r'\s*$')
+    # iter-304 audit-fix: use [ \t]+ (not \s+) for column separators so
+    # a run of 4+ single-word lines cannot masquerade as a 4-column row
+    # via cross-line whitespace matching.
     _PV_LOGGEDON_ROW = re.compile(
-        r'(?im)^([\w.\-$]{1,60})\s+([\w.\-]{1,60})\s+'
-        r'([\w.\-]{1,60})\s+([\w.\-]{1,60})\s*$')
+        r'(?im)^([\w.\-$]{1,60})[ \t]+([\w.\-]{1,60})[ \t]+'
+        r'([\w.\-]{1,60})[ \t]+([\w.\-]{1,60})[ \t]*$')
     _PSLOGGEDON_HEADER = re.compile(
         r'(?im)^Users\s+logged\s+on\s+locally\s*:?\s*$')
     _PSLOGGEDON_ROW = re.compile(
-        r'(?im)^\s+\d+/\d+/\d+\s+\d+:\d+:\d+\s+(?:AM|PM)?\s+'
-        r'([\w.\-]{1,60})\\([\w.\-$]{1,60})\s*$')
+        r'(?im)^[ \t]+\d+/\d+/\d+[ \t]+\d+:\d+:\d+[ \t]*(?:AM|PM)?'
+        r'[ \t]+([\w.\-]{1,60})\\([\w.\-$]{1,60})[ \t]*$')
     if not filters.is_doc_file(path):
         _loggedon_seen = set()
         _pv_hdr = _PV_LOGGEDON_HEADER.search(text[:65536])
         if _pv_hdr:
             _after_pv = text[_pv_hdr.end():_pv_hdr.end() + 8192]
+            # iter-304 audit-fix: anchor rows to their own line (not the
+            # header) and bail past ~40-row window to prevent bleed into
+            # a sibling 4-column table (Get-NetSession, net view, etc)
+            # that would otherwise be interpreted as fake sessions.
+            _hdr_line = _ln(_pv_hdr)
             for _row in _PV_LOGGEDON_ROW.finditer(_after_pv):
                 _user = _row.group(1).strip()
                 _dom = _row.group(2).strip()
@@ -8681,12 +8692,19 @@ def _multiline_passes(path, report, store):
                 if _user.startswith("-") or _user in (
                         "UserName", "usersessionname"):
                     continue
+                _row_abs = _pv_hdr.end() + _row.start()
+                _row_line = text[:_row_abs].count("\n") + 1
+                # bleed guard: reasonable Get-NetLoggedOn tables are <40
+                # rows; past 40 lines from header we've likely walked
+                # into a neighboring table.
+                if _row_line - _hdr_line > 40:
+                    break
                 _sig = (_user.lower(), _comp.lower())
                 if _sig in _loggedon_seen:
                     continue
                 _loggedon_seen.add(_sig)
                 _user_sh = _user.replace("'", "'\\''")
-                report.add("MEDIUM", "RECON", path, _ln(_pv_hdr),
+                report.add("MEDIUM", "RECON", path, _row_line,
                            f"Logged-on session: {_dom}\\{_user} on "
                            f"{_comp} - mimikatz target if we own "
                            f"{_comp}",
@@ -8700,7 +8718,7 @@ def _multiline_passes(path, report, store):
                     store.add(Evidence(kind="logged_on_session",
                                        user=_user, host=_comp,
                                        domain=_dom,
-                                       source=path, line=_ln(_pv_hdr),
+                                       source=path, line=_row_line,
                                        meta={"source": "get-netloggedon"}))
         _psl_hdr = _PSLOGGEDON_HEADER.search(text[:65536])
         if _psl_hdr:
@@ -8722,8 +8740,10 @@ def _multiline_passes(path, report, store):
                 if _sig in _loggedon_seen:
                     continue
                 _loggedon_seen.add(_sig)
+                _row_abs = _psl_hdr.end() + _row.start()
+                _row_line = text[:_row_abs].count("\n") + 1
                 _user_sh = _user.replace("'", "'\\''")
-                report.add("MEDIUM", "RECON", path, _ln(_psl_hdr),
+                report.add("MEDIUM", "RECON", path, _row_line,
                            f"Logged-on locally: {_dom}\\{_user} "
                            f"(PsLoggedon) - mimikatz target on THIS "
                            f"host",
@@ -8735,8 +8755,44 @@ def _multiline_passes(path, report, store):
                 if store is not None:
                     store.add(Evidence(kind="logged_on_session",
                                        user=_user, domain=_dom,
-                                       source=path, line=_ln(_psl_hdr),
+                                       source=path, line=_row_line,
                                        meta={"source": "psloggedon"}))
+        # iter-304 audit-fix: PsLoggedon "via resource shares" section
+        # was previously used only as a stop boundary. Real captures
+        # from HTB/OSCP+ retired labs show DA sessions frequently only
+        # in this block (SMB session via IPC$). Missing them =
+        # missing the lateral pivot target.
+        _psl_res = re.search(
+            r'(?im)^Users\s+logged\s+on\s+via\s+resource\s+shares'
+            r'\s*:?\s*$', text[:65536])
+        if _psl_res:
+            _after_res = text[_psl_res.end():_psl_res.end() + 4096]
+            for _row in _PSLOGGEDON_ROW.finditer(_after_res[:2048]):
+                _dom = _row.group(1).strip()
+                _user = _row.group(2).strip()
+                _sig = (_user.lower(), "<via-share>")
+                if _sig in _loggedon_seen:
+                    continue
+                _loggedon_seen.add(_sig)
+                _row_abs = _psl_res.end() + _row.start()
+                _row_line = text[:_row_abs].count("\n") + 1
+                _user_sh = _user.replace("'", "'\\''")
+                report.add("MEDIUM", "RECON", path, _row_line,
+                           f"Logged-on via share: {_dom}\\{_user} "
+                           f"(PsLoggedon resource-share) - active SMB "
+                           f"session from remote host",
+                           hint=(f"'{_user_sh}' has an active SMB "
+                                 f"session against THIS host - if we "
+                                 f"land SYSTEM: mimikatz "
+                                 f"sekurlsa::logonpasswords captures "
+                                 f"their creds via cached auth  |  "
+                                 f"trace source host with `net "
+                                 f"session` for the client IP"))
+                if store is not None:
+                    store.add(Evidence(kind="logged_on_session",
+                                       user=_user, domain=_dom,
+                                       source=path, line=_row_line,
+                                       meta={"source": "psloggedon-share"}))
 
     # iter-303: msfvenom payload generation captured. Critical for
     # OSCP+ exam compliance tracking - msfvenom counts toward the
@@ -8771,9 +8827,16 @@ def _multiline_passes(path, report, store):
             _fmt = _mv.group(4)
             _outfile = _mv.group(5) or "<stdout>"
             _sig = (_payload, _lhost, _lport, _fmt)
-            if _sig in _msf_seen:
-                continue
-            _msf_seen.add(_sig)
+            # iter-304 audit-fix: only dedupe when both LHOST and LPORT
+            # are explicit. Two invocations that both omit them share
+            # the same (payload,"<?>","<?>",fmt) tuple, so the quota
+            # tracker would silently under-report Metasploit usage.
+            # Conservative: assume ambiguous cases are distinct so
+            # OSCP+ quota flags the operator.
+            if _lhost != "<?>" and _lport != "<?>":
+                if _sig in _msf_seen:
+                    continue
+                _msf_seen.add(_sig)
             _msf_count += 1
             # OSCP+ exam rule: Metasploit (including msfvenom) is limited
             # to ONE target across the entire exam. Elevate when count >1.
@@ -8791,6 +8854,8 @@ def _multiline_passes(path, report, store):
                              f"non-msf alternatives (revshells.com, "
                              f"manual asm shellcode, LOLBAS)"))
             if store is not None:
+                # iter-304 audit-fix: cast count_in_file to str for
+                # meta value-type consistency with sibling detectors.
                 store.add(Evidence(kind="msfvenom_payload",
                                    source=path, line=_ln(_mv),
                                    meta={"payload": _payload,
@@ -8798,7 +8863,7 @@ def _multiline_passes(path, report, store):
                                          "lport": _lport,
                                          "format": _fmt,
                                          "outfile": _outfile,
-                                         "count_in_file": _msf_count}))
+                                         "count_in_file": str(_msf_count)}))
 
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
