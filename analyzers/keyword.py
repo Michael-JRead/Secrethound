@@ -7422,6 +7422,82 @@ def _multiline_passes(path, report, store):
                                    line=_ln(_im),
                                    meta={"path": _ifm_path}))
 
+    # iter-270: `reg save HKLM\<hive> <path>` captured command. This is
+    # the classic SYSTEM-shell / SeBackupPrivilege post-exploit dump path
+    # for local hive extraction. Three hives are useful:
+    #   SAM       - local NTLM hashes (needs SYSTEM bootkey for decrypt)
+    #   SYSTEM    - the bootkey (also machine account, LSA policy)
+    #   SECURITY  - LSA secrets (DPAPI_SYSTEM, cached domain creds,
+    #               service account plaintext via _SC_ blocks)
+    # When all three are dumped, offline impacket-secretsdump LOCAL
+    # yields the same output as the live -ntds LOCAL path from iter-268.
+    # Fires per unique (hive, output-path) so the same command echoed
+    # in bash history + PowerShell transcript emits once. Doc-file gated.
+    _REG_SAVE = re.compile(
+        r'(?im)\b(?:reg(?:\.exe)?\s+save|Save-Registry)\s+'
+        r'HK(?:LM|EY_LOCAL_MACHINE)\\'
+        r'(SAM|SYSTEM|SECURITY|SOFTWARE)\b\s+'
+        r'([\'"]?[^\r\n\'"<>|]{2,240}?)[\'"]?\s*(?:/y\s*)?$')
+    if not filters.is_doc_file(path):
+        _reg_save_seen = set()
+        _reg_save_hives = set()
+        for _rm in _REG_SAVE.finditer(text):
+            _hive = _rm.group(1).upper()
+            _outp = _rm.group(2).strip()
+            _sig = (_hive, _outp)
+            if _sig in _reg_save_seen:
+                continue
+            _reg_save_seen.add(_sig)
+            _reg_save_hives.add(_hive)
+            _outp_sh = _outp.replace("'", "'\\''")
+            _hive_hints = {
+                "SAM": ("local NTLM hashes offline (needs SYSTEM "
+                         "bootkey together): impacket-secretsdump "
+                         f"-sam '{_outp_sh}' -system <SYSTEM.hive> "
+                         "LOCAL  |  PtH the Administrator NT for "
+                         "sideways / other-box reuse"),
+                "SYSTEM": ("bootkey needed to decrypt SAM/SECURITY "
+                            "offline. Pair with SAM: impacket-"
+                            f"secretsdump -sam <SAM.hive> -system "
+                            f"'{_outp_sh}' LOCAL  |  or SECURITY: -"
+                            f"security <SEC.hive> -system '{_outp_sh}"
+                            "' LOCAL"),
+                "SECURITY": ("LSA secrets: impacket-secretsdump "
+                              f"-security '{_outp_sh}' -system "
+                              "<SYSTEM.hive> LOCAL  |  yields "
+                              "DPAPI_SYSTEM master/user keys + $_SC_ "
+                              "service cleartext + $MACHINE.ACC + "
+                              "cached domain logon (DCC2) hashes"),
+                "SOFTWARE": ("SOFTWARE hive intel: WinLogon defaults, "
+                              "AutoLogon creds, installed products, "
+                              "product keys. Grep offline for "
+                              "DefaultPassword / AutoAdminLogon / "
+                              "product IDs. Less immediate loot than "
+                              "SAM/SECURITY."),
+            }
+            _sev = "HIGH" if _hive in ("SAM", "SECURITY") else "MEDIUM"
+            report.add(_sev, "INTERESTING FILES", path, _ln(_rm),
+                       f"reg save HKLM\\{_hive} -> {_outp} - hive-file "
+                       f"capture staged",
+                       hint=_hive_hints.get(_hive, "hive captured"))
+            if store is not None:
+                store.add(Evidence(kind="hive_file", source=path,
+                                   line=_ln(_rm),
+                                   meta={"hive": _hive, "path": _outp}))
+        # If SAM + SYSTEM + SECURITY were ALL captured, emit a CRITICAL
+        # roll-up finding: operator has full local secretsdump material.
+        if {"SAM", "SYSTEM", "SECURITY"}.issubset(_reg_save_hives):
+            report.add("CRITICAL", "INTERESTING FILES", path, None,
+                       "Full local hive triad captured (SAM + SYSTEM + "
+                       "SECURITY) - offline secretsdump ready",
+                       hint=("pull all three hive files, then: "
+                             "impacket-secretsdump -sam SAM -system "
+                             "SYSTEM -security SECURITY LOCAL  |  "
+                             "yields local NTLM + LSA secrets + "
+                             "DPAPI_SYSTEM keys + $MACHINE.ACC + "
+                             "cached domain creds (DCC2 hash for "
+                             "hashcat -m 2100) in ONE command"))
+
     # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
     # (impacket secretsdump.py LSASecrets output)
     _LSA_SC = re.compile(
