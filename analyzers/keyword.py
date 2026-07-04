@@ -8106,6 +8106,103 @@ def _multiline_passes(path, report, store):
                                    meta={"path": _pth,
                                          "source": "add-mppreference"}))
 
+    # iter-294: local Administrators group membership captured. Two
+    # shapes both fire per-member; skip the group header + trailing
+    # `The command completed successfully.` line + separator dashes.
+    #
+    # Shape A: `net localgroup Administrators` columnar output:
+    #   Members
+    #   -----------------------------
+    #   Administrator
+    #   CORP\Domain Admins
+    #   CORP\svc_backup
+    #   LocalAdmin
+    #   The command completed successfully.
+    #
+    # Shape B: `Get-LocalGroupMember -Group Administrators`:
+    #   ObjectClass Name              PrincipalSource
+    #   ----------- ----              ---------------
+    #   User        WEB01\Administrator  Local
+    #   Group       CORP\Domain Admins   ActiveDirectory
+    _LOCALGROUP_HEADER = re.compile(
+        r'(?im)^\s*(?:Alias\s+name\s+Administrators|'
+        r'Members)\s*$')
+    _PSGROUP_HEADER = re.compile(
+        r'(?im)^ObjectClass\s+Name\s+PrincipalSource\s*$')
+    _MEMBER_LINE_NET = re.compile(
+        # match member lines: bare name OR DOMAIN\name (with or without
+        # spaces). Reject the dashes-only separator, blank lines, and
+        # "The command completed successfully."
+        r'(?im)^([A-Za-z][\w\- ]{0,60}(?:\\[\w\-. ]{1,60})?)\s*$')
+    _MEMBER_LINE_PS = re.compile(
+        r'(?im)^(?:User|Group)\s+([\w\-.]{1,60}(?:\\[\w\-. ]{1,60})?)'
+        r'\s+(?:Local|ActiveDirectory|MicrosoftAccount|AzureAD)\s*$')
+    if not filters.is_doc_file(path):
+        _admin_seen = set()
+        _lg_m = _LOCALGROUP_HEADER.search(text[:65536])
+        if _lg_m:
+            # Consume lines after the Members header until we hit the
+            # `The command completed successfully.` sentinel or 20
+            # lines pass.
+            _after = text[_lg_m.end():_lg_m.end() + 4000]
+            _stop = re.search(
+                r'(?im)^(?:The\s+command\s+completed|-{5,})\s*',
+                _after)
+            _scan_end = _stop.end() if _stop and _stop.group().strip(
+                ).startswith("-") else _stop.start() if _stop else 4000
+            _members_text = _after[_scan_end:_scan_end + 2000]
+            for _mm in _MEMBER_LINE_NET.finditer(_members_text):
+                _member = _mm.group(1).strip()
+                if not _member or _member.startswith("-"):
+                    continue
+                # Skip generic well-known accounts
+                if _member.lower() in (
+                        "administrator", "administrators",
+                        "the command completed successfully.",
+                        "members", "alias name"):
+                    continue
+                if _member.lower() in _admin_seen:
+                    continue
+                _admin_seen.add(_member.lower())
+                _member_sh = _member.replace("'", "'\\''")
+                report.add("MEDIUM", "RECON", path, _ln(_lg_m),
+                           f"Local admin (net localgroup): {_member}"
+                           f" - lateral-movement target",
+                           hint=(f"if we hold {_member_sh}'s cred, "
+                                 f"psexec / evil-winrm here lands as "
+                                 f"local admin  |  match against "
+                                 f"captured creds: any user in this "
+                                 f"list = admin on THIS host"))
+                if store is not None:
+                    store.add(Evidence(kind="local_admin",
+                                       user=_member,
+                                       source=path, line=_ln(_lg_m),
+                                       meta={"format": "net_localgroup"}))
+        _ps_m = _PSGROUP_HEADER.search(text[:65536])
+        if _ps_m:
+            _after_ps = text[_ps_m.end():_ps_m.end() + 4000]
+            for _pmm in _MEMBER_LINE_PS.finditer(_after_ps):
+                _member = _pmm.group(1).strip()
+                if _member.lower() in _admin_seen:
+                    continue
+                if _member.lower().endswith("\\administrator"):
+                    continue
+                _admin_seen.add(_member.lower())
+                _member_sh = _member.replace("'", "'\\''")
+                report.add("MEDIUM", "RECON", path, _ln(_ps_m),
+                           f"Local admin (Get-LocalGroupMember): "
+                           f"{_member} - lateral-movement target",
+                           hint=(f"if we hold {_member_sh}'s cred, "
+                                 f"lateral hop here lands admin  |  "
+                                 f"AD-sourced members (Domain Admins,"
+                                 f" domain groups) are recursive - "
+                                 f"check group membership expansion"))
+                if store is not None:
+                    store.add(Evidence(kind="local_admin",
+                                       user=_member,
+                                       source=path, line=_ln(_ps_m),
+                                       meta={"format": "get_localgroupmember"}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
