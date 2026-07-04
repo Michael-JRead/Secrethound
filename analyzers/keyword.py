@@ -7498,6 +7498,66 @@ def _multiline_passes(path, report, store):
                              "cached domain creds (DCC2 hash for "
                              "hashcat -m 2100) in ONE command"))
 
+    # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
+    # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
+    # host. credline.py captures the cred pair itself but doesn't
+    # surface the admin-binding intel; this emits a separate HIGH RECON
+    # finding + Evidence(kind='admin') so R-LATERAL rules see the pair
+    # and the operator's report shows a "PSEXEC READY" chip.
+    _NXC_PWN3D = re.compile(
+        r'(?im)^(SMB|WINRM|SSH|LDAPS?|WMI|MSSQL|RDP|FTP|VNC)\s+'
+        r'(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,5})\s+(\S+)\s+'
+        r'\[\+\]\s+([\w.\-]+)\\(\S+?)(?::(\S+?))?\s+\(Pwn3d!\)\s*$')
+    if not filters.is_doc_file(path):
+        _pwn_seen = set()
+        for _pwn in _NXC_PWN3D.finditer(text):
+            _proto = _pwn.group(1).upper()
+            _ip = _pwn.group(2)
+            _hostn = _pwn.group(4)
+            _dom = _pwn.group(5)
+            _user = _pwn.group(6)
+            _cred = _pwn.group(7) or ""
+            _sig = (_ip, _user.lower())
+            if _sig in _pwn_seen:
+                continue
+            _pwn_seen.add(_sig)
+            _user_sh = _user.replace("'", "'\\''")
+            _dom_sh = _dom.replace("'", "'\\''")
+            _cred_sh = _cred.replace("'", "'\\''")
+            # NT-hash-shaped cred triggers PtH hint; otherwise plaintext.
+            _is_hash = bool(re.fullmatch(r'[a-fA-F0-9]{32}(?::[a-fA-F0-9]{32})?', _cred))
+            if _proto == "WINRM":
+                _cmd = (f"evil-winrm -i {_ip} -u '{_user_sh}' "
+                        f"{'-H' if _is_hash else '-p'} "
+                        f"'{_cred_sh}'")
+            elif _proto == "SMB":
+                _cmd = (f"impacket-psexec '{_dom_sh}/{_user_sh}"
+                        f"{':' + _cred_sh if not _is_hash else ''}'"
+                        f"@{_ip} "
+                        f"{'-hashes :' + _cred_sh if _is_hash else ''}")
+            elif _proto == "MSSQL":
+                _cmd = (f"impacket-mssqlclient '{_dom_sh}/{_user_sh}"
+                        f":{_cred_sh}'@{_ip}"
+                        f"{' -hashes :' + _cred_sh if _is_hash else ''}")
+            else:
+                _cmd = (f"try {_proto.lower()} lateral movement with "
+                        f"'{_dom_sh}/{_user_sh}'")
+            report.add("HIGH", "RECON", path, _ln(_pwn),
+                       f"LOCAL ADMIN: {_dom}\\{_user} on {_ip} "
+                       f"({_hostn}) via {_proto} - PSEXEC READY",
+                       hint=(f"{_cmd}  |  or reuse cred on other hosts:"
+                             f" nxc smb <cidr> -u '{_user_sh}' "
+                             f"{'-H' if _is_hash else '-p'} "
+                             f"'{_cred_sh}' --continue-on-success"))
+            if store is not None:
+                store.add(Evidence(kind="admin", user=_user, host=_ip,
+                                   domain=_dom, source=path,
+                                   line=_ln(_pwn),
+                                   meta={"hostname": _hostn,
+                                         "protocol": _proto,
+                                         "cred_kind": "hash"
+                                         if _is_hash else "plaintext"}))
+
     # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
     # (impacket secretsdump.py LSASecrets output)
     _LSA_SC = re.compile(
