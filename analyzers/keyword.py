@@ -2215,20 +2215,30 @@ _REG_AUTORUN_HIVE = re.compile(
     r'CurrentVersion\\Run(?:Once|OnceEx)?'
 )
 _REG_AUTORUN_ENTRY = re.compile(
+    # iter-259 audit fix: accept any drive letter (`C:\` was
+    # hardcoded, missing `D:\App\svc.exe` on multi-drive boxes),
+    # AND accept `%SystemRoot%\` / `%ProgramFiles%\` / `%APPDATA%\`
+    # env-var expansions (standard REG_EXPAND_SZ form that Windows
+    # substitutes at read time).
     r'(?im)^\s+(\S+(?:\s\S+)*?)\s+REG_(?:SZ|EXPAND_SZ)\s+'
-    r'(?:")?(C:\\[^"\r\n]{5,200}\.(?:exe|bat|cmd|ps1|vbs))'
+    r'(?:")?((?:[A-Z]:\\|%\w{2,30}%\\)'
+    r'[^"\r\n]{5,200}\.(?:exe|bat|cmd|ps1|vbs))'
 )
 # Signal B: captured `schtasks /query /fo LIST /v` output block.
 # Fields to extract: TaskName, Run As User, Task To Run.
 # If Run-As-User is SYSTEM/Administrators AND Task-To-Run has a
 # user-writable path, we have privesc.
 _SCHTASKS_QUERY_BLOCK = re.compile(
-    r'(?is)Folder:\s*[\\\w\s\-]{1,60}[\r\n]+'
-    r'(?:[^\r\n]*[\r\n]+){0,3}?'
-    r'(?:HostName|TaskName)\s*:\s*[\w\-\\/. ]{1,120}[\r\n]+'
-    r'(?:[^\r\n]*[\r\n]+){0,15}?'
+    # iter-259 audit fix: `Folder:` header appears once per FOLDER
+    # in `schtasks /query /fo LIST /v` output, not once per task.
+    # Multiple tasks share one Folder: header. Prior regex required
+    # Folder: for every task so only the FIRST task per folder
+    # matched. Removed the Folder: prefix requirement; anchor on
+    # HostName/TaskName instead (unique per task).
+    r'(?is)(?:HostName|TaskName)\s*:\s*[\w\-\\/. ]{1,120}[\r\n]+'
+    r'(?:(?!TaskName\s*:)[^\r\n]*[\r\n]+){0,15}?'
     r'Task\s+To\s+Run\s*:\s*([^\r\n]{5,200})[\r\n]+'
-    r'(?:[^\r\n]*[\r\n]+){0,5}?'
+    r'(?:(?!TaskName\s*:)[^\r\n]*[\r\n]+){0,5}?'
     r'Run\s+As\s+User\s*:\s*([\w\\/\.\- ]{1,60})'
 )
 
@@ -2246,7 +2256,13 @@ _UNQUOTED_SERVICE = re.compile(
 )
 # Signal B: `Get-ServiceUnquoted` PowerUp result
 _POWERUP_UNQUOTED = re.compile(
-    r'(?im)ServiceName\s*:\s*(\S+)[\s\S]{0,200}?ModifiablePath\s*:\s*'
+    # iter-259 audit fix: intermediate span can't cross another
+    # `ServiceName:` line - prior regex bridged two PowerUp entries
+    # where the first lacked ModifiablePath and the second had it,
+    # attributing the second's path to the first's name.
+    r'(?im)ServiceName\s*:\s*(\S+)'
+    r'(?:(?!ServiceName\s*:)[\s\S]){0,200}?'
+    r'ModifiablePath\s*:\s*'
     r'(C:\\[^\r\n]{5,200})'
 )
 # Signal C: winPEAS "Modifiable Services" section - captured
@@ -2290,26 +2306,32 @@ _DESER_PHP = re.compile(
 #   \x80\x04\x95        (protocol 4 header)
 #   __reduce__          (magic method for RCE gadgets)
 _DESER_PYTHON = re.compile(
+    # iter-259 audit fix: added `def __reduce__` form (the canonical
+    # RCE gadget shape). Prior regex only handled the assignment
+    # form `__reduce__ = lambda: ...` which is rare - real gadgets
+    # use the `def __reduce__(self): return (...)` method form
+    # inside a class.
     r'(?:'
     r'\bc__(?:builtin__|main__)\n|'
     r'\bcposix\nsystem\b|'
     r'\bcos\nsystem\b|'
     r'\\x80\\x04\\x95|'
-    # __reduce__ appearing in captured payload/code
     r'\b__reduce__\s*=\s*|'
+    r'\bdef\s+__reduce__\s*\(\s*self\s*\)\s*:|'
     r'\bpickle\.loads\s*\(\s*(?:request|input|params|data)'
     r')'
 )
 # .NET BinaryFormatter/LosFormatter/ObjectStateFormatter markers.
 _DESER_DOTNET = re.compile(
+    # iter-259 audit fix: dropped bare identifier matches
+    # (`BinaryFormatter`, `LosFormatter`, `ObjectStateFormatter`,
+    # `System.Runtime.Serialization.Formatters`) - these appear in
+    # legit C# `using` imports, class names like
+    # `BinaryFormatterHelper`, and MSDN documentation. Kept only
+    # the two dispositive base64-payload shapes: the BinaryFormatter
+    # magic prefix and the __VIEWSTATE parameter with real base64.
     r'(?:'
-    # AAEAAAD/////= = binary BinaryFormatter base64 prefix
     r'\bAAEAAAD/////[A-Za-z0-9+/=]{20,}|'
-    r'\bLosFormatter\b|'
-    r'\bObjectStateFormatter\b|'
-    r'\bBinaryFormatter\b|'
-    r'System\.Runtime\.Serialization\.Formatters|'
-    # ViewState is ObjectStateFormatter - look for base64 pattern
     r'__VIEWSTATE=[A-Za-z0-9+/=%]{40,}'
     r')'
 )
@@ -2327,10 +2349,14 @@ _SSRF_AWS_META = re.compile(
     r'(?:meta-data|user-data|dynamic|api)/'
 )
 _SSRF_AWS_META_KEY = re.compile(
+    # iter-259 audit fix: matches only when the key has a VALUE-shape
+    # colon-suffix (real IMDS response is `ami-id: ami-XXXX`, not
+    # bare word). Dropped `hostname`/`local-hostname`/`public-
+    # hostname`/`reservation-id` which are extremely common English
+    # words in dirbuster wordlists, doc comments, and log files.
     r'(?i)\b(ami-id|instance-id|instance-type|instance-identity/'
     r'document|iam/security-credentials|security-credentials/'
-    r'[\w\-]{2,80}|hostname|local-hostname|public-hostname|'
-    r'availability-zone|reservation-id)\b'
+    r'[\w\-]{2,80}|availability-zone)\s*:'
 )
 # GCP metadata service
 _SSRF_GCP_META = re.compile(
@@ -2339,13 +2365,12 @@ _SSRF_GCP_META = re.compile(
 )
 # Azure Instance Metadata Service
 _SSRF_AZURE_META = re.compile(
-    # iter-254 audit fix: prior regex required `?api-version=`
-    # immediately after `identity`, so the canonical managed-
-    # identity token URL `.../metadata/identity/oauth2/token?
-    # api-version=...` never matched. Allow intervening path
-    # segments (up to 60 chars) before the query string.
+    # iter-254 audit fix: allowed intervening path segments.
+    # iter-259 audit fix: also accept URL-encoded `%3F` for `?`
+    # and `%3D` for `=` (Burp/HAR capture forms).
     r'(?i)(?:https?://)?169\.254\.169\.254/metadata/'
-    r'(?:instance|identity)(?:/[\w.\-/]{0,60})?\?api-version='
+    r'(?:instance|identity)(?:/[\w.\-/]{0,60})?'
+    r'(?:\?|%3F)api-version(?:=|%3D)'
 )
 # Oracle Cloud + Alibaba + DigitalOcean metadata endpoints
 _SSRF_OTHER_META = re.compile(
