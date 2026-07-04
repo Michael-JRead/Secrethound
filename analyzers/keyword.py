@@ -8141,16 +8141,27 @@ def _multiline_passes(path, report, store):
         _admin_seen = set()
         _lg_m = _LOCALGROUP_HEADER.search(text[:65536])
         if _lg_m:
-            # Consume lines after the Members header until we hit the
-            # `The command completed successfully.` sentinel or 20
-            # lines pass.
+            # iter-299 audit fix: refactored scan-window logic.
+            # 1. Find the `Members` header (may be same as _lg_m or a
+            #    later line if _lg_m matched `Alias name Administrators`).
+            # 2. Skip past the Members header + any dashes separator.
+            # 3. Scan up to (but not including) the `The command completed`
+            #    sentinel or 2 KB, whichever comes first.
             _after = text[_lg_m.end():_lg_m.end() + 4000]
+            # Locate the Members-anchor line (may already be _lg_m's own
+            # match if it was the bare-Members alternative).
+            _mems_hdr = re.search(r'(?im)^\s*Members\s*$', _after)
+            _scan_start = _mems_hdr.end() if _mems_hdr else 0
+            # Skip past optional dashes separator after Members header.
+            _dash = re.match(r'\s*[\r\n]+(?:-{5,}\s*[\r\n]+)?',
+                             _after[_scan_start:])
+            if _dash:
+                _scan_start += _dash.end()
+            _remainder = _after[_scan_start:]
             _stop = re.search(
-                r'(?im)^(?:The\s+command\s+completed|-{5,})\s*',
-                _after)
-            _scan_end = _stop.end() if _stop and _stop.group().strip(
-                ).startswith("-") else _stop.start() if _stop else 4000
-            _members_text = _after[_scan_end:_scan_end + 2000]
+                r'(?im)^\s*The\s+command\s+completed', _remainder)
+            _members_text = (_remainder[:_stop.start()] if _stop
+                             else _remainder[:2000])
             for _mm in _MEMBER_LINE_NET.finditer(_members_text):
                 _member = _mm.group(1).strip()
                 if not _member or _member.startswith("-"):
@@ -8220,16 +8231,29 @@ def _multiline_passes(path, report, store):
     #     TargetHost   : SERVER.CORP.LOCAL
     #     UserName     : svc_backup
     #     plaintext    : Winter2024!
+    # iter-299 audit fix: add `m` flag so `^` matches at line-starts
+    # mid-text AND allow leading whitespace before URL/TargetName since
+    # both tools indent the block fields with 4 spaces. Previous
+    # non-multiline lookahead was toothless (checked only string-start);
+    # even with `m`, `^URL:` failed because indented lines start with
+    # spaces so `^URL` never matched. Fix: `^\s*URL\s*:` / `^\s*TargetName`.
+    # iter-299 audit fix (second pass): apply the negative-lookahead
+    # guard on ALL intermediate spans, not just the last one. Without
+    # it on the URL-to-Login span, the regex engine backtracks past
+    # a Login line without a matching Password Dec and mispairs with
+    # the NEXT block's Login. Same lesson applies to SharpDPAPI.
     _SHARPCHROME = re.compile(
-        r'(?is)URL\s*:\s*(https?://[^\r\n\s]{4,240})[\s\S]{0,400}?'
+        r'(?ism)URL\s*:\s*(https?://[^\r\n\s]{4,240})'
+        r'(?:(?!^\s*URL\s*:)[\s\S]){0,400}?'
         r'Login\s*:\s*([^\r\n]{1,100}?)\s*[\r\n]+'
-        r'(?:(?!^URL\s*:)[\s\S]){0,300}?'
+        r'(?:(?!^\s*URL\s*:)[\s\S]){0,300}?'
         r'Password\s+Dec\s*:\s*([^\r\n]{3,200})')
     _SHARPDPAPI = re.compile(
-        r'(?is)TargetName\s*:\s*(?:Domain:target=)?([^\r\n]{3,120}?)\s*'
-        r'[\r\n]+(?:(?!^TargetName\s*:)[\s\S]){0,400}?'
+        r'(?ism)TargetName\s*:\s*(?:Domain:target=)?([^\r\n]{3,120}?)'
+        r'\s*[\r\n]+'
+        r'(?:(?!^\s*TargetName\s*:)[\s\S]){0,400}?'
         r'UserName\s*:\s*([^\r\n]{1,80}?)\s*[\r\n]+'
-        r'(?:(?!^TargetName\s*:)[\s\S]){0,300}?'
+        r'(?:(?!^\s*TargetName\s*:)[\s\S]){0,300}?'
         r'plaintext\s*:\s*([^\r\n]{3,200})')
     if not filters.is_doc_file(path):
         _sc_seen = set()
@@ -8248,15 +8272,20 @@ def _multiline_passes(path, report, store):
             _sc_seen.add(_sig)
             _u_sh = _user.replace("'", "'\\''")
             _pw_sh = _pw.replace("'", "'\\''")
+            # iter-299 audit fix: shell-escape _url too - a URL with an
+            # embedded `'` (rare but possible via query-string quirks)
+            # broke the `xdg-open '{_url}'` splice.
+            _url_sh = _url.replace("'", "'\\''")
             _url_short = _url[:60]
             report.add("CRITICAL", "CRED PAIRS", path, _ln(_cm),
                        f"SharpChrome browser cred: {_user} @ "
                        f"{_url_short} : {_pw}",
-                       hint=(f"try the URL for logon: xdg-open '{_url}'"
-                             f" then submit user/pass  |  if URL is an"
-                             f" internal AD-integrated portal, the "
-                             f"cred may spray same across corp SSO: "
-                             f"nxc smb <dc> -u '{_u_sh}' -p '{_pw_sh}'"))
+                       hint=(f"try the URL for logon: xdg-open "
+                             f"'{_url_sh}' then submit user/pass  |  "
+                             f"if URL is an internal AD-integrated "
+                             f"portal, the cred may spray same across"
+                             f" corp SSO: nxc smb <dc> -u '{_u_sh}' "
+                             f"-p '{_pw_sh}'"))
             if store is not None:
                 store.add(Evidence(kind="plaintext", user=_user,
                                    plaintext=_pw,
@@ -8392,11 +8421,15 @@ def _multiline_passes(path, report, store):
         # Password reset - the target user may not be captured on the
         # same line; find the closest `bloodyAD ... set password X`
         # invocation within the 500 preceding chars for attribution.
+        # iter-299 audit fix: use findall + last-match instead of
+        # search's first-match. Chained bloodyAD invocations in the
+        # same terminal buffer would otherwise attribute every reset
+        # to the earliest `set password X` in the 500-char window.
         for _pm in _BAD_PW_RESET.finditer(text[:65536]):
             _preceding = text[max(0, _pm.start() - 500):_pm.start()]
-            _u_m = re.search(
+            _u_matches = re.findall(
                 r'(?i)set\s+password\s+([\w.\-$]{1,60})', _preceding)
-            _tgt_user = _u_m.group(1) if _u_m else "<unknown>"
+            _tgt_user = _u_matches[-1] if _u_matches else "<unknown>"
             _tgt_sh = _tgt_user.replace("'", "'\\''")
             report.add("CRITICAL", "RECON", path, _ln(_pm),
                        f"bloodyAD password reset landed: {_tgt_user} "
@@ -8465,9 +8498,17 @@ def _multiline_passes(path, report, store):
                                    source=path, line=_ln(_dm),
                                    meta={"attack_type": "dacl_grant",
                                          "target_dn": _target_dn[:200]}))
-        _rbcd_m = _BAD_RBCD.search(text[:65536])
-        if _rbcd_m:
-            report.add("CRITICAL", "RECON", path, _ln(_rbcd_m),
+        # iter-299 audit fix: switch from .search() (first-match-only)
+        # to .finditer() so multiple RBCD writes against different
+        # victims in the same session emit distinct findings rather
+        # than silently coalescing into one.
+        _rbcd_seen = set()
+        for _rbcd_m in _BAD_RBCD.finditer(text[:65536]):
+            _rbcd_line = _ln(_rbcd_m)
+            if _rbcd_line in _rbcd_seen:
+                continue
+            _rbcd_seen.add(_rbcd_line)
+            report.add("CRITICAL", "RECON", path, _rbcd_line,
                        "RBCD write landed (bloodyAD/rbcd.py added "
                        "msDS-AllowedToActOnBehalfOfOtherIdentity)",
                        hint=("we control the SID in the RBCD "
@@ -8479,7 +8520,7 @@ def _multiline_passes(path, report, store):
                              " + impacket-psexec -k -no-pass"))
             if store is not None:
                 store.add(Evidence(kind="attack_landed",
-                                   source=path, line=_ln(_rbcd_m),
+                                   source=path, line=_rbcd_line,
                                    meta={"attack_type": "rbcd_write"}))
 
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
