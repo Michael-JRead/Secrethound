@@ -6992,6 +6992,47 @@ def _multiline_passes(path, report, store):
                                meta={"sha1": mk_key, "system": True,
                                      "userkey": uk_key}))
 
+    # iter-262: impacket-secretsdump `[*] $MACHINE.ACC` block includes a
+    # `plain_password_hex` line ~240-byte utf-16-le encoded machine-account
+    # cleartext password. Distinct from the LM:NT line (already covered by
+    # `$MACHINE.ACC NT hash` pattern in patterns.py) - the plaintext unlocks:
+    #   (a) computing your OWN AES256/AES128 Kerberos keys for the machine
+    #       account (silver-ticket forging that survives NT-hash rotation),
+    #   (b) DPAPI-SYSTEM masterkey decryption via impacket-dpapi -password,
+    #   (c) impacket-getST -impersonate <any-user> -spn CIFS/<host> DOM/HOST$
+    #       to hop as any principal to any service on that box.
+    _LSA_MACHINE_PLAIN = re.compile(
+        r'(?im)^\s*\[\*\]\s*\$MACHINE\.ACC\s*\r?\n'
+        r'(?:[^\r\n]*\r?\n){0,3}?'
+        r'\s*([A-Za-z0-9._\-]{1,60})\\([A-Za-z0-9._\-]{1,40}\$)\s*:\s*'
+        r'plain_password_hex\s*:\s*([0-9a-fA-F]{16,4096})\b')
+    for m in _LSA_MACHINE_PLAIN.finditer(text):
+        if filters.is_doc_file(path):
+            continue
+        _dom_mp = m.group(1).strip()
+        _host_mp = m.group(2).strip()
+        _hex_mp = m.group(3).strip().lower()
+        if filters.is_canonical_sample(_hex_mp):
+            continue
+        _hostacct_sh = f"{_dom_mp}/{_host_mp}".replace("'", "'\\''")
+        report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
+                   f"$MACHINE.ACC plaintext for {_dom_mp}\\{_host_mp}: "
+                   f"{_hex_mp[:32]}... (utf-16-le hex)",
+                   hint=(f"decode: python3 -c \"import sys; sys.stdout"
+                         f".buffer.write(bytes.fromhex('{_hex_mp[:64]}...'"
+                         f").decode('utf-16-le').encode())\"  |  silver "
+                         f"ticket any user any service: impacket-getST -"
+                         f"impersonate Administrator -spn CIFS/<host-fqdn>"
+                         f" '{_hostacct_sh}' -hashes :$MACHINE_ACC_NT  |"
+                         f"  DPAPI SYSTEM unlock: impacket-dpapi masterkey"
+                         f" -file <mk> -password <decoded>"))
+        if store is not None:
+            store.add(Evidence(kind="plaintext", user=_host_mp,
+                               plaintext=_hex_mp[:64], domain=_dom_mp,
+                               source=path, line=_ln(m),
+                               meta={"encoding": "utf-16-le-hex",
+                                     "machine_account": True}))
+
     # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
     # (impacket secretsdump.py LSASecrets output)
     _LSA_SC = re.compile(
