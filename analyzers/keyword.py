@@ -7997,9 +7997,16 @@ def _multiline_passes(path, report, store):
             _kcd_seen.add(_sig)
             # Elevate severity when any SPN points at a DC
             # (CIFS/dcname, ldap/dcname, host/dcname on DC hostname).
+            # iter-287 audit fix: prior regex `[\w.\-]*dc\d*` matched
+            # `dc` as a substring - false-elevated `CIFS/edccert...`,
+            # `HOST/prodcache...`, `CIFS/medcert01...` to CRITICAL.
+            # Fix: require the `dc` to sit at a segment boundary
+            # (non-word char before, non-word after possible digits).
             _dc_hint = ""
-            if re.search(r'(?i)\b(cifs|host|ldap|krbtgt)/[\w.\-]*dc\d*',
-                          _spns):
+            if re.search(
+                    r'(?i)\b(?:cifs|host|ldap|krbtgt)/'
+                    r'[\w.\-]*(?<![\w])dc\d*\b',
+                    _spns):
                 _sev = "CRITICAL"
                 _dc_hint = " (DC SPN in target list - DA path via S4U)"
             else:
@@ -8026,14 +8033,11 @@ def _multiline_passes(path, report, store):
         for _rm in _PV_RBCD.finditer(text):
             _tgt = _rm.group(1).strip()
             _val = _rm.group(2).strip()
-            # Skip when the attribute has no value ({} / empty string).
-            if not _val or _val in ("{}", "null", "System.Security."
-                                     "AccessControl.RawSecurityDescriptor"):
-                # Bare object-type header without a decoded SID is
-                # not useful; the operator would have to run
-                # PowerView's Get-DomainRBCD to expand it.
-                pass  # still flag; the presence of the attribute is
-                      # itself the finding
+            # iter-287 audit fix: removed a dead `if _val in (...)`
+            # branch whose body was `pass`. Presence of the attribute
+            # header is itself the finding regardless of whether the
+            # SID descriptor decoded to a friendly string - the
+            # operator uses `Get-DomainRBCD -Identity X` to expand.
             _sig = _tgt.lower()
             if _sig in _rbcd_seen:
                 continue
@@ -8151,10 +8155,12 @@ def _multiline_passes(path, report, store):
                                "large wordlists (rockyou-top-10k or"
                                " similar)")
             else:
-                try:
-                    _n = int(_lockout)
-                except ValueError:
-                    _n = 5
+                # iter-287 audit fix: removed unreachable
+                # try/except ValueError. The regex captures
+                # `(Never|\d+)`; the `Never` branch is handled
+                # above, so `_lockout` here is always an integer
+                # string and int() cannot fail.
+                _n = int(_lockout)
                 _safe_ct = max(1, _n - 1)
                 _sev = "MEDIUM"
                 _spray_hint = (f"safe spray count: {_safe_ct} "
@@ -8556,8 +8562,13 @@ def analyze(path, report, store=None):
                                          f"<target-cidr> -u '{_u_sh}' "
                                          f"-p '{_pw_sh}' --continue-on-"
                                          f"success  |  impacket-psexec "
-                                         f"'{_kb_dom}/{_u_sh}:{_pw_sh}'"
-                                         f"@<host>  |  same-pw spray: "
+                                         # iter-287 audit fix: extend the
+                                         # single-quote through @<host>
+                                         # so the whole arg is one shell
+                                         # token (impacket takes the
+                                         # entire `DOM/user:pw@target`).
+                                         f"'{_kb_dom}/{_u_sh}:{_pw_sh}"
+                                         f"@<host>'  |  same-pw spray: "
                                          f"nxc smb <dc> -u users.txt "
                                          f"-p '{_pw_sh}'"))
                         if store is not None:
