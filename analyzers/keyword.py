@@ -7655,6 +7655,96 @@ def _multiline_passes(path, report, store):
                                              "indicator":
                                                  _url_or_b64[:200]}))
 
+    # iter-276: Cross-domain trust enumeration output captured. Two
+    # tools OSCP+ operators run early against pwned AD:
+    #   - `nltest /domain_trusts` -> numbered list per trust:
+    #       0: CORP.LOCAL corp (NT 5) (Direct Outbound) (Forest Root)
+    #   - PowerView `Get-DomainTrust` -> multi-line block with
+    #       SourceName / TargetName / TrustDirection fields.
+    # Bidirectional/Outbound trusts unlock cross-domain kerberoasting
+    # (impacket-GetUserSPNs -target-domain) + WITHIN_FOREST SIDHistory
+    # abuse via ExtraSids in a golden ticket. Inbound-only trust is
+    # weaker (they trust us, we can't cross into them).
+    _NLTEST_TRUST = re.compile(
+        r'(?im)^\s*\d+\s*:\s+([\w.\-]{2,80})\s+[\w\-]{1,40}\s+'
+        r'\(NT\s*\d+\)[^\r\n]*?'
+        r'\((?P<dir>Direct\s+Outbound|Direct\s+Inbound|Bidirectional|'
+        r'Primary\s+Domain|Forest\s+Tree\s+Root|Native)\)')
+    _PV_TRUST = re.compile(
+        r'(?is)SourceName\s*:\s*([\w.\-]{2,80})\s*[\r\n]+'
+        r'(?:[^\r\n]*[\r\n]+){0,10}?'
+        r'TargetName\s*:\s*([\w.\-]{2,80})\s*[\r\n]+'
+        r'(?:[^\r\n]*[\r\n]+){0,15}?'
+        r'TrustDirection\s*:\s*(Bidirectional|Inbound|Outbound|Disabled)')
+    _PV_TRUST_BLEED = re.compile(r'(?i)^\s*SourceName\s*:', re.M)
+    if not filters.is_doc_file(path):
+        _trust_seen = set()
+        # nltest source is the current domain (unknown from this line
+        # alone); the captured column is the TARGET/related domain.
+        for _tm in _NLTEST_TRUST.finditer(text):
+            _target = _tm.group(1).strip()
+            _dir_raw = _tm.group("dir")
+            if _dir_raw in ("Primary Domain", "Forest Tree Root", "Native"):
+                # marker for our OWN domain, not a real cross-forest trust
+                continue
+            _dir = ("Bidirectional" if "Bidirectional" in _dir_raw
+                    else ("Outbound" if "Outbound" in _dir_raw
+                          else "Inbound"))
+            _sig = ("nltest", _target.lower(), _dir)
+            if _sig in _trust_seen:
+                continue
+            _trust_seen.add(_sig)
+            _sev = "HIGH" if _dir in ("Bidirectional", "Outbound") \
+                else "MEDIUM"
+            _target_sh = _target.replace("'", "'\\''")
+            _hint = (f"cross-domain kerberoast: impacket-GetUserSPNs "
+                     f"-target-domain '{_target_sh}' <ourdom>/<user>:"
+                     f"<pw> -dc-ip <trusted-dc>  |  if WITHIN_FOREST + "
+                     f"we have krbtgt hash: forge golden ticket with "
+                     f"/extrasids=<target-EA-SID>  |  ExtraSids TrustAcct"
+                     f" abuse: impacket-ticketer -nthash <ea-hash> "
+                     f"-domain-sid <target-sid> -extra-sid <target-sid>"
+                     f"-519 -domain <ourdom> Administrator")
+            report.add(_sev, "RECON", path, _ln(_tm),
+                       f"Domain trust: {_target} ({_dir}) via nltest "
+                       f"- cross-domain attack primitive",
+                       hint=_hint)
+            if store is not None:
+                store.add(Evidence(kind="trust", host=_target,
+                                   source=path, line=_ln(_tm),
+                                   meta={"direction": _dir,
+                                         "source_tool": "nltest"}))
+        for _pv in _PV_TRUST.finditer(text):
+            if not _no_bleed(_pv, 1, 3, _PV_TRUST_BLEED):
+                continue
+            _src = _pv.group(1).strip()
+            _tgt = _pv.group(2).strip()
+            _dir = _pv.group(3)
+            if _dir == "Disabled":
+                continue
+            _sig = ("pv", _src.lower(), _tgt.lower(), _dir)
+            if _sig in _trust_seen:
+                continue
+            _trust_seen.add(_sig)
+            _sev = "HIGH" if _dir in ("Bidirectional", "Outbound") \
+                else "MEDIUM"
+            _src_sh = _src.replace("'", "'\\''")
+            _tgt_sh = _tgt.replace("'", "'\\''")
+            report.add(_sev, "RECON", path, _ln(_pv),
+                       f"Domain trust: {_src} -> {_tgt} ({_dir}) "
+                       f"via PowerView - cross-domain attack primitive",
+                       hint=(f"cross-domain kerberoast: impacket-Get"
+                             f"UserSPNs -target-domain '{_tgt_sh}' "
+                             f"'{_src_sh}'/<user>:<pw> -dc-ip "
+                             f"<trusted-dc>  |  or PowerView Get-"
+                             f"DomainUser -Domain {_tgt} -SPN"))
+            if store is not None:
+                store.add(Evidence(kind="trust", host=_tgt,
+                                   source=path, line=_ln(_pv),
+                                   meta={"source_domain": _src,
+                                         "direction": _dir,
+                                         "source_tool": "powerview"}))
+
     # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
     # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
     # host. credline.py captures the cred pair itself but doesn't
