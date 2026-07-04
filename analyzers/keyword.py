@@ -8293,6 +8293,75 @@ def _multiline_passes(path, report, store):
                                    meta={"source": "sharpdpapi",
                                          "target": _tgt[:200]}))
 
+    # iter-296: Captured Windows hotfix listing from `wmic qfe list`
+    # or `Get-HotFix`. Extract the installed KB set and flag OSCP+-
+    # relevant patches by ABSENCE (missing patch = candidate exploit
+    # chain). Real captured shapes:
+    #   wmic qfe list brief /format:table:
+    #     Description  HotFixID   InstalledOn
+    #     Update       KB4013389  1/15/2018
+    #   Get-HotFix:
+    #     Source   Description   HotFixID    InstalledBy    InstalledOn
+    #     WEB01    Security Upd  KB4013389   SYSTEM         1/15/2018
+    _HOTFIX_HEADER = re.compile(
+        r'(?im)^(?:Source\s+Description\s+HotFixID|'
+        r'Description\s+HotFix(?:ID)?)\s')
+    _KB_LINE = re.compile(r'(?im)\b(KB\d{6,7})\b')
+    # OSCP+-relevant CVE-to-patch table. Presence of the KB means the
+    # exploit is patched. Absence in a captured hotfix dump signals
+    # candidate exploit path.
+    _OSCP_KB_TABLE = {
+        "KB4013389": "MS17-010 EternalBlue (SMBv1 RCE)",
+        "KB3011780": "MS14-068 Kerberos ticket forgery",
+        "KB4499175": "BlueKeep CVE-2019-0708 (RDP RCE)",
+        "KB5005565": "PrintNightmare CVE-2021-34527",
+        "KB5007206": "SamAccountName spoofing CVE-2021-42278/42287",
+        "KB4534306": "SMBGhost CVE-2020-0796 (SMBv3 RCE)",
+        "KB5008380": "AD Zerologon CVE-2020-1472",
+    }
+    if not filters.is_doc_file(path):
+        _hf_hdr = _HOTFIX_HEADER.search(text[:65536])
+        if _hf_hdr:
+            # Consume the block until we hit a blank line + non-KB text,
+            # bounded to 8 KB.
+            _after = text[_hf_hdr.end():_hf_hdr.end() + 8192]
+            _kbs_installed = set()
+            for _km in _KB_LINE.finditer(_after):
+                _kbs_installed.add(_km.group(1).upper())
+            if _kbs_installed:
+                _missing = [
+                    (kb, desc) for kb, desc in _OSCP_KB_TABLE.items()
+                    if kb not in _kbs_installed]
+                _installed_ct = len(_kbs_installed)
+                _hint_parts = [
+                    f"{_installed_ct} KBs installed on this host"]
+                if _missing:
+                    _miss_str = "; ".join(
+                        f"{kb}={desc}" for kb, desc in _missing[:5])
+                    _hint_parts.append(
+                        f"MISSING critical OSCP+ patches: {_miss_str}"
+                        + ("..." if len(_missing) > 5 else ""))
+                    _sev = "HIGH"
+                else:
+                    _sev = "MEDIUM"
+                    _hint_parts.append(
+                        "all common OSCP+ patch KBs present - box "
+                        "is fully patched against MS17-010 / MS14-068"
+                        " / BlueKeep / PrintNightmare / SMBGhost / "
+                        "Zerologon / noPac")
+                report.add(_sev, "RECON", path, _ln(_hf_hdr),
+                           f"Hotfix listing captured ({_installed_ct}"
+                           f" KBs) - patch-level enum",
+                           hint="  |  ".join(_hint_parts))
+                if store is not None:
+                    store.add(Evidence(kind="patch_state",
+                                       source=path,
+                                       line=_ln(_hf_hdr),
+                                       meta={"installed_count":
+                                             _installed_ct,
+                                             "missing_oscp_kbs":
+                                             [kb for kb, _ in _missing]}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
