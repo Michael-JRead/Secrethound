@@ -8118,6 +8118,70 @@ def _multiline_passes(path, report, store):
                                          "bloodhound-python",
                                          "zip": _zip}))
 
+    # iter-285: `net accounts` / `net accounts /domain` captured password
+    # policy. Tells operator the account lockout threshold (drives safe
+    # spray count: threshold-1 attempts per window per user) and the
+    # minimum password length (informs weak-password wordlist choice).
+    # Real captured output shape:
+    #   Lockout threshold:                                 5
+    #   Lockout duration (minutes):                        30
+    #   Lockout observation window (minutes):              30
+    #   Minimum password length:                           8
+    _NET_ACC_LOCKOUT = re.compile(
+        r'(?im)^Lockout\s+threshold\s*:\s*(Never|\d+)\s*$')
+    _NET_ACC_LOCKOUT_WIN = re.compile(
+        r'(?im)^Lockout\s+observation\s+window\s*\(minutes\)\s*:\s*'
+        r'(\d+)\s*$')
+    _NET_ACC_MINLEN = re.compile(
+        r'(?im)^Minimum\s+password\s+length\s*:\s*(\d+)\s*$')
+    if not filters.is_doc_file(path):
+        _pol_m = _NET_ACC_LOCKOUT.search(text[:65536])
+        _win_m = _NET_ACC_LOCKOUT_WIN.search(text[:65536])
+        _len_m = _NET_ACC_MINLEN.search(text[:65536])
+        # Fire only when at least the lockout-threshold value appears
+        # (that's the OSCP+ operator's primary decision input).
+        if _pol_m:
+            _lockout = _pol_m.group(1)
+            _win = _win_m.group(1) if _win_m else "?"
+            _minlen = _len_m.group(1) if _len_m else "?"
+            if _lockout.lower() == "never":
+                _sev = "HIGH"
+                _spray_hint = ("no lockout policy - safe to spray "
+                               "unlimited attempts per user; try "
+                               "large wordlists (rockyou-top-10k or"
+                               " similar)")
+            else:
+                try:
+                    _n = int(_lockout)
+                except ValueError:
+                    _n = 5
+                _safe_ct = max(1, _n - 1)
+                _sev = "MEDIUM"
+                _spray_hint = (f"safe spray count: {_safe_ct} "
+                               f"attempts/user per {_win}-min window"
+                               f" (threshold={_n} minus safety margin"
+                               f"); nxc smb <dc> -u users.txt -p "
+                               f"'<pw>' --continue-on-success --user"
+                               f"-fail-limit {_safe_ct}")
+            report.add(_sev, "RECON", path, _ln(_pol_m),
+                       f"Password policy captured: lockout threshold="
+                       f"{_lockout}, min length={_minlen}, window="
+                       f"{_win}min",
+                       hint=(f"{_spray_hint}  |  kerbrute "
+                             f"passwordspray -d <dom> --dc <dc> "
+                             f"users.txt <pw>  |  min-length "
+                             f"{_minlen} means passwords like "
+                             f"'Winter24!' (>=8 chars) are policy-"
+                             f"valid; try seasonal/company variants "
+                             f"first"))
+            if store is not None:
+                store.add(Evidence(kind="password_policy",
+                                   source=path, line=_ln(_pol_m),
+                                   meta={"lockout_threshold":
+                                         _lockout,
+                                         "lockout_window": _win,
+                                         "min_length": _minlen}))
+
     # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
     # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
     # host. credline.py captures the cred pair itself but doesn't
