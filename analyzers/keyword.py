@@ -7556,6 +7556,86 @@ def _multiline_passes(path, report, store):
                              "|  domain hashes hit dump.ntds, LSA hits"
                              " dump.secrets, cached hits dump.cached"))
 
+    # iter-273: LOLBAS payload staging commands. When present in bash
+    # history / consolehost_history / event logs / IIS access logs /
+    # shell transcripts, these indicate tool-download tradecraft that
+    # was either the operator's own staging or prior-compromise
+    # artifacts left on the box. Highly distinctive attacker signatures.
+    #
+    # Signal A: certutil -urlcache -f http://host/path -> LOLBAS-classic
+    # payload fetch (any -urlcache variant + a URL = attacker tradecraft).
+    _LOL_CERTUTIL = re.compile(
+        r'(?i)\bcertutil(?:\.exe)?\b[^\r\n]{0,80}?'
+        r'-(?:urlcache|url|f)\b[^\r\n]{0,120}?'
+        r'(https?://[^\s\'"<>]{6,200})')
+    # Signal B: bitsadmin /transfer job http://... - BITS-based fetch
+    _LOL_BITSADMIN = re.compile(
+        r'(?i)\bbitsadmin(?:\.exe)?\s+/transfer\b[^\r\n]{0,200}?'
+        r'(https?://[^\s\'"<>]{6,200})')
+    # Signal C: IEX (New-Object Net.WebClient).DownloadString('http...')
+    # Also DownloadFile / .DownloadData - all classic PS download cradles.
+    _LOL_PSCRADLE = re.compile(
+        r'(?i)(?:IEX|Invoke-Expression)\s*\(?[^\r\n]{0,100}?'
+        r'\.Download(?:String|File|Data)\s*\(\s*[\'"]?'
+        r'(https?://[^\s\'")<>]{6,200})')
+    # Signal D: powershell.exe -e[nc]* <base64-cmd> - encoded execution
+    # (bounded: base64 >= 40 chars to avoid FPs on short flags).
+    _LOL_PS_ENC = re.compile(
+        r'(?i)\bpowershell(?:\.exe)?\b[^\r\n]{0,50}?'
+        r'-e(?:nc|ncoded|ncodedcommand|)?\s+'
+        r'([A-Za-z0-9+/]{40,}=*)\b')
+    # OSCP+ Kali VPN attacker range: 10.10.14.* / 10.10.16.* (offense
+    # side). Elevates severity when the URL points here.
+    _OSCP_ATTACKER_RANGE = re.compile(r'https?://10\.10\.(?:14|16)\.\d+')
+
+    if not filters.is_doc_file(path):
+        _lol_seen = set()
+        _lol_configs = [
+            (_LOL_CERTUTIL, "certutil -urlcache",
+             "LOLBAS certutil URL fetch (payload staging tradecraft)",
+             "signature: certutil is a legit Windows binary; T1105 "
+             "ingress tool transfer. Cross-check the URL host + "
+             "target path for the payload."),
+            (_LOL_BITSADMIN, "bitsadmin /transfer",
+             "LOLBAS bitsadmin BITS fetch (payload staging tradecraft)",
+             "signature: BITS runs as a Windows service so the "
+             "download survives session termination. T1197 BITS jobs."),
+            (_LOL_PSCRADLE, "PowerShell IEX DownloadString",
+             "PowerShell download cradle (T1059.001 memory-only "
+             "payload load)",
+             "loads .ps1 straight into memory via IEX - no disk drop, "
+             "so AV signatures on the .ps1 filename don't help. "
+             "Detect via AMSI / ScriptBlockLogging (Event 4104)."),
+            (_LOL_PS_ENC, "PowerShell -EncodedCommand",
+             "PowerShell -EncodedCommand base64 execution",
+             "the base64 usually decodes to a download cradle OR an "
+             "in-memory reflective load. Decode: [Convert]::"
+             "FromBase64String('<b64>') | %{ [Text.Encoding]::"
+             "Unicode.GetString($_) }"),
+        ]
+        for _rx, _tag, _msg, _hint in _lol_configs:
+            for _lm in _rx.finditer(text):
+                _url_or_b64 = _lm.group(1)
+                _sig = (_tag, _url_or_b64[:60])
+                if _sig in _lol_seen:
+                    continue
+                _lol_seen.add(_sig)
+                _sev = "HIGH" if _tag != "PowerShell -EncodedCommand" \
+                    else "MEDIUM"
+                # Elevate to HIGH when the URL is the OSCP+ Kali VPN
+                # attacker range (10.10.14.* / 10.10.16.*).
+                if _url_or_b64.startswith("http") and \
+                        _OSCP_ATTACKER_RANGE.match(_url_or_b64):
+                    _sev = "HIGH"
+                report.add(_sev, "RECON", path, _ln(_lm),
+                           f"{_msg}: {_url_or_b64[:80]}", hint=_hint)
+                if store is not None:
+                    store.add(Evidence(kind="tradecraft", source=path,
+                                       line=_ln(_lm),
+                                       meta={"technique": _tag,
+                                             "indicator":
+                                                 _url_or_b64[:200]}))
+
     # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
     # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
     # host. credline.py captures the cred pair itself but doesn't
