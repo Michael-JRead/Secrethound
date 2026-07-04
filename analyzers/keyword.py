@@ -2242,6 +2242,19 @@ _MSSQL_SHELL_PROMPT = re.compile(
     r'(?im)^SQL\s*\(([A-Za-z0-9._\\$\-]{1,60})\s+'
     r'(?:dbo|guest|public|db_[a-z_]+)@[\w\-.]{1,60}\)\s*>\s*'
 )
+# iter-277: impacket-atexec / impacket-dcomexec landing markers.
+# iter-260's _IMPACKET_SHELL_PROMPT covers psexec/wmiexec (they land
+# a `C:\Windows\system32>` prompt), but atexec and dcomexec DO NOT -
+# they capture command output silently. Distinguishing markers:
+#   atexec:  `[*] Creating task \<HEXNAME>` then `[*] Deleting task`
+#            preceded by `[!] This will work ONLY on Windows >= Vista`
+#   dcomexec: `[!] Executing shell commands on <target>` (MMC20 / ShellWindows /
+#             ShellBrowserWindow object routing)
+_IMPACKET_ATEXEC = re.compile(
+    r'(?im)^\s*\[\*\]\s*Creating\s+task\s+\\(\w{4,32})\s*$')
+_IMPACKET_DCOMEXEC = re.compile(
+    r'(?im)^\s*\[!\]\s*Executing\s+shell\s+commands\s+on\s+'
+    r'([\w.\-]{2,60})\s*(?:\.\.\.)?$')
 
 # iter-257: Windows autorun / scheduled task privesc detectors.
 # Complements iter-256 (unquoted service) + AlwaysInstallElevated
@@ -3818,6 +3831,59 @@ def _multiline_passes(path, report, store):
                 store.add(Evidence(kind="mssql_shell", user=_sql_user,
                                    source=path, line=_ln(_sm),
                                    meta={"privilege": _sql_user_low}))
+
+        # iter-277: impacket-atexec landing. Schtasks-based lateral
+        # movement path - creates a task with a random hex name, runs
+        # it, deletes it, then reads the output from ADMIN$\Temp. The
+        # `Creating task \HEXNAME` line is the atexec-specific marker
+        # (psexec/wmiexec don't emit it). Fires once per unique task.
+        _atexec_seen = set()
+        for _am in _IMPACKET_ATEXEC.finditer(text[:65536]):
+            _task = _am.group(1)
+            if _task in _atexec_seen:
+                continue
+            _atexec_seen.add(_task)
+            report.add("HIGH", "RECON", path, _ln(_am),
+                       f"impacket-atexec landed (task \\{_task}) - "
+                       f"schtasks lateral RCE",
+                       hint=("output captured from ADMIN$\\Temp\\<hex>."
+                             "txt; check surrounding text for shell "
+                             "output  |  atexec runs as SYSTEM by "
+                             "default (schtasks default context) so "
+                             "any command lands with SYSTEM privileges"))
+            if store is not None:
+                store.add(Evidence(kind="shell_landed", source=path,
+                                   line=_ln(_am),
+                                   meta={"method": "atexec",
+                                         "task": _task}))
+            break  # one per file - task hex-name changes per run
+
+        # iter-277: impacket-dcomexec landing. DCOM-based lateral
+        # movement (MMC20.Application / ShellWindows / ShellBrowser
+        # objects). The `[!] Executing shell commands on <target>`
+        # marker is dcomexec-specific.
+        _dcom_seen = set()
+        for _dm in _IMPACKET_DCOMEXEC.finditer(text[:65536]):
+            # strip trailing dots — the char class `[\w.\-]` was greedy
+            # over `...` after the target hostname.
+            _tgt = _dm.group(1).strip().rstrip(".")
+            if _tgt in _dcom_seen:
+                continue
+            _dcom_seen.add(_tgt)
+            report.add("HIGH", "RECON", path, _ln(_dm),
+                       f"impacket-dcomexec landed on {_tgt} - DCOM "
+                       f"MMC20/ShellWindows lateral RCE",
+                       hint=("dcomexec runs as the AUTHENTICATED user, "
+                             "not SYSTEM (unlike atexec/psexec-S)  |  "
+                             "quieter EDR profile than psexec (no "
+                             "service install, no PsExec artifact); "
+                             "use when psexec triggers alerts"))
+            if store is not None:
+                store.add(Evidence(kind="shell_landed", source=path,
+                                   line=_ln(_dm),
+                                   meta={"method": "dcomexec",
+                                         "target": _tgt}))
+            break
 
     # iter-257: Windows autorun / scheduled task privesc from
     # captured reg query + schtasks /query output. Doc-file gate.
