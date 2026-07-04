@@ -8600,6 +8600,45 @@ def _multiline_passes(path, report, store):
                                    source=path, line=_ln(_im),
                                    meta=_meta))
 
+    # iter-301: PowerShell PSRemoting session landing marker. Distinct
+    # from iter-260's evil-winrm banner (Ruby-flavored) - native
+    # Enter-PSSession / New-PSSession / winrs land a `[hostname]: PS
+    # C:\...>` prompt where the hostname is the FQDN or NetBIOS name
+    # of the remote target. Highly distinctive - no other tool emits
+    # that bracketed-hostname prompt shape.
+    _PSREMOTE_PROMPT = re.compile(
+        r'(?im)^\[([\w.\-]{2,80})\]\s*:\s*PS\s+[A-Za-z]:\\[^\r\n>]{0,120}>')
+    if not filters.is_doc_file(path):
+        _psr_seen = set()
+        for _rm in _PSREMOTE_PROMPT.finditer(text[:65536]):
+            _host = _rm.group(1).strip().lower()
+            if _host in _psr_seen:
+                continue
+            _psr_seen.add(_host)
+            # Skip cases where the "hostname" looks placeholder-ish or
+            # is a common non-host token seen in tutorials.
+            if _host in ("localhost", "hostname", "computer", "target",
+                         "server", "example", "server01"):
+                continue
+            _host_sh = _host.replace("'", "'\\''")
+            report.add("HIGH", "RECON", path, _ln(_rm),
+                       f"PSRemoting session landed on {_host} - "
+                       f"interactive WinRM/PowerShell foothold",
+                       hint=(f"check preceding lines for Credential "
+                             f"parameter to identify the acting user"
+                             f"  |  post-landing recon: whoami /all;"
+                             f" Get-LocalGroupMember Administrators;"
+                             f" Get-ChildItem C:\\Users -Directory | "
+                             f"Select Name  |  privesc: winPEAS /"
+                             f"SharpUp / mimikatz sekurlsa /  |  "
+                             f"lateral: New-PSSession -ComputerName "
+                             f"<next-target> -Credential (Get-"
+                             f"Credential)"))
+            if store is not None:
+                store.add(Evidence(kind="shell_landed", host=_host,
+                                   source=path, line=_ln(_rm),
+                                   meta={"method": "psremoting"}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
