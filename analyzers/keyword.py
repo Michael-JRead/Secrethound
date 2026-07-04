@@ -6302,8 +6302,13 @@ def _multiline_passes(path, report, store):
 
     # iter-261: mimikatz lsadump::dcsync output. krbtgt gets special
     # CRITICAL golden-ticket-primitive marker; other users emit HIGH.
+    # iter-263: doc-file gate - a walkthrough with plausible-looking
+    # hex should not fire CRITICAL golden-ticket for the reader.
     _dc_seen = set()
+    _dcsync_gated = filters.is_doc_file(path)
     for _dm in _MK_DCSYNC.finditer(text):
+        if _dcsync_gated:
+            break
         # cross-block bleed guard: reject if a second "Object RDN:"
         # sits between the first capture and the Hash NTLM capture.
         if not _no_bleed(_dm, 1, 3, _MK_DCSYNC_BLEED):
@@ -6342,32 +6347,40 @@ def _multiline_passes(path, report, store):
     # iter-261: mimikatz sekurlsa::ekeys output - captured Kerberos
     # AES/DES keys. AES256 keys unlock long-term overpass-the-hash
     # and silver/golden ticket forging without needing NTLM.
+    # iter-263: doc-file gate + per-alg length check (aes256=64 hex,
+    # aes128=32 hex, des_cbc_md5=16 hex) + shell-escape _dom.
+    _EKEY_LEN = {"aes256_hmac": 64, "aes128_hmac": 32, "des_cbc_md5": 16}
     _ek_seen = set()
-    for _km in _MK_EKEYS_BLOCK.finditer(text):
-        # cross-block bleed guard: reject if a second `* Username :`
-        # sits between the user capture and the key capture.
-        if not _no_bleed(_km, 1, 4, _MK_USER_BLEED):
-            continue
-        _user = _km.group(1).strip()
-        _dom = _km.group(2).strip()
-        _alg = _km.group(3)
-        _key = _km.group(4)
-        _sig = (_user, _alg, _key[:16])
-        if _sig in _ek_seen:
-            continue
-        _ek_seen.add(_sig)
-        _user_sh = _user.replace("'", "'\\''")
-        _mode = "18200" if _alg == "aes256_hmac" else \
-                 ("17500" if _alg == "aes128_hmac" else "")
-        report.add("HIGH", "PASSWORD HASHES", path, _ln(_km),
-                   f"Kerberos {_alg} key for {_dom}\\{_user}: "
-                   f"{_key[:32]}...",
-                   hint=(f"overpass-the-hash: impacket-getTGT -aesKey"
-                         f" {_key} '{_dom}/{_user_sh}'  |  export "
-                         f"KRB5CCNAME=<user>.ccache; then use with "
-                         f"any Kerberos-aware impacket tool  |  "
-                         f"AES keys survive password rotations if "
-                         f"salted with the same domain+user"))
+    if not filters.is_doc_file(path):
+        for _km in _MK_EKEYS_BLOCK.finditer(text):
+            # cross-block bleed guard: reject if a second `* Username :`
+            # sits between the user capture and the key capture.
+            if not _no_bleed(_km, 1, 4, _MK_USER_BLEED):
+                continue
+            _user = _km.group(1).strip()
+            _dom = _km.group(2).strip()
+            _alg = _km.group(3)
+            _key = _km.group(4)
+            # iter-263: enforce per-alg key length so truncated snippets
+            # (`aes256_hmac 4 abcdef0123456789`) don't emit HIGH.
+            if len(_key) != _EKEY_LEN.get(_alg, 0):
+                continue
+            _sig = (_user, _alg, _key[:16])
+            if _sig in _ek_seen:
+                continue
+            _ek_seen.add(_sig)
+            # iter-263: escape BOTH _user and _dom for shell hint splice.
+            _user_sh = _user.replace("'", "'\\''")
+            _dom_sh = _dom.replace("'", "'\\''")
+            report.add("HIGH", "PASSWORD HASHES", path, _ln(_km),
+                       f"Kerberos {_alg} key for {_dom}\\{_user}: "
+                       f"{_key[:32]}...",
+                       hint=(f"overpass-the-hash: impacket-getTGT -aesKey"
+                             f" {_key} '{_dom_sh}/{_user_sh}'  |  export"
+                             f" KRB5CCNAME=<user>.ccache; then use with"
+                             f" any Kerberos-aware impacket tool  |  "
+                             f"AES keys survive password rotations if "
+                             f"salted with the same domain+user"))
 
     # Mimikatz dpapi::cred typed
     for m in _MK_DPAPI_CRED.finditer(text):
@@ -7008,19 +7021,23 @@ def _multiline_passes(path, report, store):
         r'plain_password_hex\s*:\s*([0-9a-fA-F]{16,4096})\b')
     for m in _LSA_MACHINE_PLAIN.finditer(text):
         if filters.is_doc_file(path):
-            continue
+            break
         _dom_mp = m.group(1).strip()
         _host_mp = m.group(2).strip()
         _hex_mp = m.group(3).strip().lower()
         if filters.is_canonical_sample(_hex_mp):
             continue
         _hostacct_sh = f"{_dom_mp}/{_host_mp}".replace("'", "'\\''")
+        # iter-263: previous hint spliced `bytes.fromhex('{hex[:64]}...')`
+        # into a python one-liner - copy-paste failed with "non-hexadecimal
+        # number found in fromhex() arg" because of the literal `...`.
+        # Placeholder + separate line pointing to the captured hex is safer.
         report.add("CRITICAL", "CRED PAIRS", path, _ln(m),
                    f"$MACHINE.ACC plaintext for {_dom_mp}\\{_host_mp}: "
-                   f"{_hex_mp[:32]}... (utf-16-le hex)",
-                   hint=(f"decode: python3 -c \"import sys; sys.stdout"
-                         f".buffer.write(bytes.fromhex('{_hex_mp[:64]}...'"
-                         f").decode('utf-16-le').encode())\"  |  silver "
+                   f"{_hex_mp[:32]}... (utf-16-le hex, {len(_hex_mp)} chars)",
+                   hint=(f"decode: python3 -c \"import sys; sys.stdout."
+                         f"buffer.write(bytes.fromhex('<full-hex-above>')"
+                         f".decode('utf-16-le').encode())\"  |  silver "
                          f"ticket any user any service: impacket-getST -"
                          f"impersonate Administrator -spn CIFS/<host-fqdn>"
                          f" '{_hostacct_sh}' -hashes :$MACHINE_ACC_NT  |"
