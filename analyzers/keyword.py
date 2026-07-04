@@ -2917,6 +2917,35 @@ _PV_ACL = re.compile(
     r'SecurityIdentifier\s*:\s*(S-1-5-\d{1,3}(?:-\d{1,10}){1,10})\b'
 )
 _PV_ACL_BLEED = re.compile(r'(?i)^\s*ObjectDN\s*:', re.M)
+# iter-269 audit fix: default AD ACLs assign GenericAll / WriteProperty
+# to well-known SIDs (SYSTEM, BUILTIN\Administrators, SELF, and the
+# object's own Domain Admins group). Every `Get-DomainObjectAcl -Identity
+# 'Domain Admins'` dump emits dozens of these by design. Skip them so
+# the operator's report isn't drowned in default-ACE noise.
+_PV_ACL_SAFE_SIDS = {
+    "S-1-5-18",         # NT AUTHORITY\SYSTEM
+    "S-1-5-10",         # NT AUTHORITY\SELF
+    "S-1-5-9",          # ENTERPRISE DOMAIN CONTROLLERS
+    "S-1-5-32-544",     # BUILTIN\Administrators
+    "S-1-5-32-548",     # BUILTIN\Account Operators
+    "S-1-5-32-549",     # BUILTIN\Server Operators
+    "S-1-5-32-550",     # BUILTIN\Print Operators
+    "S-1-5-32-551",     # BUILTIN\Backup Operators
+    "S-1-5-32-552",     # BUILTIN\Replicator
+    "S-1-5-32-554",     # BUILTIN\Pre-Windows 2000 Compatible Access
+    "S-1-3-0",          # CREATOR OWNER
+}
+# Well-known-privileged domain RID suffixes: Domain Admins (-512),
+# Enterprise Admins (-519), Schema Admins (-518), Domain Controllers
+# (-516), Administrator (-500), Cert Publishers (-517). These SIDs
+# hold GenericAll on privileged objects by design.
+_PV_ACL_SAFE_RIDS = re.compile(
+    r'-(?:500|512|516|517|518|519|526|527)\s*$'
+)
+# iter-269 audit fix: PowerView emits both Allow and Deny ACEs. Deny ACEs
+# cannot be an abuse primitive. When AccessControlType is present in the
+# block, require it to be Allow. Anchor extracted alongside the right.
+_PV_ACL_DENY = re.compile(r'(?i)AccessControlType\s*:\s*Deny\b')
 # cmdkey /list typed block
 _CMDKEY_LIST = re.compile(
     r'(?i)Target\s*:\s*Domain:target=([^\r\n]{3,80})[\s\S]{0,200}?'
@@ -3746,7 +3775,10 @@ def _multiline_passes(path, report, store):
             if _sql_user_low in _sql_ctx_seen:
                 continue
             _sql_ctx_seen.add(_sql_user_low)
-            if _sql_user_low in ("system", "nt authority\\system"):
+            # iter-269 audit fix: the capture class disallows spaces so
+            # `nt authority\system` (with the required space) can never
+            # populate _sql_user_low. Only bare `system` reaches CRITICAL.
+            if _sql_user_low == "system":
                 _sql_sev = "CRITICAL"
                 _sql_msg = ("MSSQL SYSTEM shell landed via impacket-"
                             f"mssqlclient (as {_sql_user})")
@@ -6485,6 +6517,10 @@ def _multiline_passes(path, report, store):
             #   `svc_backup.ccache` -> svc_backup
             #   `Administrator@cifs_dc.corp.local@CORP.LOCAL.ccache` -> Administrator
             _who = _ccache.split("@", 1)[0].removesuffix(".ccache")
+            # iter-269 audit fix: skip empty user extractions (e.g. from
+            # a `@X.ccache` filename that yields user='' with empty hint).
+            if not _who:
+                continue
             _who_sh = _who.replace("'", "'\\''")
             _ccache_sh = _ccache.replace("'", "'\\''")
             report.add("HIGH", "RECON", path, _ln(_tm),
@@ -6525,8 +6561,24 @@ def _multiline_passes(path, report, store):
             _pfx_seen.add(_pfx)
             _pfx_user = _pfx.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
             _pfx_user = _pfx_user.removesuffix(".pfx").split("@", 1)[0]
-            _sev = "CRITICAL" if _pfx_user.lower() in (
-                "administrator", "krbtgt", "admin", "domainadmin") else "HIGH"
+            # iter-269 audit fix: skip empty user extractions (e.g. from
+            # a `@.pfx`-shaped filename).
+            if not _pfx_user:
+                continue
+            # iter-269 audit fix: Certipy often names PFX files with a
+            # suffix like `administrator_marvel-local.pfx` or `krbtgt_forge
+            # .pfx` when disambiguating multiple runs. Exact-match tuple
+            # missed these and downgraded to HIGH. Prefix-match on the
+            # boundary ({_,-,.,digit}) so real Administrator PFX still
+            # fires CRITICAL.
+            _pfx_user_low = _pfx_user.lower()
+            _pfx_sev_stems = ("administrator", "krbtgt", "admin",
+                              "domainadmin")
+            _is_priv = (_pfx_user_low in _pfx_sev_stems or
+                        any(_pfx_user_low.startswith(s + sep)
+                            for s in _pfx_sev_stems
+                            for sep in ("_", "-", ".")))
+            _sev = "CRITICAL" if _is_priv else "HIGH"
             _pfx_user_sh = _pfx_user.replace("'", "'\\''")
             _pfx_sh = _pfx.replace("'", "'\\''")
             report.add(_sev, "CRED PAIRS", path, _ln(_pm),
@@ -6550,6 +6602,9 @@ def _multiline_passes(path, report, store):
             _cc_seen.add(_cc)
             _cc_user = _cc.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
             _cc_user = _cc_user.removesuffix(".ccache").split("@", 1)[0]
+            # iter-269 audit fix: skip empty user extractions.
+            if not _cc_user:
+                continue
             _cc_user_sh = _cc_user.replace("'", "'\\''")
             _cc_sh = _cc.replace("'", "'\\''")
             report.add("HIGH", "RECON", path, _ln(_cm),
@@ -6619,6 +6674,21 @@ def _multiline_passes(path, report, store):
             _dn = _am.group(1).strip()
             _right = _am.group(2)
             _sid = _am.group(3)
+            # iter-269 audit fix: skip Deny ACEs (can't be abuse primitive).
+            # Check the full block span from group(1) end to group(3) start
+            # for `AccessControlType : Deny`.
+            _blk_span = text[_am.end(1):_am.start(3)]
+            if _PV_ACL_DENY.search(_blk_span):
+                continue
+            # iter-269 audit fix: skip default AD ACLs held by well-known
+            # SIDs (SYSTEM/SELF/BUILTIN\Admins, Domain Admins by-design
+            # GenericAll on privileged objects, etc.). Without this the
+            # detector emits dozens of CRITICAL noise findings on any
+            # `Get-DomainObjectAcl -Identity 'Domain Admins'` dump.
+            if _sid in _PV_ACL_SAFE_SIDS:
+                continue
+            if _PV_ACL_SAFE_RIDS.search(_sid):
+                continue
             _sig = (_dn[:100], _right, _sid)
             if _sig in _acl_seen:
                 continue
