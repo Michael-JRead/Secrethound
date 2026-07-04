@@ -8952,6 +8952,93 @@ def _multiline_passes(path, report, store):
                                    meta={"tool": "rubeus_asktgt",
                                          "key_material": _keymat}))
 
+    # iter-306: Rubeus s4u constrained-delegation exploit landing.
+    # This is the actual DA-lateral step after asktgt: operator holds
+    # a TGT for a principal that has SeEnableDelegationPrivilege /
+    # msDS-AllowedToDelegateTo (KCD) or has RBCD write on a target
+    # (msDS-AllowedToActOnBehalfOfOtherIdentity), and runs Rubeus s4u
+    # to (a) mint a self-referential service ticket for any user
+    # (S4U2Self) and (b) exchange it for a delegated ticket to the
+    # actual target service (S4U2Proxy). End result: operator holds a
+    # ticket to CIFS/dc01, HTTP/web01, LDAP/dc01, etc. AS the
+    # impersonated user (typically Administrator).
+    #
+    # Real Rubeus s4u success shape:
+    #   [*] Action: S4U
+    #
+    #   [*] Building S4U2self request for: 'CORP.LOCAL\svc_web'
+    #   [*] Sending S4U2self request
+    #   [+] S4U2self success!
+    #   [*] Got a TGS for 'administrator' to 'svc_web@CORP.LOCAL'
+    #   ...
+    #   [*] Impersonating user 'administrator' to target SPN 'CIFS/dc01'
+    #   [*] Building S4U2proxy request for service: 'CIFS/dc01'
+    #   [+] S4U2proxy success!
+    #     ServiceName              :  CIFS/dc01.corp.local
+    #     ServiceRealm             :  CORP.LOCAL
+    #     UserName                 :  administrator
+    #
+    # S4U2Proxy is the CRITICAL step - S4U2Self alone is intel-only.
+    # Requiring both markers plus the final ServiceName means we only
+    # fire on completed delegation abuse, not aborted attempts.
+    _RUBEUS_S4U_HDR = re.compile(
+        r'(?im)^\s*\[\*\]\s*Action\s*:\s*S4U\s*$')
+    _RUBEUS_S4U_SELF_OK = re.compile(
+        r'(?im)^\s*\[\+\]\s*S4U2self\s+success')
+    _RUBEUS_S4U_PROXY_OK = re.compile(
+        r'(?im)^\s*\[\+\]\s*S4U2proxy\s+success')
+    _RUBEUS_S4U_IMPERSONATE = re.compile(
+        r"(?im)^\s*\[\*\]\s*Impersonating\s+user\s+'([\w.\-$]{1,60})'"
+        r"\s+to\s+target\s+SPN\s+'([\w./\-]{3,120})'")
+    if not filters.is_doc_file(path):
+        _s4u_seen = set()
+        for _s4 in _RUBEUS_S4U_HDR.finditer(text[:65536]):
+            _win = text[_s4.start():_s4.start() + 4096]
+            _self_ok = _RUBEUS_S4U_SELF_OK.search(_win)
+            _proxy_ok = _RUBEUS_S4U_PROXY_OK.search(_win)
+            if not (_self_ok and _proxy_ok):
+                continue
+            _imp = _RUBEUS_S4U_IMPERSONATE.search(_win)
+            if not _imp:
+                continue
+            _imp_user = _imp.group(1).strip()
+            _target_spn = _imp.group(2).strip()
+            _sig = (_imp_user.lower(), _target_spn.lower())
+            if _sig in _s4u_seen:
+                continue
+            _s4u_seen.add(_sig)
+            # Severity: CRITICAL if impersonating Administrator /
+            # da_ / domain admin canonical name; else HIGH.
+            _low_imp = _imp_user.lower()
+            _is_da = ("administrator" in _low_imp
+                      or _low_imp.startswith("da_")
+                      or _low_imp.startswith("da-")
+                      or _low_imp.endswith("_da")
+                      or "domain admin" in _low_imp
+                      or "domainadmin" in _low_imp)
+            _sev = "CRITICAL" if _is_da else "HIGH"
+            _imp_sh = _imp_user.replace("'", "'\\''")
+            _spn_sh = _target_spn.replace("'", "'\\''")
+            report.add(_sev, "AD_ATTACK", path, _ln(_s4),
+                       f"Rubeus s4u LANDED: {_imp_user} impersonated"
+                       f" against {_target_spn} - constrained-"
+                       f"delegation abuse complete",
+                       hint=(f"operator holds delegated ticket for "
+                             f"'{_imp_sh}' at '{_spn_sh}'  |  next: "
+                             f"Rubeus.exe ptt /ticket:<b64> to inject"
+                             f" the S4U2Proxy ticket then dir "
+                             f"\\\\<target>\\C$  |  if CIFS/DC: "
+                             f"secretsdump.exe -k -no-pass @<dc> for "
+                             f"NTDS.dit  |  OSCP+ Kerberos-only DA "
+                             f"lateral - no clear NTLM auth flag"))
+            if store is not None:
+                store.add(Evidence(kind="delegation_landed",
+                                   user=_imp_user,
+                                   source=path, line=_ln(_s4),
+                                   meta={"tool": "rubeus_s4u",
+                                         "impersonated": _imp_user,
+                                         "target_spn": _target_spn}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
