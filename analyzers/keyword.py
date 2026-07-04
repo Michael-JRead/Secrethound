@@ -7811,6 +7811,51 @@ def _multiline_passes(path, report, store):
                                          "direction": _dir,
                                          "source_tool": "powerview"}))
 
+    # iter-278: PowerView `Get-DomainUser -PreauthNotRequired | fl`
+    # output block. Complements iter-244 which handles the raw LDIF /
+    # ldapsearch text form (bitmask userAccountControl: 4260352). Here
+    # the PS Format-List output has userAccountControl as a named-flag
+    # string (`NORMAL_ACCOUNT, DONT_REQ_PREAUTH`). Two orderings covered
+    # since `select samaccountname,useraccountcontrol` swaps field order.
+    # Bleed anchor: another samaccountname line between captures.
+    _PV_ASREP_A = re.compile(
+        r'(?im)^samaccountname\s*:\s*([\w.\-$]{1,60})[\s\S]{0,400}?'
+        r'^useraccountcontrol\s*:[^\r\n]*?\bDONT_REQ_PREAUTH\b')
+    _PV_ASREP_B = re.compile(
+        r'(?im)^useraccountcontrol\s*:[^\r\n]*?\bDONT_REQ_PREAUTH\b'
+        r'[\s\S]{0,400}?^samaccountname\s*:\s*([\w.\-$]{1,60})')
+    _PV_ASREP_BLEED = re.compile(
+        r'(?im)^samaccountname\s*:')
+    if not filters.is_doc_file(path):
+        _asrep_seen = set()
+        for _rx in (_PV_ASREP_A, _PV_ASREP_B):
+            for _am in _rx.finditer(text):
+                # bleed guard: reject if a second samaccountname sits
+                # between our SAM capture and the UAC anchor (or vice
+                # versa - use group(0) span to catch either ordering).
+                _span = text[_am.start():_am.end()]
+                if len(_PV_ASREP_BLEED.findall(_span)) > 1:
+                    continue
+                _sam = _am.group(1).strip()
+                if _sam.lower() in _asrep_seen:
+                    continue
+                _asrep_seen.add(_sam.lower())
+                _sam_sh = _sam.replace("'", "'\\''")
+                report.add("HIGH", "RECON", path, _ln(_am),
+                           f"AS-REP roastable user: {_sam} "
+                           f"(DONT_REQ_PREAUTH via PowerView)",
+                           hint=(f"impacket-GetNPUsers <dom>/ -usersfile"
+                                 f" <(echo '{_sam_sh}') -no-pass -dc-ip"
+                                 f" <dc>  |  hashcat -m 18200 asrep."
+                                 f"hash rockyou.txt -r rules/best64."
+                                 f"rule  |  or Rubeus asreproast /"
+                                 f"user:{_sam_sh} /nowrap"))
+                if store is not None:
+                    store.add(Evidence(kind="user", user=_sam,
+                                       fact="asreproastable",
+                                       source=path, line=_ln(_am),
+                                       meta={"source": "powerview"}))
+
     # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
     # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
     # host. credline.py captures the cred pair itself but doesn't
