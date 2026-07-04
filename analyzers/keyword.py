@@ -2202,6 +2202,36 @@ _TOMCAT_MANAGER_PATH = re.compile(
     r'(?:manager|host-manager)/(?:html|text|status)'
 )
 
+# iter-257: Windows autorun / scheduled task privesc detectors.
+# Complements iter-256 (unquoted service) + AlwaysInstallElevated
+# with two more Windows-privesc paths.
+#
+# Signal A: captured `reg query HKLM\...\CurrentVersion\Run` OR
+# `HKLM\...\CurrentVersion\Runonce` output listing autorun entries.
+# Each entry = auto-executed at boot; if the target exe or its
+# parent dir is user-writable, we have a persistence-style privesc.
+_REG_AUTORUN_HIVE = re.compile(
+    r'(?i)HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\'
+    r'CurrentVersion\\Run(?:Once|OnceEx)?'
+)
+_REG_AUTORUN_ENTRY = re.compile(
+    r'(?im)^\s+(\S+(?:\s\S+)*?)\s+REG_(?:SZ|EXPAND_SZ)\s+'
+    r'(?:")?(C:\\[^"\r\n]{5,200}\.(?:exe|bat|cmd|ps1|vbs))'
+)
+# Signal B: captured `schtasks /query /fo LIST /v` output block.
+# Fields to extract: TaskName, Run As User, Task To Run.
+# If Run-As-User is SYSTEM/Administrators AND Task-To-Run has a
+# user-writable path, we have privesc.
+_SCHTASKS_QUERY_BLOCK = re.compile(
+    r'(?is)Folder:\s*[\\\w\s\-]{1,60}[\r\n]+'
+    r'(?:[^\r\n]*[\r\n]+){0,3}?'
+    r'(?:HostName|TaskName)\s*:\s*[\w\-\\/. ]{1,120}[\r\n]+'
+    r'(?:[^\r\n]*[\r\n]+){0,15}?'
+    r'Task\s+To\s+Run\s*:\s*([^\r\n]{5,200})[\r\n]+'
+    r'(?:[^\r\n]*[\r\n]+){0,5}?'
+    r'Run\s+As\s+User\s*:\s*([\w\\/\.\- ]{1,60})'
+)
+
 # iter-256: Windows privesc chain detectors from captured winPEAS /
 # sc qc / PowerUp / accesschk output.
 #
@@ -3527,6 +3557,54 @@ def _multiline_passes(path, report, store):
                                      f"hashcat -m 13100 {_sam}.tgs "
                                      f"rockyou.txt -r rules/best64."
                                      f"rule"))
+
+    # iter-257: Windows autorun / scheduled task privesc from
+    # captured reg query + schtasks /query output. Doc-file gate.
+    if not filters.is_doc_file(path):
+        # Autorun: fire on the hive marker + at least one entry.
+        _hive_m = _REG_AUTORUN_HIVE.search(text[:32768])
+        if _hive_m:
+            _autorun_ct = 0
+            for _em in _REG_AUTORUN_ENTRY.finditer(text[:65536]):
+                if _autorun_ct >= 5:
+                    break
+                _autorun_ct += 1
+                _name = _em.group(1).strip()
+                _binp = _em.group(2).strip()
+                report.add("MEDIUM", "RECON", path, _ln(_em),
+                           f"Autorun entry: {_name} → {_binp[:80]}",
+                           hint=(f"if `{_binp}` OR its parent dir is "
+                                 f"user-writable, drop a hijack binary "
+                                 f"there - autorun executes at next "
+                                 f"boot / logon in SYSTEM or Admin "
+                                 f"context (depending on hive)  |  "
+                                 f"verify: accesschk64.exe -uwq "
+                                 f"'{_binp}' `Users`  |  chain into "
+                                 f"iter-256 msfvenom exe-gen for the "
+                                 f"hijack binary"))
+        # Scheduled tasks: block per task; flag SYSTEM tasks.
+        for _tm in _SCHTASKS_QUERY_BLOCK.finditer(text[:65536]):
+            _task_bin = _tm.group(1).strip()
+            _runas = _tm.group(2).strip()
+            _runas_lc = _runas.lower()
+            _is_priv = ("system" in _runas_lc
+                        or "administrator" in _runas_lc
+                        or "trustedinstaller" in _runas_lc
+                        or "local service" in _runas_lc
+                        or "network service" in _runas_lc)
+            if _is_priv:
+                report.add("HIGH", "SECRET-SIDECHANNEL", path,
+                           _ln(_tm),
+                           f"Privileged scheduled task: runs as "
+                           f"{_runas} → {_task_bin[:80]}",
+                           hint=(f"if `{_task_bin[:60]}` OR its "
+                                 f"parent dir is user-writable, "
+                                 f"hijack + wait for scheduled "
+                                 f"execution  |  verify accesschk64 "
+                                 f"-uwq '{_task_bin[:60]}' `Users`  |"
+                                 f" replace binary, then wait for "
+                                 f"task trigger OR force-run: "
+                                 f"schtasks /run /tn <TaskName>"))
 
     # iter-256: Windows privesc chain - unquoted service path +
     # PowerUp modifiable service + winPEAS modifiable-service
