@@ -7498,6 +7498,64 @@ def _multiline_passes(path, report, store):
                              "cached domain creds (DCC2 hash for "
                              "hashcat -m 2100) in ONE command"))
 
+    # iter-272: Volume Shadow Copy (VSS) hive / NTDS.dit extraction.
+    # Third hive-dump path alongside iter-268 (ntdsutil IFM) and
+    # iter-270 (reg save HKLM). On a live Windows box the SAM/SYSTEM/
+    # SECURITY hives and ntds.dit are opened with exclusive locks;
+    # `reg save` bypasses via SeBackupPrivilege, but `vssadmin create
+    # shadow` + `copy \\?\GLOBALROOT\...` is the classic alternative
+    # when reg save is unavailable / audited. Distinctive path prefix
+    # `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy<N>` never appears
+    # in normal Windows use.
+    _VSS_HIVE_PATH = re.compile(
+        r'(?i)\\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy\d+\\'
+        r'(?:[^\r\n\'"<>|]{1,240}?\\)?'
+        r'(ntds\.dit|SAM|SYSTEM|SECURITY|SOFTWARE)\b')
+    if not filters.is_doc_file(path):
+        _vss_seen = set()
+        for _vm in _VSS_HIVE_PATH.finditer(text):
+            _artifact = _vm.group(1).lower() if _vm.group(1).lower() == "ntds.dit" else _vm.group(1).upper()
+            if _artifact in _vss_seen:
+                continue
+            _vss_seen.add(_artifact)
+            if _artifact == "ntds.dit":
+                report.add("CRITICAL", "INTERESTING FILES", path,
+                           _ln(_vm),
+                           "VSS ntds.dit extraction path captured - "
+                           "DC NTDS.dit copied out of shadow copy",
+                           hint=("copy the extracted ntds.dit + a paired"
+                                 " SYSTEM hive to attacker, then: "
+                                 "impacket-secretsdump -ntds ntds.dit "
+                                 "-system SYSTEM LOCAL  |  yields ALL "
+                                 "domain user NT + LM hashes offline "
+                                 "including krbtgt for golden ticket"))
+            else:
+                _sev = "HIGH" if _artifact in ("SAM", "SECURITY") \
+                    else "MEDIUM"
+                report.add(_sev, "INTERESTING FILES", path, _ln(_vm),
+                           f"VSS {_artifact} hive extraction path "
+                           f"captured (shadow-copy hive dump)",
+                           hint=(f"pair with SYSTEM hive for boot key,"
+                                 f" then impacket-secretsdump "
+                                 f"-{_artifact.lower()} <path> -system"
+                                 f" <SYSTEM> LOCAL  |  same output as "
+                                 f"iter-270 reg save chain"))
+            if store is not None:
+                store.add(Evidence(kind="hive_file", source=path,
+                                   line=_ln(_vm),
+                                   meta={"artifact": _artifact,
+                                         "extraction": "vss"}))
+        # Roll-up: if BOTH ntds.dit AND SYSTEM extracted via VSS, the
+        # operator has full offline domain-hash dump capability.
+        if "ntds.dit" in _vss_seen and "SYSTEM" in _vss_seen:
+            report.add("CRITICAL", "INTERESTING FILES", path, None,
+                       "VSS full DC dump ready (ntds.dit + SYSTEM "
+                       "hive both extracted)",
+                       hint=("run: impacket-secretsdump -ntds ntds.dit"
+                             " -system SYSTEM LOCAL -outputfile dump  "
+                             "|  domain hashes hit dump.ntds, LSA hits"
+                             " dump.secrets, cached hits dump.cached"))
+
     # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
     # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
     # host. credline.py captures the cred pair itself but doesn't
