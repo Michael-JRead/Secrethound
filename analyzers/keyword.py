@@ -7433,17 +7433,28 @@ def _multiline_passes(path, report, store):
     # yields the same output as the live -ntds LOCAL path from iter-268.
     # Fires per unique (hive, output-path) so the same command echoed
     # in bash history + PowerShell transcript emits once. Doc-file gated.
+    # iter-275 audit fix: require the path to be shell-path-shaped
+    # (starts with `<drive>:\` or `\\`) so a prose sentence like
+    # `# you can use reg save HKLM\SAM C:\out\sam.hive to grab hashes`
+    # doesn't fire with `_outp='C:\out\sam.hive to grab hashes'`.
+    # Path shape also implicitly bounds the lazy `{2,240}?` capture at
+    # the first whitespace, terminating the greedy tail.
     _REG_SAVE = re.compile(
         r'(?im)\b(?:reg(?:\.exe)?\s+save|Save-Registry)\s+'
         r'HK(?:LM|EY_LOCAL_MACHINE)\\'
         r'(SAM|SYSTEM|SECURITY|SOFTWARE)\b\s+'
-        r'([\'"]?[^\r\n\'"<>|]{2,240}?)[\'"]?\s*(?:/y\s*)?$')
+        r'([\'"]?(?:[A-Za-z]:\\|\\\\)[^\r\n\'"<>| ]{1,240})[\'"]?'
+        r'\s*(?:/y\s*)?$')
     if not filters.is_doc_file(path):
         _reg_save_seen = set()
         _reg_save_hives = set()
         for _rm in _REG_SAVE.finditer(text):
             _hive = _rm.group(1).upper()
-            _outp = _rm.group(2).strip()
+            # iter-275 audit fix: strip asymmetric leading quote. The
+            # `[\'"]?` in the capture group was consuming the leading
+            # quote, but the trailing `[\'"]?` outside stripped only
+            # the closing one, leaving an orphan `"C:\path\SAM.hive`.
+            _outp = _rm.group(2).strip().strip('"\'')
             _sig = (_hive, _outp)
             if _sig in _reg_save_seen:
                 continue
@@ -7507,6 +7518,9 @@ def _multiline_passes(path, report, store):
     # when reg save is unavailable / audited. Distinctive path prefix
     # `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy<N>` never appears
     # in normal Windows use.
+    # iter-275 audit fix: the intermediate-dir class `[^\r\n'"<>|]` includes
+    # backslash so this actually tolerates ARBITRARY intermediate depth
+    # (fine - just corrects the "one intermediate dir" claim above).
     _VSS_HIVE_PATH = re.compile(
         r'(?i)\\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy\d+\\'
         r'(?:[^\r\n\'"<>|]{1,240}?\\)?'
@@ -7562,11 +7576,16 @@ def _multiline_passes(path, report, store):
     # was either the operator's own staging or prior-compromise
     # artifacts left on the box. Highly distinctive attacker signatures.
     #
-    # Signal A: certutil -urlcache -f http://host/path -> LOLBAS-classic
-    # payload fetch (any -urlcache variant + a URL = attacker tradecraft).
+    # Signal A: certutil -urlcache http://host/path -> LOLBAS-classic
+    # payload fetch. iter-275 audit fix: restrict to `-urlcache` (and
+    # the `-verifyctl` variant that also fetches URLs) - the previous
+    # `-url|-f` alternation matched benign admin uses:
+    #   certutil -addstore -f Root https://pki/rootca.crt  (cert install)
+    #   certutil -URL https://ocsp.example.com/            (OCSP verify)
+    #   certutil -f -syncWithWU https://download.ms.com/   (WSUS sync)
     _LOL_CERTUTIL = re.compile(
         r'(?i)\bcertutil(?:\.exe)?\b[^\r\n]{0,80}?'
-        r'-(?:urlcache|url|f)\b[^\r\n]{0,120}?'
+        r'-(?:urlcache|verifyctl)\b[^\r\n]{0,120}?'
         r'(https?://[^\s\'"<>]{6,200})')
     # Signal B: bitsadmin /transfer job http://... - BITS-based fetch
     _LOL_BITSADMIN = re.compile(
@@ -7664,7 +7683,37 @@ def _multiline_passes(path, report, store):
             _cred_sh = _cred.replace("'", "'\\''")
             # NT-hash-shaped cred triggers PtH hint; otherwise plaintext.
             _is_hash = bool(re.fullmatch(r'[a-fA-F0-9]{32}(?::[a-fA-F0-9]{32})?', _cred))
-            if _proto == "WINRM":
+            # iter-275 audit fix: blank/canonical-hash filter. Real
+            # Pwn3d! creds aren't the empty-NT 31d6cfe0d16ae931b73c59d
+            # 7e0c089c0 (is_blank_hash) or the null-LM
+            # aad3b435b51404eeaad3b435b51404ee, and canonical hex like
+            # 0123456789abcdef... is cheatsheet paste-in.
+            if _is_hash:
+                _nt_only = _cred.split(":")[-1]
+                if (filters.is_blank_hash(_nt_only) or
+                        filters.is_canonical_sample(_nt_only)):
+                    continue
+            # iter-275 audit fix: empty cred = Kerberos ticket auth
+            # (or scan-with-no-cred success like SMB null anon). Emit
+            # a `-k --use-kcache` hint instead of dangling ':' splices.
+            _has_cred = bool(_cred)
+            if not _has_cred:
+                # Kerberos-flavored hint: TGT already in KRB5CCNAME.
+                if _proto == "WINRM":
+                    _cmd = (f"evil-winrm -i {_ip} -u '{_user_sh}' -r "
+                            f"'{_dom_sh}'  # requires KRB5CCNAME set")
+                elif _proto == "SMB":
+                    _cmd = (f"impacket-psexec -k -no-pass '{_dom_sh}/"
+                            f"{_user_sh}'@{_ip}  # KRB5CCNAME must "
+                            f"already hold the ticket")
+                elif _proto == "MSSQL":
+                    _cmd = (f"impacket-mssqlclient -k -no-pass "
+                            f"'{_dom_sh}/{_user_sh}'@{_ip}")
+                else:
+                    _cmd = (f"try {_proto.lower()} lateral movement "
+                            f"with Kerberos ticket for '{_dom_sh}/"
+                            f"{_user_sh}'")
+            elif _proto == "WINRM":
                 _cmd = (f"evil-winrm -i {_ip} -u '{_user_sh}' "
                         f"{'-H' if _is_hash else '-p'} "
                         f"'{_cred_sh}'")
@@ -7674,27 +7723,39 @@ def _multiline_passes(path, report, store):
                         f"@{_ip} "
                         f"{'-hashes :' + _cred_sh if _is_hash else ''}")
             elif _proto == "MSSQL":
+                # iter-275 audit fix: mirror the SMB pattern's -is_hash
+                # guard on the password slot. Previously always spliced
+                # `:{cred}` before @ip AND appended `-hashes`, producing
+                # `mssqlclient 'DOM/user:HASH'@ip -hashes :HASH` which
+                # is ambiguous / non-standard.
                 _cmd = (f"impacket-mssqlclient '{_dom_sh}/{_user_sh}"
-                        f":{_cred_sh}'@{_ip}"
+                        f"{':' + _cred_sh if not _is_hash else ''}'"
+                        f"@{_ip}"
                         f"{' -hashes :' + _cred_sh if _is_hash else ''}")
             else:
                 _cmd = (f"try {_proto.lower()} lateral movement with "
                         f"'{_dom_sh}/{_user_sh}'")
+            # iter-275 audit fix: skip the spray hint when cred is empty
+            # (would emit `nxc smb <cidr> -u 'X' -p ''` which is nonsense).
+            _spray_hint = ("" if not _has_cred else
+                           (f"  |  or reuse cred on other hosts: nxc "
+                            f"smb <cidr> -u '{_user_sh}' "
+                            f"{'-H' if _is_hash else '-p'} "
+                            f"'{_cred_sh}' --continue-on-success"))
             report.add("HIGH", "RECON", path, _ln(_pwn),
                        f"LOCAL ADMIN: {_dom}\\{_user} on {_ip} "
                        f"({_hostn}) via {_proto} - PSEXEC READY",
-                       hint=(f"{_cmd}  |  or reuse cred on other hosts:"
-                             f" nxc smb <cidr> -u '{_user_sh}' "
-                             f"{'-H' if _is_hash else '-p'} "
-                             f"'{_cred_sh}' --continue-on-success"))
+                       hint=f"{_cmd}{_spray_hint}")
             if store is not None:
                 store.add(Evidence(kind="admin", user=_user, host=_ip,
                                    domain=_dom, source=path,
                                    line=_ln(_pwn),
                                    meta={"hostname": _hostn,
                                          "protocol": _proto,
-                                         "cred_kind": "hash"
-                                         if _is_hash else "plaintext"}))
+                                         "cred_kind": "kerberos"
+                                         if not _has_cred else
+                                         ("hash" if _is_hash
+                                          else "plaintext")}))
 
     # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
     # (impacket secretsdump.py LSASecrets output)
