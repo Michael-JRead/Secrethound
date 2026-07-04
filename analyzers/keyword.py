@@ -7856,6 +7856,72 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_ln(_am),
                                        meta={"source": "powerview"}))
 
+    # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
+    # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
+    # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
+    # and only intel-worthy; on regular hosts (WORKSTATION_TRUST_ACCOUNT)
+    # it's a CRITICAL abuse primitive - any user coerced (or naturally
+    # authenticating) to that host leaks their TGT to LSASS, and if the
+    # operator has SYSTEM there they can extract it with sekurlsa::tickets
+    # (mimikatz) / Rubeus dump. Concretely: get any DA to run something
+    # against that box, then Rubeus / mimikatz -> Administrator TGT.
+    # Two field orderings covered.
+    _PV_UNCONS_A = re.compile(
+        r'(?im)^samaccountname\s*:\s*([\w.\-$]{1,60}\$)\s*[\r\n]+'
+        r'[\s\S]{0,600}?'
+        r'^useraccountcontrol\s*:([^\r\n]{0,300})')
+    _PV_UNCONS_B = re.compile(
+        r'(?im)^useraccountcontrol\s*:([^\r\n]{0,300})[\s\S]{0,600}?'
+        r'^samaccountname\s*:\s*([\w.\-$]{1,60}\$)')
+    if not filters.is_doc_file(path):
+        _unc_seen = set()
+        for _rx, _sam_grp, _uac_grp in ((_PV_UNCONS_A, 1, 2),
+                                          (_PV_UNCONS_B, 2, 1)):
+            for _um in _rx.finditer(text):
+                _uac_str = _um.group(_uac_grp)
+                if "TRUSTED_FOR_DELEGATION" not in _uac_str.upper():
+                    continue
+                if "CONSTRAINED_DELEGATION" in _uac_str.upper():
+                    # Constrained delegation is a different attack shape
+                    # (covered by ADCS ESC/RBCD elsewhere); skip here.
+                    continue
+                _sam = _um.group(_sam_grp).strip()
+                _sam_lower = _sam.lower()
+                if _sam_lower in _unc_seen:
+                    continue
+                _unc_seen.add(_sam_lower)
+                _is_dc = "SERVER_TRUST_ACCOUNT" in _uac_str.upper()
+                _sam_sh = _sam.replace("'", "'\\''")
+                if _is_dc:
+                    report.add("HIGH", "RECON", path, _ln(_um),
+                               f"Unconstrained delegation on DC {_sam} "
+                               f"(SERVER_TRUST_ACCOUNT - by-design)",
+                               hint=("DCs hold unconstrained by design;"
+                                     " if operator can force a DA to "
+                                     "auth to this DC and the DC is "
+                                     "compromised, they leak a Golden-"
+                                     "Ticket-equivalent TGT to LSASS"))
+                else:
+                    report.add("CRITICAL", "RECON", path, _ln(_um),
+                               f"Unconstrained delegation on {_sam} "
+                               f"(non-DC) - TGT harvest primitive",
+                               hint=(f"if compromised: mimikatz "
+                                     f"sekurlsa::tickets /export  |  "
+                                     f"then force a target user "
+                                     f"(preferably a DA) to auth to "
+                                     f"{_sam_sh}: PetitPotam/PrinterBug"
+                                     f"/DFSCoerce are LAB-ONLY on exam"
+                                     f"; also cross-domain: `nxc smb "
+                                     f"{_sam_sh} -u <victim> -p <pw>` "
+                                     f"forces auth  |  captured TGT: "
+                                     f"Rubeus ptt /ticket:<b64> then "
+                                     f"impacket-psexec -k @<target-dc>"))
+                if store is not None:
+                    store.add(Evidence(kind="host", host=_sam,
+                                       fact="unconstrained",
+                                       source=path, line=_ln(_um),
+                                       meta={"is_dc": _is_dc}))
+
     # iter-271: NetExec / crackmapexec (Pwn3d!) marker. When a service
     # scan line ends with `(Pwn3d!)`, that user is LOCAL ADMIN on that
     # host. credline.py captures the cred pair itself but doesn't
