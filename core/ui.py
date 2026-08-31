@@ -253,51 +253,64 @@ class UI:
                        .replace("O", f"{RED}O{WHITE}")
             hound.append(f"{WHITE}{piece}{R}")
 
-        # ── SECRET wordmark (bold white) ──
-        SECRET_UNICODE = [
-            r"███████╗███████╗ ██████╗██████╗ ███████╗████████╗",
-            r"██╔════╝██╔════╝██╔════╝██╔══██╗██╔════╝╚══██╔══╝",
-            r"███████╗█████╗  ██║     ██████╔╝█████╗     ██║   ",
-            r"╚════██║██╔══╝  ██║     ██╔══██╗██╔══╝     ██║   ",
-            r"███████║███████╗╚██████╗██║  ██║███████╗   ██║   ",
-            r"╚══════╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝   ╚═╝   ",
+        # ── SECRET + HOUND wordmark side-by-side (6 rows) ──
+        # Each row = SECRET half (bold white) + gap + HOUND half
+        # (bold red). Preserved exactly from the operator's spec.
+        # Total per-row width ~101 cols including gap, so this
+        # requires a terminal ≥ ~103 cols with the 2-space indent.
+        WORDMARK_UNICODE = [
+            (r"███████╗███████╗ ██████╗██████╗ ███████╗████████╗",
+             "        ",
+             r"██╗  ██╗ ██████╗ ██╗   ██╗███╗   ██╗██████╗ "),
+            (r"██╔════╝██╔════╝██╔════╝██╔══██╗██╔════╝╚══██╔══╝",
+             "        ",
+             r"██║  ██║██╔═══██╗██║   ██║████╗  ██║██╔══██╗"),
+            (r"███████╗█████╗  ██║     ██████╔╝█████╗     ██║   ",
+             "        ",
+             r"███████║██║   ██║██║   ██║██╔██╗ ██║██║  ██║"),
+            (r"╚════██║██╔══╝  ██║     ██╔══██╗██╔══╝     ██║   ",
+             "        ",
+             r"██╔══██║██║   ██║██║   ██║██║╚██╗██║██║  ██║"),
+            (r"███████║███████╗╚██████╗██║  ██║███████╗   ██║   ",
+             "        ",
+             r"██║  ██║╚██████╔╝╚██████╔╝██║ ╚████║██████╔╝"),
+            (r"╚══════╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝   ╚═╝   ",
+             "        ",
+             r"╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═════╝ "),
         ]
-        # ASCII fallback (figlet standard, 5 lines)
-        SECRET_ASCII = [
-            r"  ____                    _   ",
-            r" / ___|  ___  ___ _ __ __| |_ ",
-            r" \___ \ / _ \/ __| '_/ _ \  _|",
-            r"  ___) |  __/ (__| | |  __/ |_",
-            r" |____/ \___|\___|_|  \___|\__|",
+        # ASCII fallback (figlet standard, side-by-side, 5 rows)
+        WORDMARK_ASCII = [
+            (r"  ____                    _   ",
+             "   ",
+             r"  _   _                       _ "),
+            (r" / ___|  ___  ___ _ __ __| |_ ",
+             "   ",
+             r" | | | | ___  _   _ _ __   __| |"),
+            (r" \___ \ / _ \/ __| '_/ _ \  _|",
+             "   ",
+             r" | |_| |/ _ \| | | | '_ \ / _` |"),
+            (r"  ___) |  __/ (__| | |  __/ |_",
+             "   ",
+             r" |  _  | (_) | |_| | | | | (_| |"),
+            (r" |____/ \___|\___|_|  \___|\__|",
+             "   ",
+             r" |_| |_|\___/ \__,_|_| |_|\__,_|"),
         ]
-        # ── HOUND wordmark (bold red) ──
-        HOUND_UNICODE = [
-            r"██╗  ██╗ ██████╗ ██╗   ██╗ ███╗   ██╗ ██████╗   ",
-            r"██║  ██║██╔═══██╗██║   ██║ ████╗  ██║██╔════╝   ",
-            r"███████║██║   ██║██║   ██║ ██╔██╗ ██║██║  ███╗  ",
-            r"██╔══██║██║   ██║██║   ██║ ██║╚██╗██║██║   ██║  ",
-            r"██║  ██║╚██████╔╝╚██████╔╝ ██║ ╚████║╚██████╔╝  ",
-            r"╚═╝  ╚═╝ ╚═════╝  ╚═════╝  ╚═╝  ╚═══╝ ╚═════╝   ",
-        ]
-        HOUND_ASCII = [
-            r"  _   _                       _ ",
-            r" | | | | ___  _   _ _ __   __| |",
-            r" | |_| |/ _ \| | | | '_ \ / _` |",
-            r" |  _  | (_) | |_| | | | | (_| |",
-            r" |_| |_|\___/ \__,_|_| |_|\__,_|",
-        ]
-
-        secret_src = SECRET_ASCII if self.ascii else SECRET_UNICODE
-        hound_src = HOUND_ASCII if self.ascii else HOUND_UNICODE
-        secret = [f"{WHITE}  {row}{R}" for row in secret_src]
-        hound_word = [f"{RED}  {row}{R}" for row in hound_src]
+        wordmark_src = (WORDMARK_ASCII if self.ascii
+                        else WORDMARK_UNICODE)
+        # Compose each row: SECRET (white) + gap (uncolored) + HOUND (red)
+        wordmark = []
+        for s_row, gap, h_row in wordmark_src:
+            wordmark.append(f"  {WHITE}{s_row}{R}{gap}{RED}{h_row}{R}")
+        # Compute unified wordmark width (chars, no ANSI) for
+        # divider + tagline centering below.
+        _line_width = 2 + len(wordmark_src[0][0]) + len(wordmark_src[0][1]) + len(wordmark_src[0][2])
 
         # ── divider + tagline + status ──
-        # Divider width matches the wordmark span (~51 cols including
-        # the 2-col indent) so the rule frames the wordmark instead of
-        # overshooting. Tagline padding is computed from the divider so
-        # both wordmarks and tagline share the same visual center.
-        rule_width = 51
+        # Divider width matches the combined wordmark span so the rule
+        # frames the wordmark end-to-end. Tagline + status are centered
+        # against that width.
+        rule_width = _line_width
         rule = rule_char * (rule_width - 2)  # account for 2-space indent
         divider = f"{DRED}  {rule}{R}"
         tag_text = (f"H U N T  {bul}  C O L L E C T  "
@@ -309,13 +322,13 @@ class UI:
         status_pad = max(0, (rule_width - len(status_text)) // 2)
         status = f"{DWHITE}{' ' * status_pad}{status_text}{R}"
 
-        # Compact layout — 20 lines including status, fits on an
-        # 80x24 terminal with room for the scanning-status line.
+        # Compact layout — 15 lines including status, fits on an
+        # 80x24 terminal vertically. Horizontal width ~103 cols; needs
+        # a terminal at least ~103 columns wide (within 80-120 spec).
         return "\n".join([
             *hound,           # 5 lines
             "",
-            *secret,          # 6 lines
-            *hound_word,      # 6 lines (unified with SECRET, no blank)
+            *wordmark,        # 6 lines side-by-side SECRET HOUND
             divider,
             tagline,
             divider,
