@@ -211,57 +211,62 @@ class UI:
                subtitle="Red Team Loot Intelligence"):
         """SecretHound startup banner.
 
-        Layout (top→bottom):
-            1. hound ASCII (outline white, eye @ and nose O in red)
-            2. SECRET wordmark (bold white)
-            3. HOUND wordmark (bold red)
-            4. dim-red divider ─── tagline ─── dim-red divider
-            5. status line (dim): SecretHound v<ver> — <subtitle>
+        Polished v5 layout (top→bottom, ~14 lines):
+            ═══ heavy top rule ═══
+            hound ASCII (5 lines) — outline bold white, eye @ +
+                                     nose O bright red, indented
+                                     to align with wordmark left edge
+            (blank)
+            side-by-side wordmark (5 lines) — SECRET half bold white,
+                                              HOUND half bright red
+            ─── light rule ───
+            centered tagline — HUNT ● COLLECT ● ORGANIZE (bullets red)
+            info line — v<ver> (red) left, <subtitle> (dim) right
+            ═══ heavy bottom rule ═══
 
         Color decisions are made HERE based on `self.color`; the
         caller in secrethound.py already gates on --no-color and
         stdout.isatty(). Suppression (--quiet/--json/non-tty stderr)
-        is also handled by the caller — this method only renders.
+        is also handled by the caller.
 
-        Under `--ascii` (self.ascii=True) the Unicode block-drawing
-        wordmarks degrade to a compact figlet-standard ASCII font
-        and the • bullet degrades to `.` so the banner still reads
-        cleanly on terminals without Unicode box glyphs.
+        `--ascii` (self.ascii=True) degrades the ═ (heavy) and ─
+        (light) rules to `=` and `-`, the ● bullet to `*`, and the
+        — em-dash to `-`. Everything else is already 7-bit ASCII.
         """
         RED = self.paint("red")
         WHITE = self.paint("white")
         DRED = self.paint("dred")
         DWHITE = self.paint("dwhite")
-        DIM = self.paint("dim")
         R = self.rst
-        bul = "•" if not self.ascii else "."   # •
-        rule_char = "─" if not self.ascii else "-"  # ─
+        # Glyph choices — degraded set is strict 7-bit ASCII for
+        # legacy terminals; default set uses widely-supported Unicode
+        # (verified rendering in operator's terminal).
+        if self.ascii:
+            bul, heavy, light, dash = "*", "=", "-", "-"
+        else:
+            bul, heavy, light, dash = "●", "═", "─", "—"
 
         # ── hound ASCII (5 lines) — eye @ + nose O highlighted ──
-        # Preserve the operator's exact whitespace + glyph layout.
+        # Re-indented so the hound's leftmost stroke lines up with
+        # column 3 (matching the wordmark's left edge). Was at col 4-7
+        # which made it float visually detached from the wordmark.
         HOUND_RAW = [
-            r"       / \__          ",
-            r"      (    @\___      ",
-            r"      /         O     ",
-            r"     /   (_____/      ",
-            r"    /_____/           ",
+            r"      / \__",
+            r"     (    @\___",
+            r"     /         O",
+            r"    /   (_____/",
+            r"   /_____/",
         ]
         hound = []
         for row in HOUND_RAW:
-            # Inject red around @ and O, white for the rest.
-            piece = row.replace("@", f"{RED}@{WHITE}") \
-                       .replace("O", f"{RED}O{WHITE}")
+            piece = (row.replace("@", f"{RED}@{WHITE}")
+                        .replace("O", f"{RED}O{WHITE}"))
             hound.append(f"{WHITE}{piece}{R}")
 
         # ── SECRET + HOUND wordmark, side-by-side (5 rows) ──
-        # Rendered in figlet "standard" ASCII glyphs because U+2588
-        # FULL BLOCK + box-drawing chars degrade to hollow outlines
-        # in terminals whose monospace font lacks solid-block glyphs
-        # (Windows Terminal on some fonts, web terminals, remote SSH
-        # sessions with legacy locales). ASCII figlet renders
-        # identically in every terminal, every font, every codepage.
-        # Preserves the exact side-by-side SECRET(left) + HOUND(right)
-        # layout the operator requested; only the glyph set changes.
+        # Figlet "standard" ASCII glyphs: renders identically in every
+        # terminal + font + codepage (unlike U+2588 block-drawing,
+        # which degrades to hollow outlines on many fonts).
         WORDMARK = [
             (r"  ____                    _    ",
              "     ",
@@ -279,41 +284,47 @@ class UI:
              "     ",
              r" |_| |_|\___/ \__,_|_| |_|\__,_|"),
         ]
-        # Compose each row: SECRET (white) + gap (uncolored) + HOUND (red)
         wordmark = []
         for s_row, gap, h_row in WORDMARK:
             wordmark.append(f"  {WHITE}{s_row}{R}{gap}{RED}{h_row}{R}")
-        # Unified wordmark width for divider + tagline centering.
-        _line_width = (2 + len(WORDMARK[0][0]) + len(WORDMARK[0][1])
-                       + len(WORDMARK[0][2]))
+        # Total wordmark span (chars, no ANSI) drives frame + centering.
+        rule_width = (2 + len(WORDMARK[0][0]) + len(WORDMARK[0][1])
+                      + len(WORDMARK[0][2]))
+        inner = rule_width - 2  # frame rule length (2-col indent)
 
-        # ── divider + tagline + status ──
-        # Divider width matches the combined wordmark span so the rule
-        # frames the wordmark end-to-end. Tagline + status are centered
-        # against that width.
-        rule_width = _line_width
-        rule = rule_char * (rule_width - 2)  # account for 2-space indent
-        divider = f"{DRED}  {rule}{R}"
-        tag_text = (f"H U N T  {bul}  C O L L E C T  "
-                    f"{bul}  O R G A N I Z E")
-        pad = max(0, (rule_width - len(tag_text)) // 2)
-        tagline = f"{WHITE}{' ' * pad}{tag_text}{R}"
-        em_dash = "—" if not self.ascii else "-"  # —
-        status_text = f"SecretHound v{version}  {em_dash}  {subtitle}"
-        status_pad = max(0, (rule_width - len(status_text)) // 2)
-        status = f"{DWHITE}{' ' * status_pad}{status_text}{R}"
+        # ── heavy top + bottom frame rules (═) ──
+        top_rule = f"{DRED}  {heavy * inner}{R}"
+        bot_rule = top_rule
+        mid_rule = f"{DRED}  {light * inner}{R}"
 
-        # Compact layout — 15 lines including status, fits on an
-        # 80x24 terminal vertically. Horizontal width ~103 cols; needs
-        # a terminal at least ~103 columns wide (within 80-120 spec).
+        # ── centered tagline: HUNT ● COLLECT ● ORGANIZE ──
+        # Bullets colored red for accent against white tagline text.
+        # Compute uncolored text width for padding, then interpolate
+        # colors into the printed form.
+        tag_plain = f"H U N T  {bul}  C O L L E C T  {bul}  O R G A N I Z E"
+        tag_pad = max(0, (rule_width - len(tag_plain)) // 2)
+        tag_colored = tag_plain.replace(bul, f"{RED}{bul}{WHITE}")
+        tagline = f"{WHITE}{' ' * tag_pad}{tag_colored}{R}"
+
+        # ── info line: v<ver> left, subtitle right, on same row ──
+        # Version accented in bright red; subtitle in dim white.
+        ver_text = f"v{version}"
+        sub_text = subtitle
+        # Layout: 2-col indent + ver_text + spaces + sub_text = rule_width
+        gap_spaces = max(1, rule_width - 2 - len(ver_text) - len(sub_text))
+        info = (f"  {RED}{ver_text}{R}{' ' * gap_spaces}"
+                f"{DWHITE}{sub_text}{R}")
+
+        # ── assemble (14 lines) ──
         return "\n".join([
+            top_rule,
             *hound,           # 5 lines
             "",
-            *wordmark,        # 6 lines side-by-side SECRET HOUND
-            divider,
+            *wordmark,        # 5 lines side-by-side
+            mid_rule,
             tagline,
-            divider,
-            status,
+            info,
+            bot_rule,
         ])
 
     # ── legend (winPEAS-style colour key) ──
