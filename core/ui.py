@@ -206,16 +206,45 @@ class UI:
 
     # ── banner ──
     def banner(self, version="2.0", subtitle="offline credential & secret analyzer for OSCP+ loot"):
+        # ASCII wolf head in profile (facing right, glowing eye, red data
+        # stream from the mouth) + SECRETHOUND wordmark. Mirrors the
+        # SecretHound.png logo. Under --ascii the box/dot glyphs
+        # degrade to plain ASCII.
+        if self.ascii:
+            wolf = [
+                r"    ,--.___          ",
+                r"   / o    \___==.o.o.",
+                r"    \___       \_=.o.",
+                r"        \___==.o.    ",
+                r"                     ",
+            ]
+            dot = "."
+        else:
+            wolf = [
+                r"    ▄▄▄▄▄▄            ",
+                r"  ▄█▓  ●  ▀██▄══●●●   ",
+                r" ▀██▄▄▄▄▄▄▄██▀══●●    ",
+                r"      ▀▀▀▀▀   ══●     ",
+                r"                      ",
+            ]
+            dot = "·"
         art = [
-            r"  ___  ___ __ _ __ ___| |_  |_  ___ _  _ _ _  __| |",
-            r" (_-< / -_)/ _| '_/ -_)  _| | || / _ \ || | ' \/ _` |",
-            r" /__/ \___|\__|_| \___|\__| |_||_\___/\_,_|_||_\__,_|",
+            r" ___                _  _  _                       _ ",
+            r"/ __| ___  __ _ _ _(_)| |_| |_  ___ _  _ _ _  __| |",
+            r"\__ \/ -_)/ _| '_/ -_)  _|   \/ _ \ || | ' \/ _` |",
+            r"|___/\___|\__|_| \___|\__|_||_\___/\_,_|_||_\__,_|",
         ]
+        # left-pad text lines so wolf and text align on the same rows,
+        # wolf goes above (5 lines), text below (4 lines) — 9 lines total
         lines = []
-        for a in art:
-            lines.append(self.c("bcyan", a))
-        sep = "·" if not self.ascii else "-"
-        tagline = self.c("gray", f"   v{version}  {sep}  {subtitle}")
+        for row in wolf:
+            lines.append(self.c("red", row))
+        for row in art:
+            lines.append(self.c("bcyan", row))
+        sep = dot if not self.ascii else "-"
+        tagline = self.c("gray",
+                         f"   v{version}  {sep}  HUNT  {sep}  COLLECT"
+                         f"  {sep}  ORGANIZE  {sep}  {subtitle}")
         return "\n".join(lines) + "\n" + tagline
 
     # ── legend (winPEAS-style colour key) ──
