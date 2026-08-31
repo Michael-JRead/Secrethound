@@ -253,58 +253,39 @@ class UI:
                        .replace("O", f"{RED}O{WHITE}")
             hound.append(f"{WHITE}{piece}{R}")
 
-        # ── SECRET + HOUND wordmark side-by-side (6 rows) ──
-        # Each row = SECRET half (bold white) + gap + HOUND half
-        # (bold red). Preserved exactly from the operator's spec.
-        # Total per-row width ~101 cols including gap, so this
-        # requires a terminal ≥ ~103 cols with the 2-space indent.
-        WORDMARK_UNICODE = [
-            (r"███████╗███████╗ ██████╗██████╗ ███████╗████████╗",
-             "        ",
-             r"██╗  ██╗ ██████╗ ██╗   ██╗███╗   ██╗██████╗ "),
-            (r"██╔════╝██╔════╝██╔════╝██╔══██╗██╔════╝╚══██╔══╝",
-             "        ",
-             r"██║  ██║██╔═══██╗██║   ██║████╗  ██║██╔══██╗"),
-            (r"███████╗█████╗  ██║     ██████╔╝█████╗     ██║   ",
-             "        ",
-             r"███████║██║   ██║██║   ██║██╔██╗ ██║██║  ██║"),
-            (r"╚════██║██╔══╝  ██║     ██╔══██╗██╔══╝     ██║   ",
-             "        ",
-             r"██╔══██║██║   ██║██║   ██║██║╚██╗██║██║  ██║"),
-            (r"███████║███████╗╚██████╗██║  ██║███████╗   ██║   ",
-             "        ",
-             r"██║  ██║╚██████╔╝╚██████╔╝██║ ╚████║██████╔╝"),
-            (r"╚══════╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝   ╚═╝   ",
-             "        ",
-             r"╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═════╝ "),
-        ]
-        # ASCII fallback (figlet standard, side-by-side, 5 rows)
-        WORDMARK_ASCII = [
-            (r"  ____                    _   ",
-             "   ",
-             r"  _   _                       _ "),
-            (r" / ___|  ___  ___ _ __ __| |_ ",
-             "   ",
+        # ── SECRET + HOUND wordmark, side-by-side (5 rows) ──
+        # Rendered in figlet "standard" ASCII glyphs because U+2588
+        # FULL BLOCK + box-drawing chars degrade to hollow outlines
+        # in terminals whose monospace font lacks solid-block glyphs
+        # (Windows Terminal on some fonts, web terminals, remote SSH
+        # sessions with legacy locales). ASCII figlet renders
+        # identically in every terminal, every font, every codepage.
+        # Preserves the exact side-by-side SECRET(left) + HOUND(right)
+        # layout the operator requested; only the glyph set changes.
+        WORDMARK = [
+            (r"  ____                    _    ",
+             "     ",
+             r"  _   _                        _ "),
+            (r" / ___|  ___  ___ _ __ __| |_  ",
+             "     ",
              r" | | | | ___  _   _ _ __   __| |"),
-            (r" \___ \ / _ \/ __| '_/ _ \  _|",
-             "   ",
+            (r" \___ \ / _ \/ __| '_/ _ \  _| ",
+             "     ",
              r" | |_| |/ _ \| | | | '_ \ / _` |"),
-            (r"  ___) |  __/ (__| | |  __/ |_",
-             "   ",
+            (r"  ___) |  __/ (__| | |  __/ |_ ",
+             "     ",
              r" |  _  | (_) | |_| | | | | (_| |"),
             (r" |____/ \___|\___|_|  \___|\__|",
-             "   ",
+             "     ",
              r" |_| |_|\___/ \__,_|_| |_|\__,_|"),
         ]
-        wordmark_src = (WORDMARK_ASCII if self.ascii
-                        else WORDMARK_UNICODE)
         # Compose each row: SECRET (white) + gap (uncolored) + HOUND (red)
         wordmark = []
-        for s_row, gap, h_row in wordmark_src:
+        for s_row, gap, h_row in WORDMARK:
             wordmark.append(f"  {WHITE}{s_row}{R}{gap}{RED}{h_row}{R}")
-        # Compute unified wordmark width (chars, no ANSI) for
-        # divider + tagline centering below.
-        _line_width = 2 + len(wordmark_src[0][0]) + len(wordmark_src[0][1]) + len(wordmark_src[0][2])
+        # Unified wordmark width for divider + tagline centering.
+        _line_width = (2 + len(WORDMARK[0][0]) + len(WORDMARK[0][1])
+                       + len(WORDMARK[0][2]))
 
         # ── divider + tagline + status ──
         # Divider width matches the combined wordmark span so the rule
