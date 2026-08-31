@@ -28,6 +28,8 @@ C = {
     "magenta": "\033[1;35m",
     "gray": "\033[0;90m",
     "white": "\033[1;37m",
+    "dred": "\033[2;31m",        # dim red - banner dividers
+    "dwhite": "\033[2;37m",      # dim white - banner tagline / status
 }
 
 # severity → (color, tag, word)
@@ -205,47 +207,120 @@ class UI:
         return "\n".join(out)
 
     # ── banner ──
-    def banner(self, version="2.0", subtitle="offline credential & secret analyzer for OSCP+ loot"):
-        # ASCII wolf head in profile (facing right, glowing eye, red data
-        # stream from the mouth) + SECRETHOUND wordmark. Mirrors the
-        # SecretHound.png logo. Under --ascii the box/dot glyphs
-        # degrade to plain ASCII.
-        if self.ascii:
-            wolf = [
-                r"    ,--.___          ",
-                r"   / o    \___==.o.o.",
-                r"    \___       \_=.o.",
-                r"        \___==.o.    ",
-                r"                     ",
-            ]
-            dot = "."
-        else:
-            wolf = [
-                r"    ▄▄▄▄▄▄            ",
-                r"  ▄█▓  ●  ▀██▄══●●●   ",
-                r" ▀██▄▄▄▄▄▄▄██▀══●●    ",
-                r"      ▀▀▀▀▀   ══●     ",
-                r"                      ",
-            ]
-            dot = "·"
-        art = [
-            r" ___                _  _  _                       _ ",
-            r"/ __| ___  __ _ _ _(_)| |_| |_  ___ _  _ _ _  __| |",
-            r"\__ \/ -_)/ _| '_/ -_)  _|   \/ _ \ || | ' \/ _` |",
-            r"|___/\___|\__|_| \___|\__|_||_\___/\_,_|_||_\__,_|",
+    def banner(self, version="2.0",
+               subtitle="Red Team Loot Intelligence"):
+        """SecretHound startup banner.
+
+        Layout (top→bottom):
+            1. hound ASCII (outline white, eye @ and nose O in red)
+            2. SECRET wordmark (bold white)
+            3. HOUND wordmark (bold red)
+            4. dim-red divider ─── tagline ─── dim-red divider
+            5. status line (dim): SecretHound v<ver> — <subtitle>
+
+        Color decisions are made HERE based on `self.color`; the
+        caller in secrethound.py already gates on --no-color and
+        stdout.isatty(). Suppression (--quiet/--json/non-tty stderr)
+        is also handled by the caller — this method only renders.
+
+        Under `--ascii` (self.ascii=True) the Unicode block-drawing
+        wordmarks degrade to a compact figlet-standard ASCII font
+        and the • bullet degrades to `.` so the banner still reads
+        cleanly on terminals without Unicode box glyphs.
+        """
+        RED = self.paint("red")
+        WHITE = self.paint("white")
+        DRED = self.paint("dred")
+        DWHITE = self.paint("dwhite")
+        DIM = self.paint("dim")
+        R = self.rst
+        bul = "•" if not self.ascii else "."   # •
+        rule_char = "─" if not self.ascii else "-"  # ─
+
+        # ── hound ASCII (5 lines) — eye @ + nose O highlighted ──
+        # Preserve the operator's exact whitespace + glyph layout.
+        HOUND_RAW = [
+            r"       / \__          ",
+            r"      (    @\___      ",
+            r"      /         O     ",
+            r"     /   (_____/      ",
+            r"    /_____/           ",
         ]
-        # left-pad text lines so wolf and text align on the same rows,
-        # wolf goes above (5 lines), text below (4 lines) — 9 lines total
-        lines = []
-        for row in wolf:
-            lines.append(self.c("red", row))
-        for row in art:
-            lines.append(self.c("bcyan", row))
-        sep = dot if not self.ascii else "-"
-        tagline = self.c("gray",
-                         f"   v{version}  {sep}  HUNT  {sep}  COLLECT"
-                         f"  {sep}  ORGANIZE  {sep}  {subtitle}")
-        return "\n".join(lines) + "\n" + tagline
+        hound = []
+        for row in HOUND_RAW:
+            # Inject red around @ and O, white for the rest.
+            piece = row.replace("@", f"{RED}@{WHITE}") \
+                       .replace("O", f"{RED}O{WHITE}")
+            hound.append(f"{WHITE}{piece}{R}")
+
+        # ── SECRET wordmark (bold white) ──
+        SECRET_UNICODE = [
+            r"███████╗███████╗ ██████╗██████╗ ███████╗████████╗",
+            r"██╔════╝██╔════╝██╔════╝██╔══██╗██╔════╝╚══██╔══╝",
+            r"███████╗█████╗  ██║     ██████╔╝█████╗     ██║   ",
+            r"╚════██║██╔══╝  ██║     ██╔══██╗██╔══╝     ██║   ",
+            r"███████║███████╗╚██████╗██║  ██║███████╗   ██║   ",
+            r"╚══════╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝   ╚═╝   ",
+        ]
+        # ASCII fallback (figlet standard, 5 lines)
+        SECRET_ASCII = [
+            r"  ____                    _   ",
+            r" / ___|  ___  ___ _ __ __| |_ ",
+            r" \___ \ / _ \/ __| '_/ _ \  _|",
+            r"  ___) |  __/ (__| | |  __/ |_",
+            r" |____/ \___|\___|_|  \___|\__|",
+        ]
+        # ── HOUND wordmark (bold red) ──
+        HOUND_UNICODE = [
+            r"██╗  ██╗ ██████╗ ██╗   ██╗ ███╗   ██╗ ██████╗   ",
+            r"██║  ██║██╔═══██╗██║   ██║ ████╗  ██║██╔════╝   ",
+            r"███████║██║   ██║██║   ██║ ██╔██╗ ██║██║  ███╗  ",
+            r"██╔══██║██║   ██║██║   ██║ ██║╚██╗██║██║   ██║  ",
+            r"██║  ██║╚██████╔╝╚██████╔╝ ██║ ╚████║╚██████╔╝  ",
+            r"╚═╝  ╚═╝ ╚═════╝  ╚═════╝  ╚═╝  ╚═══╝ ╚═════╝   ",
+        ]
+        HOUND_ASCII = [
+            r"  _   _                       _ ",
+            r" | | | | ___  _   _ _ __   __| |",
+            r" | |_| |/ _ \| | | | '_ \ / _` |",
+            r" |  _  | (_) | |_| | | | | (_| |",
+            r" |_| |_|\___/ \__,_|_| |_|\__,_|",
+        ]
+
+        secret_src = SECRET_ASCII if self.ascii else SECRET_UNICODE
+        hound_src = HOUND_ASCII if self.ascii else HOUND_UNICODE
+        secret = [f"{WHITE}  {row}{R}" for row in secret_src]
+        hound_word = [f"{RED}  {row}{R}" for row in hound_src]
+
+        # ── divider + tagline + status ──
+        # Divider width matches the wordmark span (~51 cols including
+        # the 2-col indent) so the rule frames the wordmark instead of
+        # overshooting. Tagline padding is computed from the divider so
+        # both wordmarks and tagline share the same visual center.
+        rule_width = 51
+        rule = rule_char * (rule_width - 2)  # account for 2-space indent
+        divider = f"{DRED}  {rule}{R}"
+        tag_text = (f"H U N T  {bul}  C O L L E C T  "
+                    f"{bul}  O R G A N I Z E")
+        pad = max(0, (rule_width - len(tag_text)) // 2)
+        tagline = f"{WHITE}{' ' * pad}{tag_text}{R}"
+        em_dash = "—" if not self.ascii else "-"  # —
+        status_text = f"SecretHound v{version}  {em_dash}  {subtitle}"
+        status_pad = max(0, (rule_width - len(status_text)) // 2)
+        status = f"{DWHITE}{' ' * status_pad}{status_text}{R}"
+
+        # Compact layout — 20 lines including status, fits on an
+        # 80x24 terminal with room for the scanning-status line.
+        return "\n".join([
+            *hound,           # 5 lines
+            "",
+            *secret,          # 6 lines
+            *hound_word,      # 6 lines (unified with SECRET, no blank)
+            divider,
+            tagline,
+            divider,
+            status,
+        ])
 
     # ── legend (winPEAS-style colour key) ──
     def legend(self):

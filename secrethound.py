@@ -203,7 +203,10 @@ def main():
     ap.add_argument("--users-out", metavar="FILE", default="users.txt", help="write aggregated usernames here")
     args = ap.parse_args()
 
-    use_color = not args.no_color
+    # Color auto-disable: --no-color OR stdout is not a TTY (piped,
+    # redirected, non-interactive). Kept as one decision for the whole
+    # UI object so the RESULTS panel and the banner agree on color.
+    use_color = (not args.no_color) and sys.stdout.isatty()
     ui = UI(use_color=use_color, ascii_only=args.ascii)
 
     if args.inspect:
@@ -230,9 +233,23 @@ def main():
     patterns.HASHES.clear()
 
     # ── banner + legend (stderr so stdout stays clean) ──
-    if not args.quiet:
+    # Banner is suppressed when the operator wants clean stdout /
+    # machine-readable output: --quiet, --json (structured export
+    # implies a scripted invocation), or when stderr is not a
+    # terminal (pipe / logfile capture). The banner never touches
+    # stdout, so JSON/HTML/CSV files are never contaminated even
+    # if we did show it — this is defence-in-depth for pipelines
+    # that redirect 2>&1.
+    show_banner = (not args.quiet
+                   and not args.json
+                   and sys.stderr.isatty())
+    if show_banner:
         sys.stderr.write(ui.banner(VERSION) + "\n\n")
         sys.stderr.write(ui.c("gray", f"  scanning {root}  ({'deep' if run_entropy else 'standard'} mode)\n\n"))
+        sys.stderr.flush()
+    elif not args.quiet:
+        # scanning-status line still useful when banner is suppressed
+        sys.stderr.write(ui.c("gray", f"  scanning {root}  ({'deep' if run_entropy else 'standard'} mode)\n"))
         sys.stderr.flush()
 
     # ── enumerate, skipping self-output + noise ──
