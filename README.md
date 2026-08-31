@@ -17,17 +17,29 @@
 ---
 
 ```
-    ▄▄▄▄▄▄
-  ▄█▓  ●  ▀██▄══●●●
- ▀██▄▄▄▄▄▄▄██▀══●●
-      ▀▀▀▀▀   ══●
+  ═════════════════════════════════════════════════════════════════════
+      / \__
+     (    @\___
+     /         O
+    /   (_____/
+   /_____/
 
- ___                _  _  _                       _
-/ __| ___  __ _ _ _(_)| |_| |_  ___ _  _ _ _  __| |
-\__ \/ -_)/ _| '_/ -_)  _|   \/ _ \ || | ' \/ _` |
-|___/\___|\__|_| \___|\__|_||_\___/\_,_|_||_\__,_|
-   v2.0  ·  HUNT  ·  COLLECT  ·  ORGANIZE
+    ____                    _           _   _                        _
+   / ___|  ___  ___ _ __ __| |_        | | | | ___  _   _ _ __   __| |
+   \___ \ / _ \/ __| '_/ _ \  _|       | |_| |/ _ \| | | | '_ \ / _` |
+    ___) |  __/ (__| | |  __/ |_       |  _  | (_) | |_| | | | | (_| |
+   |____/ \___|\___|_|  \___|\__|      |_| |_|\___/ \__,_|_| |_|\__,_|
+  ─────────────────────────────────────────────────────────────────────
+             H U N T  ●  C O L L E C T  ●  O R G A N I Z E
+  v2.0                                       Red Team Loot Intelligence
+  ═════════════════════════════════════════════════════════════════════
 ```
+
+<sub>*Rendered live in color when run in an interactive terminal — SECRET half
+bold white, HOUND half bright red, hound's eye `@` and nose `O` red, tagline
+bullets `●` red, `v2.0` red, dividers dim red. Colors auto-disable when stdout
+is piped or `--no-color` is passed; the box-drawing glyphs auto-downgrade to
+7-bit ASCII (`=` / `-` / `*`) under `--ascii`.*</sub>
 
 ## What it is
 
@@ -58,10 +70,30 @@ python3 secrethound.py --inspect suspicious_config.txt
 
 # Emit a self-contained HTML report + CSV of cred pairs for the appendix
 python3 secrethound.py ./engagement --html report.html --csv creds.csv
+
+# Scripted / CI-friendly (no banner, no colors, JSON only)
+python3 secrethound.py ./engagement --quiet --json findings.json --no-color
+
+# Legacy terminal (7-bit ASCII glyphs only, no box-drawing chars)
+python3 secrethound.py ./engagement --ascii
 ```
 
 Read the **ATTACK PATH** panel first — the ranked *BEST NEXT ACTION* is
 your move.
+
+### Output flags cheat-sheet
+
+| Flag              | Effect                                                                 |
+|-------------------|------------------------------------------------------------------------|
+| `--deep`          | Run entropy analyzer + all detectors (more coverage, more noise)       |
+| `--json FILE`     | Write findings + attack-chains as JSON. Auto-suppresses startup banner |
+| `--html FILE`     | Self-contained HTML report (KPI + scoreboard + chains + tables)        |
+| `--csv FILE`      | CRED PAIRS + hashes + secrets as CSV for the report appendix           |
+| `--hashes FILE`   | Crack-ready hashes file + printed `hashcat -m <mode>` commands         |
+| `--quiet`         | Suppress banner + progress on stderr (stdout still shows dashboard)    |
+| `--no-color`      | Plain output — for piping, `script(1)` logging, or dumb terminals      |
+| `--ascii`         | Degrade box-drawing / bullet glyphs to 7-bit ASCII (`= - *`)           |
+| `--inspect FILE`  | Deep-dive one file: every secret-bearing line, numbered                |
 
 ## Features
 
