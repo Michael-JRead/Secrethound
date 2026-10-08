@@ -10,6 +10,17 @@ Basis: OffSec OSCP / OSCP+ Exam Guide (PEN-200, Nov-2024+) as resolved by an
 adversarial legality panel. Rulings:
   - ALLOWED  : manual enumeration, offline cracking, impacket, netexec, evil-winrm,
                certipy, gpp-decrypt, BloodHound collectors, pivoting (non-MSF).
+  - ALLOWED  : msfvenom + exploit/multi/handler on ALL targets (official guide:
+               "You may use the following against all of the target machines ...
+               multi handler, msfvenom"). The ONLY payload-level restriction is
+               METERPRETER: a meterpreter payload counts as Metasploit use and is
+               bound to the single chosen target. Non-meterpreter payloads
+               (shell_reverse_tcp, shell/bind_tcp, cmd/unix/reverse, ...) are
+               unlimited. See is_meterpreter() / quota_note().
+  - ONE-TARGET: msfconsole Auxiliary/Exploit/Post modules + Meterpreter — one
+               machine for the whole exam, locked on first use, failed attempt
+               does NOT grant a second target, `check` on other hosts counts,
+               MSF pivoting is forbidden (touches >1 host).
   - LAB_ONLY : Responder/relay/poisoning - rely on SPOOFING, prohibited on exam.
                May be SHOWN only with an explicit [LAB-ONLY] tag, never as a top
                action.
@@ -67,6 +78,13 @@ ALLOWLIST_BINARIES = frozenset({
     "kerbrute", "bloodyAD", "rpcclient", "tdbdump", "ldapdomaindump",
     "enum4linux", "enum4linux-ng", "snmpwalk", "snmp-check", "onesixtyone",
     "showmount", "dig", "dnsrecon", "nslookup", "host",
+    # iter-310: lowercase aliases for the CamelCase entries above/below.
+    # _primary_binaries() lowercases before lookup, so without these a
+    # chain hint like 'bloodyAD ... set password' or 'SharpHound.exe -c All'
+    # failed lint as "not on the OSCP allowlist" even though both are
+    # exam-legal manual tooling. Caught by the compliance self-check.
+    "bloodyad", "sharphound.exe", "winpeasx64.exe", "winpeasx86.exe",
+    "winpeasany.exe", "sharphound.ps1", "powerview.ps1", "powerup.ps1",
     # web enumeration / content discovery (no sqlmap, no nuclei)
     "gobuster", "ffuf", "feroxbuster", "dirb", "dirsearch", "wfuzz", "nikto",
     "whatweb", "wpscan", "curl", "wget",
@@ -126,9 +144,36 @@ DENYLIST_BINARIES = frozenset({
     "responder.py", "ntlmrelayx.py", "mitm6.py",
     # public online cracking / submission services (iter-16 audit)
     "crack.sh", "hashes.com", "weakpass.com", "online-hash-crack",
-    # msfvenom: payload generation counts toward MSF budget per OSCP+ rules
-    "msfvenom",
+    # iter-310: msfvenom REMOVED from the denylist. It was listed here AND in
+    # ALLOWLIST_BINARIES; is_denied() runs first in lint_command() so the
+    # denylist entry silently won and every legitimate msfvenom hint failed
+    # lint. The official OSCP+ guide explicitly permits msfvenom and
+    # multi/handler on ALL targets - only a METERPRETER payload is bound to
+    # the one-target Metasploit quota. Payload-level checking lives in
+    # is_meterpreter() / quota_note() below.
 })
+
+# iter-310: payload tokens that make an otherwise-free msfvenom / multi-handler
+# invocation count as Metasploit use (one-target quota). Matched as substrings
+# of the lowercased command so `windows/x64/meterpreter/reverse_tcp`,
+# `-p linux/x86/meterpreter_reverse_tcp`, `set payload .../meterpreter/...`
+# and `meterpreter >` prompt captures all hit.
+METERPRETER_MARKERS = ("meterpreter",)
+
+
+def is_meterpreter(cmd):
+    """True if the command/payload string carries a Meterpreter payload."""
+    low = (cmd or "").lower()
+    return any(m in low for m in METERPRETER_MARKERS)
+
+
+def quota_note(cmd):
+    """Short operator-facing annotation for an msfvenom / handler command.
+    Empty string when the command is quota-free."""
+    if is_meterpreter(cmd):
+        return ("METERPRETER payload = Metasploit use: bound to your ONE "
+                "chosen exam target")
+    return ""
 
 import re as _re
 

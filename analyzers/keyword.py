@@ -11,7 +11,7 @@ Passes per line:
 """
 import os
 import re
-from analyzers import filters, credline
+from analyzers import filters, credline, compliance
 
 KEY = re.compile(
     r'\b(pass(?:word|wd|phrase)?|pwd|secret|api[_-]?key|access[_-]?key|secret[_-]?key|'
@@ -8794,11 +8794,18 @@ def _multiline_passes(path, report, store):
                                        source=path, line=_row_line,
                                        meta={"source": "psloggedon-share"}))
 
-    # iter-303: msfvenom payload generation captured. Critical for
-    # OSCP+ exam compliance tracking - msfvenom counts toward the
-    # one-target Metasploit quota. Emitting per unique payload lets
-    # the operator's report show exactly how many times they used
-    # msfvenom and against which target (via LHOST/LPORT context).
+    # iter-303: msfvenom payload generation captured.
+    # iter-310 (exam-critical correction): the official OSCP+ guide permits
+    # msfvenom and exploit/multi/handler against ALL targets. The ONLY
+    # thing that counts toward the one-target Metasploit quota is a
+    # METERPRETER payload. So:
+    #   - non-meterpreter payload (shell_reverse_tcp, shell/bind_tcp,
+    #     cmd/unix/reverse_*, java/jsp_shell_*, ...)  -> INFO, unlimited.
+    #   - meterpreter payload #1                        -> MEDIUM, note quota.
+    #   - meterpreter payload #2+ (distinct sig)        -> HIGH, must be the
+    #     SAME target machine or the quota is blown.
+    # Previous behaviour flagged ANY 2nd msfvenom as "quota blown", which
+    # would scare an operator away from a perfectly legal technique.
     #
     # Real captured invocation shape:
     #   msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=10.10.14.5
@@ -8819,43 +8826,61 @@ def _multiline_passes(path, report, store):
         r'(?im)^Saved\s+as\s*:\s*(\S{2,120})')
     if not filters.is_doc_file(path):
         _msf_seen = set()
-        _msf_count = 0
-        for _mv in _MSFVENOM.finditer(text[:65536]):
+        _mtp_count = 0          # meterpreter payloads only (quota-bound)
+        _free_count = 0         # non-meterpreter payloads (unlimited)
+        for _mv in _MSFVENOM.finditer(text):
             _payload = _mv.group(1)
             _lhost = _mv.group(2) or "<?>"
             _lport = _mv.group(3) or "<?>"
             _fmt = _mv.group(4)
             _outfile = _mv.group(5) or "<stdout>"
-            _sig = (_payload, _lhost, _lport, _fmt)
+            _sig = (_payload.lower(), _lhost.lower(), _lport, _fmt.lower())
             # iter-304 audit-fix: only dedupe when both LHOST and LPORT
-            # are explicit. Two invocations that both omit them share
-            # the same (payload,"<?>","<?>",fmt) tuple, so the quota
-            # tracker would silently under-report Metasploit usage.
-            # Conservative: assume ambiguous cases are distinct so
-            # OSCP+ quota flags the operator.
+            # are explicit; ambiguous invocations are counted as distinct.
             if _lhost != "<?>" and _lport != "<?>":
                 if _sig in _msf_seen:
                     continue
                 _msf_seen.add(_sig)
-            _msf_count += 1
-            # OSCP+ exam rule: Metasploit (including msfvenom) is limited
-            # to ONE target across the entire exam. Elevate when count >1.
-            _sev = "HIGH" if _msf_count > 1 else "MEDIUM"
-            report.add(_sev, "RECON", path, _ln(_mv),
-                       f"msfvenom payload gen #{_msf_count}: "
-                       f"{_payload} LHOST={_lhost}:{_lport} -f "
-                       f"{_fmt} -o {_outfile}",
-                       hint=(f"OSCP+ EXAM QUOTA: msfvenom counts "
-                             f"toward Metasploit one-target limit"
-                             f"  |  invocation #{_msf_count} on this"
-                             f" file  |  if this is a repeat against"
-                             f" a DIFFERENT target, quota has been "
-                             f"blown - reset attack path with pure "
-                             f"non-msf alternatives (revshells.com, "
-                             f"manual asm shellcode, LOLBAS)"))
+            _is_mtp = compliance.is_meterpreter(_payload)
+            if _is_mtp:
+                _mtp_count += 1
+                _sev = "HIGH" if _mtp_count > 1 else "MEDIUM"
+                _detail = (f"msfvenom METERPRETER payload #{_mtp_count}: "
+                           f"{_payload} LHOST={_lhost}:{_lport} -f "
+                           f"{_fmt} -o {_outfile}")
+                if _mtp_count == 1:
+                    _hint = (f"OSCP+ QUOTA: a meterpreter payload is "
+                             f"Metasploit use - it binds your ONE allowed "
+                             f"MSF target for the whole exam (failed "
+                             f"attempt does NOT grant a second)  |  "
+                             f"msfvenom itself is unlimited: swap to a "
+                             f"non-meterpreter payload (windows/x64/"
+                             f"shell_reverse_tcp, linux/x64/shell_reverse"
+                             f"_tcp) + nc/multi-handler and keep MSF in "
+                             f"reserve for a harder box")
+                else:
+                    _hint = (f"OSCP+ QUOTA: meterpreter payload #"
+                             f"{_mtp_count} in this file - LEGAL only if "
+                             f"every meterpreter payload targets the SAME "
+                             f"machine; a different target = zero points "
+                             f"for that box  |  verify before continuing;"
+                             f" non-meterpreter alternative: msfvenom -p "
+                             f"<os>/<arch>/shell_reverse_tcp (unlimited)")
+            else:
+                _free_count += 1
+                _sev = "INFO"
+                _detail = (f"msfvenom payload (non-meterpreter, quota-"
+                           f"free): {_payload} LHOST={_lhost}:{_lport} -f "
+                           f"{_fmt} -o {_outfile}")
+                _hint = (f"exam-legal on every target (msfvenom + "
+                         f"multi/handler are explicitly unrestricted; "
+                         f"only meterpreter counts)  |  catch with: "
+                         f"nc -lvnp {_lport if _lport != '<?>' else '<port>'}"
+                         f"  or  msfconsole -q -x 'use multi/handler; set "
+                         f"payload {_payload}; set LHOST <me>; set LPORT "
+                         f"{_lport if _lport != '<?>' else '<port>'}; run'")
+            report.add(_sev, "RECON", path, _ln(_mv), _detail, hint=_hint)
             if store is not None:
-                # iter-304 audit-fix: cast count_in_file to str for
-                # meta value-type consistency with sibling detectors.
                 store.add(Evidence(kind="msfvenom_payload",
                                    source=path, line=_ln(_mv),
                                    meta={"payload": _payload,
@@ -8863,7 +8888,12 @@ def _multiline_passes(path, report, store):
                                          "lport": _lport,
                                          "format": _fmt,
                                          "outfile": _outfile,
-                                         "count_in_file": str(_msf_count)}))
+                                         "meterpreter": str(_is_mtp),
+                                         "quota_count": str(_mtp_count
+                                                            if _is_mtp
+                                                            else 0),
+                                         "count_in_file": str(_mtp_count
+                                                              + _free_count)}))
 
     # iter-305: Rubeus asktgt captured TGT-landing detector. Critical
     # OSCP+ AD lateral marker: operator went from captured
