@@ -159,6 +159,7 @@ SecretHound is designed for the OSCP+ exam workflow. It:
 - Python 3.8+
 - Optional: `cryptography` (only for encrypted-PEM decryption; the tool
   runs fine without it).
+- Regression suite (stdlib `unittest`, hermetic, enforces the offline guarantee): `python3 -m unittest discover -s tests -v`
 
 ## License
 

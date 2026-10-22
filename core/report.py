@@ -42,7 +42,8 @@ SEV_TAG = {"CRITICAL": "[!!]", "HIGH": "[!]", "MEDIUM": "[~]", "LOW": "[-]", "IN
 # category display order (max-severity categories first)
 CAT_ORDER = ["ATTACK CHAINS", "CRED PAIRS", "ENCODED/DECODED", "SQLITE",
              "GPP cpassword", "ASSIGNED SECRETS", "PATTERNS", "PASSWORD HASHES",
-             "PRIVATE KEYS", "RECON", "INTERESTING FILES", "HIGH ENTROPY"]
+             "PRIVATE KEYS", "PRIVESC", "PIVOT", "RECON", "INTERESTING FILES",
+             "HIGH ENTROPY"]
 # categories scanned for the START HERE hero (highest-value first)
 HERO_CATS = ["ATTACK CHAINS", "CRED PAIRS", "ENCODED/DECODED", "SQLITE",
              "GPP cpassword", "ASSIGNED SECRETS", "PASSWORD HASHES", "PRIVATE KEYS"]

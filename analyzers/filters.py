@@ -825,12 +825,28 @@ def read_text(path, max_bytes=None):
         else:
             enc = "utf-8"
     try:
-        return raw.decode(enc, errors="ignore")
+        return _norm_eol(raw.decode(enc, errors="ignore"))
     except Exception:
         try:
-            return raw.decode("utf-8", errors="ignore")
+            return _norm_eol(raw.decode("utf-8", errors="ignore"))
         except Exception:
             return None
+
+
+def _norm_eol(text):
+    """iter-311: normalise line endings exactly like Python's universal-newline
+    text mode (CRLF -> LF, then lone CR -> LF).
+
+    Windows command output (`whoami /priv`, `schtasks /query /fo LIST /v`,
+    `reg query`, `sc qc`, `icacls`, `net user`) reaches Kali as CRLF. Before
+    this, every multi-line detector anchored on `[ \\t]*$` silently missed those
+    captures because `$` (re.M) only matches before `\\n`, so the stray `\\r`
+    broke the anchor. The per-line pass in keyword.analyze() opens files in
+    universal-newline mode, so normalising identically here also keeps
+    multi-line `_ln()` numbers aligned with per-line `lineno` values."""
+    if "\r" not in text:
+        return text
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def is_secrethound_output(path):

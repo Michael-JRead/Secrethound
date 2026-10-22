@@ -15,7 +15,7 @@ from core.ui import UI
 from core import correlate
 from analyzers import (keyword, entropy, patterns, credpairs, encoded, files,
                        inspect, sqlite_triage, playbook, filters, notes, inventory,
-                       configs)
+                       configs, privesc)
 from analyzers.ingest import run as ingest_run, Store, potfile
 
 VERSION = "2.0"
@@ -348,6 +348,7 @@ def main():
         credpairs.analyze(scan_path, report)
         encoded.analyze(scan_path, report)
         keyword.analyze(scan_path, report, store)
+        privesc.analyze(scan_path, report, store)
         patterns.analyze(scan_path, report, store)
         configs.analyze(scan_path, report, store)
         if run_entropy and ext in ENTROPY_EXT:
