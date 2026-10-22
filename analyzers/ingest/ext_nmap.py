@@ -5,6 +5,7 @@ know which services a discovered cred can be tried against.
 import re
 import xml.etree.ElementTree as ET
 from analyzers.ingest.evidence import Evidence
+from analyzers import filters  # iter-313: open_text() (UTF-16/BOM/CRLF-aware)
 
 # nmap service name -> our normalized service tag + a one-line exam-legal hint
 SERVICE_MAP = {
@@ -122,7 +123,7 @@ _GNMAP = re.compile(r'^Host:\s+(\S+)\s+\(([^)]*)\)\s+Ports:\s+(.*)$')
 def _parse_gnmap(path, store, report):
     n = 0
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             for line in fh:
                 m = _GNMAP.match(line.strip())
                 if not m:
@@ -145,7 +146,7 @@ def _parse_gnmap(path, store, report):
 def parse(path, store, report):
     head = ""
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             head = fh.read(512)
     except OSError:
         return 0

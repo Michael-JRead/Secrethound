@@ -88,7 +88,7 @@ def _walk_unattend_regex(path, report, store):
     undeclared namespace prefixes). Uses the same decode recipe; the structure is
     flat enough that a regex grouping by Password element is reliable."""
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             text = fh.read()
     except OSError:
         return 0
@@ -174,7 +174,7 @@ def analyze(path, report, store=None):
     if n:
         return n
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             head = fh.read(2048)
     except OSError:
         return 0

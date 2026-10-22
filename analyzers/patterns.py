@@ -183,7 +183,7 @@ def analyze(path, report, store=None):
     # FP-audit found 100% noise there.
     _skip_hashes = bool(_LOCK_FILE.search(path or ""))
     try:
-        with open(path, "r", errors="ignore") as f:
+        with filters.open_text(path) as f:
             for lineno, line in enumerate(f, 1):
                 # pwdump row -> bind username to NT hash (and skip generic match
                 # so the same hash isn't ALSO reported unbound). Detail string is

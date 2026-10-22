@@ -21,7 +21,7 @@ _MAX_PER_LINE = 1
 
 def analyze(path, report, threshold=4.0):
     try:
-        with open(path, "r", errors="ignore") as f:
+        with filters.open_text(path) as f:
             for lineno, line in enumerate(f, 1):
                 stripped = line.strip()
                 if not stripped or len(stripped) > 2000:

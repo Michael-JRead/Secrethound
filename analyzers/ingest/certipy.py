@@ -18,6 +18,7 @@ Files this adapter claims:
 import os
 import json
 from analyzers.ingest.evidence import Evidence
+from analyzers import filters  # iter-313: open_text() (UTF-16/BOM/CRLF-aware)
 
 
 # ESC1-16 vulnerability tags Certipy reports under '[!] Vulnerabilities'.
@@ -127,7 +128,7 @@ def _enroll_principals(entry):
 
 def parse(path, store, report):
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             raw = fh.read()
     except OSError:
         return 0

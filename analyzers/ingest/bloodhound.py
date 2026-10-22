@@ -369,7 +369,7 @@ def parse(path, store, report):
             return 0
         return n
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             return _load_json_blob(fh.read(), store, report, path)
     except OSError:
         return 0

@@ -37,7 +37,7 @@ def _split_who(who):
 def parse(path, store, report):
     n = 0
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             for ln, line in enumerate(fh, 1):
                 line = line.strip()
                 m = _PWDUMP.match(line)

@@ -41,7 +41,7 @@ def _value_after_eq(s):
 
 def analyze(path, report):
     try:
-        with open(path, "r", errors="ignore") as f:
+        with filters.open_text(path) as f:
             for lineno, line in enumerate(f, 1):
                 if not SECRET_HINT.search(line):
                     continue

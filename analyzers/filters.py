@@ -833,6 +833,27 @@ def read_text(path, max_bytes=None):
             return None
 
 
+def open_text(path, max_bytes=None):
+    """iter-313: drop-in replacement for `open(path, "r", errors="ignore")`
+    for LOOT files. Returns a file-like io.StringIO over read_text(), so it
+    decodes UTF-8/UTF-8-BOM/UTF-16LE/BE/UTF-32 and normalises CRLF exactly
+    like the multi-line passes see the file.
+
+    Why: Windows PowerShell 5.1 (the default on most exam targets) writes
+    `cmd > out.txt` as UTF-16LE with a BOM. Every single-line analyzer used a
+    plain UTF-8 open(), so a UTF-16 capture of secretsdump / web.config /
+    whoami /all lost its hashes, creds and chains entirely.
+
+    Contract kept identical to open(): raises OSError when the file can't be
+    read, supports `with`, iteration (lines keep their '\\n'), read(),
+    readline(), readlines()."""
+    import io
+    t = read_text(path, max_bytes=max_bytes)
+    if t is None:
+        raise OSError(f"cannot read {path}")
+    return io.StringIO(t)
+
+
 def _norm_eol(text):
     """iter-311: normalise line endings exactly like Python's universal-newline
     text mode (CRLF -> LF, then lone CR -> LF).

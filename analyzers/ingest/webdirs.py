@@ -5,6 +5,8 @@ exposed .git/.env/backups, admin panels, basic-auth realms.
 import os
 import re
 import json
+
+from analyzers import filters  # iter-313: open_text() (UTF-16/BOM/CRLF-aware)
 from analyzers.ingest.evidence import Evidence
 
 _GOBUSTER = re.compile(r'^(/\S+)\s+\(Status:\s*(\d{3})\)')
@@ -53,7 +55,7 @@ def _flag(store, report, url, status, src):
 def parse(path, store, report):
     n = 0
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             raw = fh.read()
     except OSError:
         return 0

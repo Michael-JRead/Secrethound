@@ -119,3 +119,49 @@ class MultilineDetectorsOnCRLF(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Utf16LootParity(unittest.TestCase):
+    """iter-313: Windows PowerShell 5.1 `cmd > out.txt` writes UTF-16LE+BOM.
+    Every single-line analyzer used a UTF-8 open(), so such captures lost
+    their hashes, creds and chains. The full CLI must now report the same
+    findings for UTF-8, UTF-16LE+BOM and UTF-16BE+BOM copies of one file."""
+
+    CAPTURE = ("PS C:\\> type C:\\inetpub\\wwwroot\\web.config\r\n"
+               "<add name=\"db\" connectionString=\"Server=sql01;User ID=sa;"
+               "Password=Sup3rS3cret!\" />\r\n"
+               "Administrator:500:aad3b435b51404eeaad3b435b51404ee:"
+               "e19ccf75ee54e06b06a5907af13cef42:::\r\n")
+
+    def _cli_findings(self, raw):
+        from tests._helpers import run_cli
+        import shutil
+        d = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(d, "loot.txt"), "wb") as fh:
+                fh.write(raw)
+            out = run_cli([d, "--no-color", "--quiet", "--no-inventory", "--no-pot"])
+            text = out[1] if isinstance(out, tuple) else str(out)
+            return sorted({ln.split("  ", 1)[-1].strip()[:60]
+                           for ln in text.splitlines()
+                           if "loot.txt:" in ln and ln.strip().startswith("[")})
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_open_text_contract(self):
+        p = _write(b"\xff\xfe" + "a\r\nb\r\n".encode("utf-16-le"))
+        try:
+            with filters.open_text(p) as fh:
+                self.assertEqual(list(fh), ["a\n", "b\n"])
+            with self.assertRaises(OSError):
+                filters.open_text(p + ".missing")
+        finally:
+            os.unlink(p)
+
+    def test_utf16_capture_same_findings_as_utf8(self):
+        base = self._cli_findings(self.CAPTURE.encode("utf-8"))
+        self.assertTrue(any("e19ccf75ee54e06b06a5907af13cef42" in b or "Administrator" in b
+                            or "Sup3rS3cret" in b for b in base), base)
+        for name, raw in (("utf16le", b"\xff\xfe" + self.CAPTURE.encode("utf-16-le")),
+                          ("utf16be", b"\xfe\xff" + self.CAPTURE.encode("utf-16-be"))):
+            self.assertEqual(self._cli_findings(raw), base, name)

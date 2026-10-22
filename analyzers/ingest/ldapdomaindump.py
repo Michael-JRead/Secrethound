@@ -33,7 +33,7 @@ def _first(attrs, key):
 
 def parse(path, store, report):
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             doc = json.load(fh)
     except (ValueError, OSError):
         return 0

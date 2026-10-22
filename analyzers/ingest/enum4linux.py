@@ -40,7 +40,7 @@ def detect(path, head):
 
 def _parse_json(path, store, report):
     try:
-        with open(path) as fh:
+        with filters.open_text(path) as fh:
             doc = json.load(fh)
     except (ValueError, OSError):
         return 0
@@ -95,7 +95,7 @@ def _parse_json(path, store, report):
 def parse(path, store, report):
     head = ""
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             head = fh.read(256)
     except OSError:
         return 0
@@ -103,7 +103,7 @@ def parse(path, store, report):
         return _parse_json(path, store, report)
     n = 0
     try:
-        with open(path, "r", errors="ignore") as fh:
+        with filters.open_text(path) as fh:
             text = fh.read()
     except OSError:
         return 0

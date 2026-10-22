@@ -1,5 +1,6 @@
 """inspect.py - single-file deep-dive (the lootx feature)."""
 import re
+from analyzers import filters  # iter-313: open_text() (UTF-16/BOM/CRLF-aware)
 
 INTEREST = re.compile(
     r'(?i)(pass(?:word|wd)?|pwd|secret|api[_-]?key|token|bind|login|user(?:name)?|'
@@ -16,7 +17,7 @@ def deep_dive(path, use_color=True, limit=80):
     print(c("green", f"\n╔══ DEEP DIVE → {path} ══╗"))
     shown = 0
     try:
-        with open(path, "r", errors="ignore") as f:
+        with filters.open_text(path) as f:
             for lineno, line in enumerate(f, 1):
                 line = line.rstrip("\n")
                 if SKIP.match(line) or not INTEREST.search(line):

@@ -10203,7 +10203,7 @@ def analyze(path, report, store=None):
     except Exception:
         _priv_table_owned = False
     try:
-        with open(path, "r", errors="ignore") as f:
+        with filters.open_text(path) as f:
             for lineno, line in enumerate(f, 1):
                 line = line.rstrip("\n")
                 if SKIP_LINE.match(line):
@@ -11345,7 +11345,7 @@ def analyze(path, report, store=None):
                         # look back up to 5 lines for a user= in same section
                         usr = "root"
                         try:
-                            with open(path, "r", errors="ignore") as _fh:
+                            with filters.open_text(path) as _fh:
                                 _lines = _fh.readlines()
                             for back in range(max(0, lineno - 6), lineno - 1):
                                 um = re.match(r'\s*user\s*=\s*["\']?([^"\'#\r\n]{1,40})',

@@ -66,7 +66,7 @@ def analyze(path, report):
     ftp_user = ftp_pass = None
     ftp_ln = None
     try:
-        with open(path, "r", errors="ignore") as f:
+        with filters.open_text(path) as f:
             for lineno, line in enumerate(f, 1):
                 # FTP/POP/IMAP cleartext protocol commands (tshark / pcap export,
                 # telnet logs). Captured separately from the key=value pairing.

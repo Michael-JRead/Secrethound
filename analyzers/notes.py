@@ -20,7 +20,7 @@ _SKIP = re.compile(r'^\s*(#{1,6}\s|>\s|```|//|/\*)')
 
 def analyze(path, report, store=None):
     try:
-        with open(path, "r", errors="ignore") as f:
+        with filters.open_text(path) as f:
             for lineno, raw in enumerate(f, 1):
                 line = raw.rstrip("\n")
                 if not line.strip():
