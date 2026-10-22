@@ -106,6 +106,26 @@ ALLOWLIST_BINARIES = frozenset({
     "chmod", "echo", "cat", "cut", "export", "cd", "grep", "strings", "file",
     "head", "tail", "sort", "uniq", "tr", "awk", "sed", "python3", "for",
     "tee", "wc", "rev", "tac", "xxd",
+    # iter-312: manual local-privesc tooling + OS built-ins used by the
+    # R-PRIVESC chain (correlate.py). All run by hand on a box the operator
+    # already has a shell on; none spoof, auto-exploit, scan or brute-force.
+    # Potato family = SeImpersonate token abuse (local, single host).
+    "printspoofer.exe", "printspoofer64.exe", "printspoofer32.exe",
+    "godpotato.exe", "godpotato-net4.exe", "godpotato-net35.exe",
+    "godpotato-net2.exe", "juicypotato.exe", "juicypotatong.exe",
+    "sigmapotato.exe", "roguepotato.exe", "sweetpotato.exe",
+    "accesschk.exe", "accesschk64.exe", "seatbelt.exe", "sharpup.exe",
+    "icacls", "sc", "sc.exe", "reg", "reg.exe", "schtasks", "takeown",
+    "robocopy", "msiexec", "whoami", "rundll32", "powershell",
+    "powershell.exe", "cmd", "cmd.exe", "copy", "type", "net.exe",
+    "certutil", "iwr", "wget.exe", "curl.exe", "nc.exe", "nc", "ncat",
+    # Linux local privesc helpers (GTFOBins / build / inspect)
+    "gcc", "cc", "printf", "cp", "mv", "mkdir", "touch", "ln", "ls",
+    "find", "id", "tar", "vim", "vi", "less", "nano", "ltrace",
+    "strace", "ldd", "getcap", "systemctl", "crontab", "docker", "lxc",
+    "mount", "perl", "python", "python2", "ruby", "php", "node", "awk",
+    "openssl", "gdb", "ss", "netstat", "ps", "kill", "pspy32", "pspy64",
+    "showmount", "sudoedit",
     # iter-106: benign privilege-escalation / shell wrappers. Operators paste
     # commands with 'sudo' / 'su' / 'bash -c' prefixes all the time; without
     # these, any doc hint like 'sudo netexec smb ...' fails lint even though

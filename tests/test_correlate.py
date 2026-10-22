@@ -144,7 +144,7 @@ class CorrelatorTests(unittest.TestCase):
         self.assertEqual(r.findings, [])
 
     # 10
-    @unittest.expectedFailure   # D2 has not shipped R-PSEXEC: core/correlate.py never reads
+    # iter-312: R-PSEXEC shipped (was expectedFailure).
     # kind='admin' evidence (only 'host'/'service'), so a confirmed Pwn3d! cred yields no
     # chain. Remove this decorator the moment the rule lands - an unexpected success fails.
     def test_new_d2_rule(self):

